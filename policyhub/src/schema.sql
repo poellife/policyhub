@@ -80,6 +80,20 @@ CREATE INDEX IF NOT EXISTS idx_policies_insured ON policies (insured_id);
 CREATE INDEX IF NOT EXISTS idx_policies_status  ON policies (status);
 CREATE INDEX IF NOT EXISTS idx_policies_due     ON policies (next_premium_due);
 
+-- Additional lives on a policy (survivorship / second-to-die / joint).
+-- The PRIMARY insured stays on policies.insured_id; this table holds the
+-- extra lives, so there is exactly one source of truth for each.
+CREATE TABLE IF NOT EXISTS policy_insureds (
+  id          SERIAL PRIMARY KEY,
+  policy_id   INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+  insured_id  INTEGER NOT NULL REFERENCES insureds(id) ON DELETE CASCADE,
+  role        TEXT NOT NULL DEFAULT 'Joint',  -- Joint | Survivorship | Secondary | Other
+  notes       TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (policy_id, insured_id)
+);
+CREATE INDEX IF NOT EXISTS idx_policy_insureds ON policy_insureds (policy_id);
+
 -- Monthly (or ad-hoc) snapshot of carrier-reported values
 CREATE TABLE IF NOT EXISTS policy_values (
   id                  SERIAL PRIMARY KEY,

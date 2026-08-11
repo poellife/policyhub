@@ -17,6 +17,7 @@ const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
 const consoleErrors = [];
 page.on('console', (m) => m.type() === 'error' && consoleErrors.push(m.text()));
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
+page.on('dialog', (d) => d.accept());   // native confirm() prompts
 
 /* ---------------------------- login ---------------------------- */
 console.log('\nLOGIN');
@@ -65,7 +66,7 @@ await page.click('th[data-key="face_amount"]');
 await page.waitForTimeout(200);
 await page.click('th[data-key="face_amount"]');
 await page.waitForTimeout(300);
-const firstFace = await page.locator('table.data tbody tr:first-child td:nth-child(7)').textContent();
+const firstFace = await page.locator('table.data tbody tr:first-child td:nth-child(9)').textContent();
 check('sort by face works', firstFace.includes('10,000,000'), firstFace.trim());
 
 // search filter
@@ -124,8 +125,38 @@ const ledgerText = await page.locator('table.data').last().textContent();
 check('logged premium appears in ledger', ledgerText.includes('9,999'));
 await page.screenshot({ path: `${SHOTS}/08-policy-servicing.png`, fullPage: true });
 
+// add a second life to the policy (survivorship case)
+await page.click('.tabs button[data-tab="overview"]');
+await page.waitForTimeout(500);
+// Remove any second life left by a previous run, so the test is repeatable
+// (and so the remove path gets exercised too).
+if (await page.locator('[data-remove-life]').count()) {
+  await page.click('[data-remove-life]');
+  await page.waitForTimeout(1000);
+  const afterRemove = await page.locator('table.data tbody tr').count();
+  check('removing a life from a policy works', afterRemove === 1, `${afterRemove} lives`);
+}
+
+await page.click('#addLifeBtn');
+await page.waitForSelector('dialog[open]');
+await page.fill('dialog input[name="insured_last_name"]', 'Castellano');
+await page.fill('dialog input[name="insured_first_name"]', 'Marie');
+await page.fill('dialog input[name="dob"]', '1939-02-11');
+await page.selectOption('dialog select[name="role"]', 'Survivorship');
+await page.click('dialog button[type=submit]');
+await page.waitForTimeout(1100);
+const lives = await page.locator('table.data tbody tr').count();
+check('second life added to policy', lives === 2, `${lives} lives listed`);
+const livesText = await page.locator('table.data').first().textContent();
+check('second life shows its role', livesText.includes('Survivorship') && livesText.includes('Marie'));
+await page.screenshot({ path: `${SHOTS}/16-policy-lives.png`, fullPage: true });
+
 /* --------------------------- servicing ------------------------- */
 console.log('\nSERVICING');
+const strayDialogs = await page.evaluate(() =>
+  [...document.querySelectorAll('dialog')].filter(d => d.open)
+    .map(d => d.querySelector('.dialog-head')?.textContent || '?'));
+check('no dialog left open after edits', strayDialogs.length === 0, strayDialogs.join(', '));
 await page.click('a[href="#/servicing"]');
 await page.waitForSelector('.card');
 await page.waitForTimeout(400);
@@ -139,8 +170,18 @@ await page.click('a[href="#/insureds"]');
 await page.waitForFunction(() => document.querySelector('h1')?.textContent === 'Insureds');
 await page.waitForSelector('table.data tbody tr');
 const ppl = await page.locator('table.data tbody tr').count();
-check('insureds listed', ppl === 12, `${ppl} people`);
+check('insureds listed', ppl >= 12, `${ppl} people`);
 await page.screenshot({ path: `${SHOTS}/10-insureds.png`, fullPage: true });
+
+// edit an insured record
+await page.click('[data-edit-insured]');
+await page.waitForSelector('dialog[open]');
+await page.fill('dialog input[name="le_months"]', '84');
+await page.fill('dialog input[name="state"]', 'MI');
+await page.click('dialog button[type=submit]');
+await page.waitForTimeout(1000);
+const leCell = await page.locator('table.data tbody tr').first().textContent();
+check('editing an insured persists', leCell.includes('84') && leCell.includes('MI'), leCell.trim().slice(0, 60));
 
 /* ---------------------------- import --------------------------- */
 console.log('\nIMPORT');

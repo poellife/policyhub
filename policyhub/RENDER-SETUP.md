@@ -44,10 +44,10 @@ Now open your unzipped `policyhub` folder and **select everything inside it** �
 all the files and folders, including the hidden `.env.example` and `.gitignore` if
 your computer shows them. Drag that selection onto the GitHub upload area.
 
-> **Important:** upload the *contents* of the folder, not the folder itself.
-> When you're done, `package.json` must be visible at the top level of the
-> repository. If you instead see a single `policyhub` folder, delete it and
-> re-upload the contents.
+> **If it lands nested, that's fine.** Ideally `package.json` ends up at the top
+> level of the repository. But if everything lands inside a `policyhub` folder
+> instead, don't re-upload — just set **Root Directory** to `policyhub` in step 6
+> and note which layout you have.
 
 Wait for the files to finish uploading, then click **Commit changes** at the bottom.
 
@@ -99,11 +99,20 @@ Create the database before the web service, so its address is ready to paste.
    | **Name** | `policyhub` (this becomes your web address) |
    | **Region** | **the same region you picked for the database** |
    | **Branch** | `main` |
-   | **Root Directory** | leave blank |
+   | **Root Directory** | `policyhub` — see the note below |
    | **Language** | **Node** |
    | **Build Command** | `npm install` |
    | **Start Command** | `npm start` |
    | **Instance Type** | **Starter ($7/month)** |
+
+   > **Root Directory** depends on how your upload landed. Open your repo on
+   > GitHub and look at the top level:
+   > - If `package.json` sits right at the top → leave Root Directory **blank**.
+   > - If everything is inside a folder called `policyhub` (the breadcrumb reads
+   >   `policyhub / policyhub /`) → set Root Directory to **`policyhub`**.
+   >
+   > Both work. Render runs the build and start commands from whichever directory
+   > you name, so a nested upload needs no fixing beyond this one field.
 
    > If Render preselects **Docker** as the language, change it to **Node**. The
    > repo contains a Dockerfile for portability and Render sometimes picks it up.
@@ -159,8 +168,15 @@ Sign in with the `ADMIN_EMAIL` and `ADMIN_PASSWORD` you set in step 6.
    *Environment* → delete that row → save. It's only read when the database is
    empty, so it's dead weight after first login — and it's your password sitting
    in a settings screen.
-3. **Turn on backups.** Your `policyhub-db` → *Backups* (or *Recovery*) → confirm
-   daily backups are enabled. Do this **before** you import real data.
+3. **Check your backup window.** Paid Render Postgres backs up continuously with
+   no switch to flip — but the *recovery window* depends on your workspace plan:
+   **3 days on Hobby, 7 days on Pro or higher.** Find it under your `policyhub-db`
+   → *Recovery*.
+
+   Three days is short for a book of record. Either upgrade the workspace plan,
+   or take your own periodic export — the **Export CSV** button on the Policies
+   screen captures the policy grid, and `pg_dump` against the External Database
+   URL captures everything including value history and the ledger.
 
 ---
 

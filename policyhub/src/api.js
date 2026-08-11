@@ -190,11 +190,54 @@ router.get('/policies', wrap(async (req, res) => {
 router.get('/policies/:id', wrap(async (req, res) => {
   const { rows } = await q('SELECT * FROM policy_latest WHERE id = $1', [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
-  const [values, txns] = await Promise.all([
+  const [values, txns, extra] = await Promise.all([
     q('SELECT * FROM policy_values WHERE policy_id = $1 ORDER BY as_of_date DESC', [req.params.id]),
     q('SELECT * FROM transactions WHERE policy_id = $1 ORDER BY txn_date DESC, id DESC', [req.params.id]),
+    q(`SELECT pi.id AS link_id, pi.role, pi.notes AS link_notes, i.*
+         FROM policy_insureds pi JOIN insureds i ON i.id = pi.insured_id
+        WHERE pi.policy_id = $1 ORDER BY pi.id`, [req.params.id]),
   ]);
-  res.json({ ...rows[0], values: values.rows, transactions: txns.rows });
+  res.json({
+    ...rows[0],
+    values: values.rows,
+    transactions: txns.rows,
+    additionalInsureds: extra.rows,
+  });
+}));
+
+/* ---- additional lives on a policy (survivorship / joint) ---- */
+
+router.post('/policies/:id/insureds', canEdit, wrap(async (req, res) => {
+  const insuredId = await resolveInsured(req.body);
+  if (!insuredId) return res.status(400).json({ error: 'A last name is required' });
+
+  const { rows: pol } = await q('SELECT insured_id FROM policies WHERE id = $1', [req.params.id]);
+  if (!pol[0]) return res.status(404).json({ error: 'Policy not found' });
+  if (pol[0].insured_id === insuredId)
+    return res.status(409).json({ error: 'That person is already the primary insured on this policy' });
+
+  const role = ['Joint', 'Survivorship', 'Secondary', 'Other'].includes(req.body.role)
+    ? req.body.role : 'Joint';
+  try {
+    const { rows } = await q(
+      `INSERT INTO policy_insureds (policy_id, insured_id, role, notes)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [req.params.id, insuredId, role, str(req.body.notes)]
+    );
+    await audit(req.user.uid, 'policy_insured', rows[0].id, 'create', `policy ${req.params.id}`);
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505')
+      return res.status(409).json({ error: 'That person is already listed on this policy' });
+    throw e;
+  }
+}));
+
+router.delete('/policy-insureds/:id', canEdit, wrap(async (req, res) => {
+  const { rowCount } = await q('DELETE FROM policy_insureds WHERE id = $1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+  await audit(req.user.uid, 'policy_insured', req.params.id, 'delete', '');
+  res.json({ ok: true });
 }));
 
 router.post('/policies', canEdit, wrap(async (req, res) => {

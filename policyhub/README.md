@@ -1,4 +1,4 @@
-# PolicyHub
+# Poel Capital — Policy Portfolio
 
 Life settlement portfolio management — policies, insureds, monthly carrier values,
 premium ledger, servicing calendar, and portfolio analytics.
@@ -15,9 +15,9 @@ leaves your database.
 |---|---|
 | **Dashboard** | Total death benefit, capital invested, cash surrender value, monthly cost-of-insurance run rate, open alerts. Cumulative capital-deployed trend and death benefit by carrier. |
 | **Policies** | Sortable, filterable grid mirroring your existing CRM columns — policy #, insured, DOB, age, carrier, issue date, face, death benefit, owner, premium, AV, CSV, COI, invested, last withdrawal, values-as-of, status. Column totals in the footer. CSV export. |
-| **Policy detail** | Overview, **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
+| **Policy detail** | Overview with **all lives insured** (survivorship / second-to-die policies carry two or more), **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
-| **Insureds** | People, DOB, current age, life expectancy, policy counts, date of death. |
+| **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
 | **Settings** | Password change, user management (admin), and a full activity log. |
 
@@ -36,7 +36,10 @@ leaves your database.
 users            login accounts (bcrypt hashes, roles: admin / editor / viewer)
 funds            owning entity or fund (LCG2, LCG3, …)
 insureds         person: DOB, gender, state, life expectancy, date of death
-policies         carrier, policy #, face, issue date, premium schedule, acquisition
+policies         carrier, policy #, product type (UL/SUL/VUL/IUL/GUL/Term/WL), face,
+                 issue date, premium schedule, acquisition
+policy_insureds  additional lives on a policy (joint / survivorship / secondary);
+                 the primary insured stays on policies.insured_id
 policy_values    one row per as-of date: AV, CSV, COI, death benefit, loan, last withdrawal
 transactions     dated ledger: acquisition cost, premium payment, fee, withdrawal, …
 audit_log        who changed what, when
@@ -99,6 +102,19 @@ Templates are downloadable from the Import screen, or from
 want to try the app before loading real data.
 
 ---
+
+## Design
+
+The interface follows the Poel Capital visual system: monochrome and high
+contrast, hairline rules rather than shadows, mono uppercase micro-labels, and
+pill-shaped actions. Inter Tight is self-hosted from `public/fonts` — no CDN, no
+external requests, consistent with the Content-Security-Policy below.
+
+Charts use a one-hue, two-shade ramp (near-black to mid gray) rather than a
+categorical hue set, since every chart shows at most two related measures. The
+pair clears 3:1 surface contrast in both light and dark, with separation far
+above the legibility floor, and every chart is backed by a data table. Status
+colours stay chromatic — a lapse warning must never depend on gray alone.
 
 ## Security
 

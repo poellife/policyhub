@@ -32,6 +32,7 @@ const state = {
   params: {},
   policies: [],
   filters: { search: '', status: '', fund: '' },
+  insuredSearch: '',
   sort: { key: 'insured_last', dir: 1 },
   funds: [],
 };
@@ -108,7 +109,12 @@ function parseHash() {
   return { route: route || 'dashboard', params: { id } };
 }
 
+export function closeAllDialogs() {
+  document.querySelectorAll('dialog').forEach((d) => { d.close(); d.remove(); });
+}
+
 window.addEventListener('hashchange', () => {
+  closeAllDialogs();
   const { route, params } = parseHash();
   state.route = route;
   state.params = params;
@@ -119,6 +125,13 @@ window.addEventListener('hashchange', () => {
 const go = (hash) => { location.hash = hash; };
 
 /* ------------------------------ shell -------------------------------- */
+
+const PRODUCT_TYPES = ['', 'UL', 'SUL', 'VUL', 'IUL', 'GUL', 'Term', 'WL', 'Other'];
+const PRODUCT_LABELS = {
+  UL: 'Universal Life', SUL: 'Survivorship Universal Life', VUL: 'Variable Universal Life',
+  IUL: 'Indexed Universal Life', GUL: 'Guaranteed Universal Life',
+  Term: 'Term', WL: 'Whole Life', Other: 'Other',
+};
 
 const NAV = [
   ['dashboard', 'Dashboard'],
@@ -133,14 +146,16 @@ function shell(inner) {
   const active = ['policy'].includes(state.route) ? 'policies' : state.route;
   return `
     <div class="topbar">
-      <div class="brand"><span class="brand-mark">P</span> PolicyHub</div>
+      <div class="brand"><span class="brand-mark"></span>Poel Capital</div>
+      <div class="brand-divider"></div>
+      <div class="brand-sub">Policy Portfolio</div>
       <nav class="nav">
         ${NAV.map(([r, label]) =>
           `<a href="#/${r}" class="${active === r ? 'active' : ''}">${label}</a>`).join('')}
       </nav>
       <div class="topbar-right">
         <button class="btn-sm btn-icon" id="themeBtn" title="Toggle light / dark">◐</button>
-        <span class="secondary" style="font-size:13px">${esc(state.user?.name || state.user?.email || '')}</span>
+        <span class="muted" style="font-size:13px">${esc(state.user?.name || state.user?.email || '')}</span>
         <button class="btn-sm" id="logoutBtn">Sign out</button>
       </div>
     </div>
@@ -154,8 +169,9 @@ function loginView() {
   <div class="login-wrap">
     <div class="card login-card">
       <div class="card-body">
-        <div class="login-brand"><span class="brand-mark">P</span> PolicyHub</div>
-        <div class="login-sub">Life settlement portfolio management</div>
+        <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
+        <div class="login-head">Policy<br><span class="dim">Portfolio.</span></div>
+        <div class="login-sub">Life Settlements</div>
         <div id="loginError"></div>
         <form id="loginForm">
           <div class="field">
@@ -166,8 +182,11 @@ function loginView() {
             <label for="password">Password</label>
             <input id="password" name="password" type="password" autocomplete="current-password" required>
           </div>
-          <button class="primary" type="submit" style="width:100%;margin-top:4px">Sign in</button>
+          <button class="primary" type="submit" style="width:100%;margin-top:6px">Sign in</button>
         </form>
+        <div class="login-meta">
+          <span>Index — 001</span><span>Southfield, MI</span>
+        </div>
       </div>
     </div>
   </div>`;
@@ -311,10 +330,13 @@ function alertRow(a) {
 
 const POLICY_COLUMNS = [
   { key: 'policy_number', header: 'Policy #', cell: (p) => `<span class="strong">${esc(p.policy_number)}</span>` },
-  { key: 'insured_last', header: 'Insured', cell: (p) => esc(insuredName(p)) },
+  { key: 'insured_last', header: 'Last name', cell: (p) => esc(p.insured_last || '—') },
+  { key: 'insured_first', header: 'First name', cell: (p) => esc(p.insured_first || '—') },
   { key: 'insured_dob', header: 'DOB', cell: (p) => fmtDate(p.insured_dob) },
   { key: 'age', header: 'Age', cls: 'num', value: (p) => ageFrom(p.insured_dob), cell: (p) => ageFrom(p.insured_dob) ?? '—' },
   { key: 'carrier_name', header: 'Carrier', cell: (p) => esc(p.carrier_name) },
+  { key: 'product_type', header: 'Type', cell: (p) =>
+      p.product_type ? `<span title="${esc(PRODUCT_LABELS[p.product_type] || p.product_type)}">${esc(p.product_type)}</span>` : '<span class="muted">—</span>' },
   { key: 'issue_date', header: 'Issued', cell: (p) => fmtDate(p.issue_date) },
   { key: 'face_amount', header: 'Face', cls: 'num', cell: (p) => money(p.face_amount) },
   { key: 'death_benefit', header: 'Death benefit', cls: 'num', cell: (p) => money(p.death_benefit ?? p.face_amount) },
@@ -398,7 +420,7 @@ async function policiesView() {
                 }</tr>`).join('')}
           </tbody>
           ${rows.length ? `<tfoot><tr>
-            <td colspan="6">Totals — ${rows.length} policies</td>
+            <td colspan="8">Totals — ${rows.length} policies</td>
             <td class="num">${fmtCompact(totals.face)}</td>
             <td class="num">${fmtCompact(totals.db)}</td>
             <td></td>
@@ -434,9 +456,11 @@ async function policiesView() {
       $('#exportBtn').addEventListener('click', () =>
         exportCsv('policies.csv', rows, [
           { header: 'Policy Number', key: 'policy_number' },
-          { header: 'Primary Insured', get: insuredName },
+          { header: 'Last Name', key: 'insured_last' },
+          { header: 'First Name', key: 'insured_first' },
           { header: 'DOB', key: 'insured_dob' },
           { header: 'Carrier Name', key: 'carrier_name' },
+          { header: 'Product Type', key: 'product_type' },
           { header: 'Issue Date', key: 'issue_date' },
           { header: 'Basic Face', key: 'face_amount' },
           { header: 'Death Benefit', key: 'death_benefit' },
@@ -481,7 +505,8 @@ async function policyView() {
           ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}</div>
       </div>
       <div class="spacer"></div>
-      <button id="editBtn">Edit policy</button>
+      ${p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
+      <button class="primary" id="editBtn">Edit policy</button>
     </div>
 
     <div class="kpi-row">
@@ -515,6 +540,10 @@ async function policyView() {
       document.querySelectorAll('.tabs button').forEach((b) =>
         b.addEventListener('click', () => { detailTab = b.dataset.tab; render(); }));
       $('#editBtn').addEventListener('click', () => openPolicyDialog(p));
+      $('#editInsuredBtn')?.addEventListener('click', async () => {
+        const ins = await api(`/insureds/${p.insured_id}`);
+        openInsuredDialog(ins);
+      });
       wireDetailTab(p, values);
     },
   };
@@ -529,44 +558,112 @@ function renderDetailTab(p, values, monthsCovered) {
 
 function overviewTab(p) {
   const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+  const dash = '<span class="muted">—</span>';
+  const extras = p.additionalInsureds || [];
+
+  const lifeRow = (i, isPrimary, linkId) => `
+    <tr>
+      <td class="strong">${esc(i.last_name || '—')}</td>
+      <td>${esc(i.first_name || '')}</td>
+      <td>${isPrimary
+            ? '<span class="badge inforce"><span class="dot"></span>Primary</span>'
+            : `<span class="badge">${esc(i.role || 'Joint')}</span>`}</td>
+      <td>${fmtDate(i.dob)}</td>
+      <td class="num">${ageFrom(i.dob) ?? '—'}</td>
+      <td class="num">${i.le_months ?? '—'}</td>
+      <td>${i.date_of_death ? fmtDate(i.date_of_death) : dash}</td>
+      <td>
+        <button class="btn-sm" data-edit-life="${i.id}">Edit</button>
+        ${isPrimary ? '' : `<button class="btn-sm btn-danger" data-remove-life="${linkId}">Remove</button>`}
+      </td>
+    </tr>`;
+
   return `
+  <div class="card">
+    <div class="card-head"><h2>Lives insured</h2><div class="spacer"></div>
+      <button class="btn-sm primary" id="addLifeBtn">Add insured</button></div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>Last name</th><th>First name</th><th>Role</th><th>Date of birth</th>
+          <th class="num">Age</th><th class="num">LE (months)</th><th>Date of death</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${p.insured_id
+            ? lifeRow({ id: p.insured_id, last_name: p.insured_last, first_name: p.insured_first,
+                        dob: p.insured_dob, le_months: p.le_months, date_of_death: p.date_of_death },
+                      true)
+            : '<tr><td colspan="8"><div class="empty">No insured recorded on this policy.</div></td></tr>'}
+          ${extras.map((i) => lifeRow(i, false, i.link_id)).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${extras.length ? '' : `<div class="card-body" style="border-top:1px solid var(--grid);padding-top:13px">
+      <span class="muted" style="font-size:12.5px">Survivorship and second-to-die policies cover two lives —
+      add the second one here.</span></div>`}
+  </div>
+
   <div class="grid-2">
     <div class="card">
       <div class="card-head"><h2>Policy</h2></div>
       <div class="card-body"><dl class="kv">
         ${row('Policy number', esc(p.policy_number))}
-        ${row('Unique case ID', esc(p.unique_case_id) || '<span class="muted">—</span>')}
+        ${row('Unique case ID', esc(p.unique_case_id) || dash)}
         ${row('Carrier', esc(p.carrier_name))}
-        ${row('Plan name', esc(p.plan_name) || '<span class="muted">—</span>')}
-        ${row('Product type', esc(p.product_type) || '<span class="muted">—</span>')}
+        ${row('Plan name', esc(p.plan_name) || dash)}
+        ${row('Product type', p.product_type
+            ? `${esc(p.product_type)} <span class="muted">${esc(PRODUCT_LABELS[p.product_type] || '')}</span>`
+            : dash)}
         ${row('Issue date', fmtDate(p.issue_date))}
-        ${row('Issue age', p.issue_age ?? '<span class="muted">—</span>')}
-        ${row('Issue state', esc(p.issue_state) || '<span class="muted">—</span>')}
+        ${row('Issue age', p.issue_age ?? dash)}
+        ${row('Issue state', esc(p.issue_state) || dash)}
         ${row('Face amount', money(p.face_amount))}
         ${row('Owner / fund', esc(p.fund_code || '—'))}
-        ${row('Owner account', esc(p.owner_account) || '<span class="muted">—</span>')}
-        ${row('Beneficiary', esc(p.beneficiary) || '<span class="muted">—</span>')}
+        ${row('Owner account', esc(p.owner_account) || dash)}
+        ${row('Beneficiary', esc(p.beneficiary) || dash)}
         ${row('Status', statusBadge(p.status))}
       </dl></div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Insured &amp; acquisition</h2></div>
+      <div class="card-head"><h2>Acquisition &amp; premium</h2></div>
       <div class="card-body"><dl class="kv">
-        ${row('Insured', esc(insuredName(p)))}
-        ${row('Date of birth', fmtDate(p.insured_dob))}
-        ${row('Current age', ageFrom(p.insured_dob) ?? '<span class="muted">—</span>')}
-        ${row('Life expectancy', p.le_months ? `${p.le_months} months` : '<span class="muted">—</span>')}
-        ${row('Date of death', p.date_of_death ? fmtDate(p.date_of_death) : '<span class="muted">—</span>')}
         ${row('Acquired', fmtDate(p.acquisition_date))}
         ${row('Acquisition cost', money(p.acquisition_cost))}
         ${row('Total invested', money(p.total_invested))}
         ${row('Premium required', `${money(p.premium_required)} <span class="muted">${esc(p.premium_mode || '')}</span>`)}
         ${row('Next premium due', fmtDate(p.next_premium_due))}
+        ${row('Grace period', `${p.grace_period_days || 61} days`)}
+        ${row('Values as of', fmtDate(p.value_as_of))}
       </dl>
-      ${p.notes ? `<div style="margin-top:14px"><label>Notes</label><div class="secondary">${esc(p.notes)}</div></div>` : ''}
+      ${p.notes ? `<div style="margin-top:16px"><label>Notes</label><div class="secondary">${esc(p.notes)}</div></div>` : ''}
       </div>
     </div>
   </div>`;
+}
+
+function openAddLifeDialog(p) {
+  const body = `
+    <div class="field-row">
+      ${inputField('Last name *', 'insured_last_name', '', 'text', 'required')}
+      ${inputField('First name', 'insured_first_name')}
+      ${inputField('Date of birth', 'dob', '', 'date')}
+    </div>
+    <div class="field-row">
+      ${selectField('Role', 'role', 'Joint', ['Joint', 'Survivorship', 'Secondary', 'Other'])}
+      ${selectField('Gender', 'gender', '', ['', 'M', 'F'])}
+      ${inputField('Life expectancy (months)', 'le_months', '', 'number')}
+    </div>
+    <div class="field">
+      <span class="muted" style="font-size:12px">
+        Matched against existing insureds on last name + first name + date of birth.
+        If no one matches, a new insured record is created.
+      </span>
+    </div>`;
+
+  openDialog('Add insured to this policy', body, async (v) => {
+    await api(`/policies/${p.id}/insureds`, { method: 'POST', body: v });
+    toast('Insured added to policy');
+  }, 'Add insured');
 }
 
 function valuesTab(p, values) {
@@ -713,6 +810,22 @@ function servicingTab(p, monthsCovered) {
 }
 
 function wireDetailTab(p, values) {
+  if (detailTab === 'overview') {
+    $('#addLifeBtn')?.addEventListener('click', () => openAddLifeDialog(p));
+    document.querySelectorAll('[data-edit-life]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const ins = await api(`/insureds/${b.dataset.editLife}`);
+        openInsuredDialog(ins);
+      }));
+    document.querySelectorAll('[data-remove-life]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (!confirm('Remove this person from the policy? The insured record itself is kept.')) return;
+        await api(`/policy-insureds/${b.dataset.removeLife}`, { method: 'DELETE' });
+        toast('Removed from policy');
+        render();
+      }));
+  }
+
   if (detailTab === 'values') {
     const points = values.map((v) => ({
       x: v.as_of_date,
@@ -793,6 +906,8 @@ function openDialog(title, bodyHtml, onSubmit, submitLabel = 'Save') {
     </form>`;
   document.body.appendChild(dlg);
   dlg.showModal();
+  // Escape / backdrop dismissal should also drop it from the DOM.
+  dlg.addEventListener('close', () => dlg.remove());
   $('#dlgCancel', dlg).addEventListener('click', () => { dlg.close(); dlg.remove(); });
   $('#dlgForm', dlg).addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -826,10 +941,18 @@ function openPolicyDialog(p = null) {
       ${inputField('Carrier *', 'carrier_name', p?.carrier_name, 'text', 'required')}
     </div>
     <div class="field-row">
-      ${inputField('Insured name (Last, First)', 'insured_name', p ? insuredName(p) : '')}
+      ${inputField('Insured last name', 'insured_last_name', p?.insured_last)}
+      ${inputField('Insured first name', 'insured_first_name', p?.insured_first)}
       ${inputField('Date of birth', 'dob', dateInput(p?.insured_dob), 'date')}
     </div>
+    <div class="field" style="margin-top:-4px">
+      <span class="muted" style="font-size:12px">
+        Matches an existing insured on last name + first name + date of birth, or creates a new one.
+        To correct spelling or add life-expectancy details, use <strong>Edit insured</strong> instead.
+      </span>
+    </div>
     <div class="field-row">
+      ${selectField('Product type', 'product_type', p?.product_type || '', PRODUCT_TYPES)}
       ${inputField('Face amount', 'face_amount', p?.face_amount, 'number', 'step=0.01')}
       ${inputField('Owner / fund code', 'fund_code', p?.fund_code)}
     </div>
@@ -855,6 +978,39 @@ function openPolicyDialog(p = null) {
     if (p) await api(`/policies/${p.id}`, { method: 'PUT', body: v });
     else await api('/policies', { method: 'POST', body: v });
     toast(p ? 'Policy updated' : 'Policy created');
+  });
+}
+
+function openInsuredDialog(ins, onSaved) {
+  const isNew = !ins?.id;
+  const body = `
+    <div class="field-row">
+      ${inputField('Last name *', 'last_name', ins?.last_name ?? ins?.insured_last, 'text', 'required')}
+      ${inputField('First name', 'first_name', ins?.first_name ?? ins?.insured_first)}
+    </div>
+    ${inputField('Display name', 'display_name', ins?.display_name, 'text',
+      'placeholder="Optional — for joint or survivorship policies, e.g. Dean &amp; Cheryl Wolfe"')}
+    <div class="field-row">
+      ${inputField('Date of birth', 'dob', dateInput(ins?.dob ?? ins?.insured_dob), 'date')}
+      ${selectField('Gender', 'gender', ins?.gender || '', ['', 'M', 'F', 'Joint'])}
+      ${inputField('State', 'state', ins?.state)}
+    </div>
+    <div class="field-row">
+      ${selectField('Smoker', 'smoker', ins?.smoker || '', ['', 'Non-Smoker', 'Smoker', 'Unknown'])}
+      ${inputField('Life expectancy (months)', 'le_months', ins?.le_months, 'number')}
+      ${inputField('LE provider', 'le_provider', ins?.le_provider)}
+    </div>
+    <div class="field-row">
+      ${inputField('LE report date', 'le_date', dateInput(ins?.le_date), 'date')}
+      ${inputField('Date of death', 'date_of_death', dateInput(ins?.date_of_death), 'date')}
+    </div>
+    <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(ins?.notes || '')}</textarea></div>`;
+
+  openDialog(isNew ? 'New insured' : 'Edit insured', body, async (v) => {
+    if (isNew) await api('/insureds', { method: 'POST', body: v });
+    else await api(`/insureds/${ins.id}`, { method: 'PUT', body: v });
+    toast(isNew ? 'Insured created' : 'Insured updated');
+    onSaved?.();
   });
 }
 
@@ -957,29 +1113,77 @@ async function servicingView() {
 /* ----------------------------- insureds ------------------------------ */
 
 async function insuredsView() {
-  const rows = await api('/insureds');
+  const rows = await api(`/insureds?search=${encodeURIComponent(state.insuredSearch)}`);
   const html = `
-    <div class="page-head"><div><h1>Insureds</h1>
-      <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div></div>
+    <div class="page-head">
+      <div><h1>Insureds</h1>
+        <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div>
+      <div class="spacer"></div>
+      <button id="exportInsuredsBtn">Export CSV</button>
+      <button class="primary" id="newInsuredBtn">New insured</button>
+    </div>
+
+    <div class="toolbar">
+      <input class="grow" id="insuredSearch" placeholder="Search by name…" value="${esc(state.insuredSearch)}">
+    </div>
+
     <div class="card"><div class="table-wrap">
       <table class="data">
-        <thead><tr><th>Name</th><th>Date of birth</th><th class="num">Age</th><th>State</th>
-          <th class="num">LE (months)</th><th class="num">Policies</th><th>Date of death</th></tr></thead>
+        <thead><tr>
+          <th>Last name</th><th>First name</th><th>Display name</th>
+          <th>Date of birth</th><th class="num">Age</th><th>Gender</th><th>State</th>
+          <th class="num">LE (months)</th><th class="num">Policies</th>
+          <th>Date of death</th><th></th>
+        </tr></thead>
         <tbody>${rows.length === 0
-          ? '<tr><td colspan="7"><div class="empty">No insureds yet.</div></td></tr>'
+          ? '<tr><td colspan="11"><div class="empty">No insureds yet. They are created automatically when you import policies.</div></td></tr>'
           : rows.map((i) => `<tr>
-              <td class="strong">${esc(i.display_name || `${i.first_name} ${i.last_name}`)}</td>
+              <td class="strong">${esc(i.last_name || '—')}</td>
+              <td>${esc(i.first_name || '—')}</td>
+              <td class="secondary">${esc(i.display_name || '')}</td>
               <td>${fmtDate(i.dob)}</td>
               <td class="num">${ageFrom(i.dob) ?? '—'}</td>
+              <td>${esc(i.gender || '—')}</td>
               <td>${esc(i.state || '—')}</td>
               <td class="num">${i.le_months ?? '—'}</td>
               <td class="num">${i.policy_count}</td>
               <td>${i.date_of_death ? fmtDate(i.date_of_death) : '<span class="muted">—</span>'}</td>
+              <td><button class="btn-sm" data-edit-insured="${i.id}">Edit</button></td>
             </tr>`).join('')}
         </tbody>
       </table>
     </div></div>`;
-  return { html };
+
+  return {
+    html,
+    after: () => {
+      let timer;
+      $('#insuredSearch').addEventListener('input', (e) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { state.insuredSearch = e.target.value; render(); }, 250);
+      });
+      $('#newInsuredBtn').addEventListener('click', () => openInsuredDialog(null));
+      document.querySelectorAll('[data-edit-insured]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const ins = await api(`/insureds/${b.dataset.editInsured}`);
+          openInsuredDialog(ins);
+        }));
+      $('#exportInsuredsBtn').addEventListener('click', () =>
+        exportCsv('insureds.csv', rows, [
+          { header: 'Last Name', key: 'last_name' },
+          { header: 'First Name', key: 'first_name' },
+          { header: 'Display Name', key: 'display_name' },
+          { header: 'DOB', key: 'dob' },
+          { header: 'Age', get: (r) => ageFrom(r.dob) ?? '' },
+          { header: 'Gender', key: 'gender' },
+          { header: 'State', key: 'state' },
+          { header: 'LE Months', key: 'le_months' },
+          { header: 'LE Provider', key: 'le_provider' },
+          { header: 'Policies', key: 'policy_count' },
+          { header: 'Date Of Death', key: 'date_of_death' },
+        ]));
+    },
+  };
 }
 
 /* ------------------------------ import ------------------------------- */
