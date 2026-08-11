@@ -1,0 +1,41 @@
+import { chromium } from 'playwright';
+const B='http://localhost:3100', S='/home/claude/shots';
+const errs=[]; const fails=[];
+const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
+const br=await chromium.launch({executablePath:'/opt/pw-browsers/chromium'});
+const p=await br.newPage({viewport:{width:1400,height:950}});
+p.on('pageerror',e=>errs.push(e.message));
+p.on('console',m=>m.type()==='error'&&!/401/.test(m.text())&&errs.push(m.text()));
+await p.goto(B); await p.waitForSelector('#loginForm');
+await p.fill('#email','test@x.com'); await p.fill('#password','testtesttest');
+await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeout:10000});
+await p.waitForTimeout(600);
+check('empty dashboard renders', await p.isVisible('.kpi-row'));
+await p.screenshot({path:`${S}/e1-empty-dashboard.png`,fullPage:true});
+for (const [route,label] of [['policies','Policies'],['servicing','Servicing calendar'],['insureds','Insureds'],['import','Import data'],['settings','Settings']]) {
+  await p.click(`a[href="#/${route}"]`);
+  await p.waitForFunction(t=>document.querySelector('h1')?.textContent===t,label,{timeout:8000});
+  await p.waitForTimeout(400);
+  check(`empty ${route} renders`, await p.isVisible('h1'));
+}
+await p.screenshot({path:`${S}/e2-empty-settings.png`,fullPage:true});
+// create a policy by hand on an empty DB
+await p.click('a[href="#/policies"]');
+await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Policies');
+await p.click('#newPolicyBtn'); await p.waitForSelector('dialog[open]');
+await p.fill('dialog input[name="policy_number"]','TEST-001');
+await p.fill('dialog input[name="carrier_name"]','Test Carrier');
+await p.fill('dialog input[name="insured_name"]','Doe, Jane');
+await p.fill('dialog input[name="dob"]','1940-05-05');
+await p.fill('dialog input[name="face_amount"]','1000000');
+await p.fill('dialog input[name="premium_required"]','12000');
+await p.click('dialog button[type=submit]');
+await p.waitForTimeout(1200);
+const rows=await p.locator('table.data tbody tr').count();
+check('manual policy creation works', rows===1, `${rows} row`);
+await p.screenshot({path:`${S}/e3-first-policy.png`,fullPage:true});
+console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
+check('no page errors', errs.length===0);
+await br.close();
+console.log(fails.length?`\nFAILED: ${fails.join(', ')}`:'\nEMPTY-STATE CHECKS PASSED');
+process.exit(fails.length?1:0);
