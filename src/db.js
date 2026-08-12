@@ -53,9 +53,12 @@ export async function initDb() {
     }
   }
 
-  // A default fund so imports without a fund column still work.
+  // The two owning entities, so imports and the policy form have them from the
+  // start. Set the exact legal names in Settings → Owner entities.
   await pool.query(
-    `INSERT INTO funds (code, name) VALUES ('LCG2','Life Capital Group 2')
+    `INSERT INTO funds (code, name) VALUES
+       ('LCG1','Life Capital Group 1'),
+       ('LCG2','Life Capital Group 2')
      ON CONFLICT (code) DO NOTHING`
   );
 }

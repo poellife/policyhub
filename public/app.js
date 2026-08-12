@@ -3,6 +3,7 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtCompact, seriesColor, hideTip } from './charts.js';
+import { reportsView } from './reports.js';
 
 /* ------------------------------- api --------------------------------- */
 
@@ -138,6 +139,7 @@ const NAV = [
   ['policies', 'Policies'],
   ['servicing', 'Servicing'],
   ['insureds', 'Insureds'],
+  ['reports', 'Reports'],
   ['import', 'Import'],
   ['settings', 'Settings'],
 ];
@@ -505,6 +507,7 @@ async function policyView() {
           ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}</div>
       </div>
       <div class="spacer"></div>
+      ${state.user.role === 'admin' ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
       ${p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
       <button class="primary" id="editBtn">Edit policy</button>
     </div>
@@ -540,6 +543,7 @@ async function policyView() {
       document.querySelectorAll('.tabs button').forEach((b) =>
         b.addEventListener('click', () => { detailTab = b.dataset.tab; render(); }));
       $('#editBtn').addEventListener('click', () => openPolicyDialog(p));
+      $('#deletePolicyBtn')?.addEventListener('click', () => openDeletePolicyDialog(p));
       $('#editInsuredBtn')?.addEventListener('click', async () => {
         const ins = await api(`/insureds/${p.insured_id}`);
         openInsuredDialog(ins);
@@ -913,10 +917,14 @@ function openDialog(title, bodyHtml, onSubmit, submitLabel = 'Save') {
     e.preventDefault();
     const btn = $('button[type=submit]', dlg);
     btn.disabled = true;
+    const hashBefore = location.hash;
     try {
       await onSubmit(formValues(e.target));
       dlg.close(); dlg.remove();
-      render();
+      // If the handler navigated (e.g. after deleting the record being viewed),
+      // the hashchange listener re-renders — rendering here too would refetch
+      // the row that no longer exists.
+      if (location.hash === hashBefore) render();
     } catch (err) {
       $('#dlgError', dlg).innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
       btn.disabled = false;
@@ -934,7 +942,8 @@ const selectField = (label, name, value, options) =>
     ${options.map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}
    </select></div>`;
 
-function openPolicyDialog(p = null) {
+async function openPolicyDialog(p = null) {
+  if (!state.funds.length) state.funds = await api('/funds');
   const body = `
     <div class="field-row">
       ${inputField('Policy number *', 'policy_number', p?.policy_number, 'text', 'required')}
@@ -954,7 +963,21 @@ function openPolicyDialog(p = null) {
     <div class="field-row">
       ${selectField('Product type', 'product_type', p?.product_type || '', PRODUCT_TYPES)}
       ${inputField('Face amount', 'face_amount', p?.face_amount, 'number', 'step=0.01')}
-      ${inputField('Owner / fund code', 'fund_code', p?.fund_code)}
+      <div class="field">
+        <label>Owner entity</label>
+        <select name="fund_code" id="fundSelect">
+          <option value="">— No owner —</option>
+          ${state.funds.map((f) => `<option value="${esc(f.code)}" ${p?.fund_code === f.code ? 'selected' : ''}>
+            ${esc(f.code)}${f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+          <option value="__new__">+ Add a new entity…</option>
+        </select>
+      </div>
+    </div>
+    <div class="field" id="newFundWrap" style="display:none">
+      <div class="field-row">
+        ${inputField('New entity code', 'new_fund_code', '', 'text', 'placeholder="e.g. LCG4"')}
+        ${inputField('Full legal name', 'new_fund_name', '', 'text', 'placeholder="Optional"')}
+      </div>
     </div>
     <div class="field-row">
       ${inputField('Issue date', 'issue_date', dateInput(p?.issue_date), 'date')}
@@ -974,11 +997,88 @@ function openPolicyDialog(p = null) {
     </div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(p?.notes || '')}</textarea></div>`;
 
-  openDialog(p ? 'Edit policy' : 'New policy', body, async (v) => {
+  const dlg = openDialog(p ? 'Edit policy' : 'New policy', body, async (v) => {
+    if (v.fund_code === '__new__') {
+      const code = String(v.new_fund_code || '').trim();
+      if (!code) throw new Error('Give the new entity a code, or pick an existing owner');
+      await api('/funds', { method: 'POST', body: { code, name: v.new_fund_name } });
+      state.funds = await api('/funds');
+      v.fund_code = code;
+    }
+    delete v.new_fund_code; delete v.new_fund_name;
     if (p) await api(`/policies/${p.id}`, { method: 'PUT', body: v });
     else await api('/policies', { method: 'POST', body: v });
     toast(p ? 'Policy updated' : 'Policy created');
   });
+
+  const sel = $('#fundSelect', dlg);
+  sel.addEventListener('change', () => {
+    const isNew = sel.value === '__new__';
+    $('#newFundWrap', dlg).style.display = isNew ? '' : 'none';
+    if (isNew) $('input[name=new_fund_code]', dlg).focus();
+  });
+}
+
+function openEntityDialog(f, onSaved) {
+  const isNew = !f?.id;
+  const body = `
+    <div class="field-row">
+      ${inputField('Code *', 'code', f?.code, 'text', 'required placeholder="e.g. LCG2"')}
+      ${inputField('Full legal name', 'name', f?.name, 'text', 'placeholder="e.g. Life Capital Group 2, LLC"')}
+    </div>
+    <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(f?.notes || '')}</textarea></div>
+    <span class="muted" style="font-size:12px">
+      The code is what appears in the policy grid and reports. Renaming it updates every
+      policy that points at this entity — nothing is reassigned.
+    </span>`;
+
+  openDialog(isNew ? 'New owner entity' : 'Edit owner entity', body, async (v) => {
+    if (isNew) await api('/funds', { method: 'POST', body: v });
+    else await api(`/funds/${f.id}`, { method: 'PUT', body: v });
+    state.funds = await api('/funds');
+    toast(isNew ? 'Entity created' : 'Entity updated');
+    onSaved?.();
+  }, isNew ? 'Create entity' : 'Save');
+}
+
+function openDeletePolicyDialog(p) {
+  const vals = (p.values || []).length;
+  const txns = (p.transactions || []).length;
+  const lives = (p.additionalInsureds || []).length;
+
+  const body = `
+    <p style="margin:0 0 14px;font-size:14px">
+      This permanently deletes <strong>${esc(p.policy_number)}</strong>
+      (${esc(p.carrier_name)}) and everything recorded against it.
+    </p>
+    <table class="data" style="margin-bottom:16px">
+      <tbody>
+        <tr><td>Insured</td><td class="strong">${esc(insuredName(p))}</td></tr>
+        <tr><td>Death benefit</td><td class="strong">${money(p.death_benefit ?? p.face_amount)}</td></tr>
+        <tr><td>Value snapshots</td><td class="strong">${vals}</td></tr>
+        <tr><td>Ledger entries</td><td class="strong">${txns}</td></tr>
+        ${lives ? `<tr><td>Additional lives</td><td class="strong">${lives}</td></tr>` : ''}
+        <tr><td>Capital invested</td><td class="strong">${money(p.total_invested)}</td></tr>
+      </tbody>
+    </table>
+    <div class="error-box" style="margin-bottom:16px">
+      This cannot be undone. The value history and premium ledger go with it.
+    </div>
+    <p style="margin:0 0 14px;font-size:13px" class="secondary">
+      If the policy ended rather than being entered by mistake, use
+      <strong>Edit policy</strong> and set the status to Sold, Matured or Lapsed instead —
+      that drops it out of the dashboard and reports but keeps the history.
+    </p>
+    ${inputField(`Type <b>${esc(p.policy_number)}</b> to confirm`, 'confirm', '', 'text',
+      'required autocomplete=off')}`;
+
+  openDialog('Delete policy', body, async (v) => {
+    if (String(v.confirm || '').trim() !== String(p.policy_number))
+      throw new Error('That does not match the policy number');
+    await api(`/policies/${p.id}`, { method: 'DELETE', body: { confirm: v.confirm } });
+    toast(`Deleted ${p.policy_number}`);
+    location.hash = '#/policies';
+  }, 'Delete permanently');
 }
 
 function openInsuredDialog(ins, onSaved) {
@@ -1341,10 +1441,13 @@ async function handleFile(file) {
 
 async function settingsView() {
   const isAdmin = state.user.role === 'admin';
-  const [users, audit] = await Promise.all([
+  const canEdit = ['admin', 'editor'].includes(state.user.role);
+  const [users, audit, funds] = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
+    api('/funds'),
   ]);
+  state.funds = funds;
 
   const html = `
     <div class="page-head"><div><h1>Settings</h1>
@@ -1378,6 +1481,29 @@ async function settingsView() {
       </div>` : ''}
     </div>
 
+    <div class="card">
+      <div class="card-head"><h2>Owner entities</h2><div class="spacer"></div>
+        ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Code</th><th>Full legal name</th><th class="num">Policies</th>
+          <th class="num">Death benefit</th><th class="num">Invested</th><th>Notes</th><th></th></tr></thead>
+        <tbody>${funds.length === 0
+          ? '<tr><td colspan="7"><div class="empty">No entities yet.</div></td></tr>'
+          : funds.map((f) => `<tr>
+              <td class="strong">${esc(f.code)}</td>
+              <td>${esc(f.name && f.name !== f.code ? f.name : '')}</td>
+              <td class="num">${f.policy_count}</td>
+              <td class="num">${fmtCompact(f.total_death_benefit)}</td>
+              <td class="num">${fmtCompact(f.total_invested)}</td>
+              <td class="secondary">${esc(f.notes || '')}</td>
+              <td>${canEdit ? `<button class="btn-sm" data-edit-entity="${f.id}">Edit</button>
+                   <button class="btn-sm btn-danger" data-del-entity="${f.id}" data-code="${esc(f.code)}"
+                     ${f.policy_count ? 'disabled title="Reassign its policies first"' : ''}>Delete</button>` : ''}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>
+
     ${isAdmin ? `
     <div class="card">
       <div class="card-head"><h2>Activity log</h2><div class="spacer"></div>
@@ -1407,6 +1533,21 @@ async function settingsView() {
           $('#pwMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
         }
       });
+      $('#addEntityBtn')?.addEventListener('click', () => openEntityDialog(null, render));
+      document.querySelectorAll('[data-edit-entity]').forEach((b) =>
+        b.addEventListener('click', () =>
+          openEntityDialog(funds.find((f) => f.id === Number(b.dataset.editEntity)), render)));
+      document.querySelectorAll('[data-del-entity]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          if (!confirm(`Delete the entity "${b.dataset.code}"?`)) return;
+          try {
+            await api(`/funds/${b.dataset.delEntity}`, { method: 'DELETE' });
+            state.funds = await api('/funds');
+            toast('Entity deleted');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
+
       $('#addUserBtn')?.addEventListener('click', () => {
         openDialog('Add user', `
           ${inputField('Email *', 'email', '', 'email', 'required')}
@@ -1430,6 +1571,7 @@ const VIEWS = {
   policy: policyView,
   servicing: servicingView,
   insureds: insuredsView,
+  reports: () => reportsView(api, state),
   import: importView,
   settings: settingsView,
 };
