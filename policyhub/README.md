@@ -19,7 +19,23 @@ leaves your database.
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
-| **Settings** | Password change, user management (admin), and a full activity log. |
+| **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
+| **Settings** | Password change, **owner entities**, user management (admin), and a full activity log. |
+
+**Owner entities** are managed in Settings — create, rename, annotate, and see each
+one's policy count, death benefit and capital invested. A policy's owner is chosen
+from a dropdown on the policy form, which also offers inline creation so a new
+entity can be added without leaving the dialog. Renaming an entity updates every
+policy pointing at it; deleting one is refused while any policy still references
+it, so policies can't be orphaned.
+
+**Deleting a policy** is admin-only and requires typing the policy number to confirm.
+It cascades to the policy's value snapshots, ledger entries and additional-insured
+links, so the audit entry written beforehand captures the policy number, carrier,
+insured, face amount, capital invested and the number of rows destroyed — the
+activity log is the only record that survives. Setting the status to Sold, Matured
+or Lapsed is the non-destructive alternative: it drops the policy out of the
+dashboard, alerts and reports while keeping its history.
 
 ### Alert rules
 
@@ -34,7 +50,7 @@ leaves your database.
 
 ```
 users            login accounts (bcrypt hashes, roles: admin / editor / viewer)
-funds            owning entity or fund (LCG2, LCG3, …)
+funds            owning entity: code, full legal name, notes (LCG2, LCG3, …)
 insureds         person: DOB, gender, state, life expectancy, date of death
 policies         carrier, policy #, product type (UL/SUL/VUL/IUL/GUL/Term/WL), face,
                  issue date, premium schedule, acquisition
@@ -102,6 +118,31 @@ Templates are downloadable from the Import screen, or from
 want to try the app before loading real data.
 
 ---
+
+## Reports
+
+Reports render as documents in the browser and are saved with the browser's own
+**Save as PDF**. That keeps typography, charts and spacing identical to the screen
+and avoids running headless Chrome on the server — which would not fit in a
+512 MB instance alongside the app.
+
+| Report | Contents |
+|---|---|
+| Portfolio summary | Tile strip of headline figures, death benefit by carrier chart, and composition tables by carrier, product type and owner, each with % of book |
+| Policy schedule | Every policy as a landscape table with column totals — the formatted version of the grid |
+| Premium forecast | 12/24/36/60-month projection by month with running capital requirement, optional payment-level detail, and an explicit list of policies that *could not* be projected |
+| Policy fact sheet | One page per policy: headline tiles, policy terms, premium and servicing, all lives insured, AV/CSV history chart and recent carrier values |
+
+**Cost basis toggle.** Every report can be generated with or without acquisition
+cost, capital invested and benefit multiple, so the same document serves an
+internal review and an outside party. The confidentiality line at the top states
+which version it is.
+
+The premium forecast holds the current premium constant at each policy's stated
+mode. Cost of insurance on universal life rises with insured age, so later years
+understate the true requirement — the report says so on its face rather than
+implying false precision. Policies missing a premium amount or a next-due date
+are listed separately and excluded from the totals rather than silently dropped.
 
 ## Design
 

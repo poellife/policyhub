@@ -104,17 +104,68 @@ router.use(requireAuth); // everything below requires a session
  * ------------------------------------------------------------------ */
 
 router.get('/funds', wrap(async (req, res) => {
-  const { rows } = await q('SELECT * FROM funds ORDER BY code');
+  const { rows } = await q(
+    `SELECT f.*,
+            COUNT(p.id)::int AS policy_count,
+            COALESCE(SUM(COALESCE(pl.death_benefit, p.face_amount)), 0) AS total_death_benefit,
+            COALESCE(SUM(pl.total_invested), 0) AS total_invested
+       FROM funds f
+       LEFT JOIN policies p ON p.fund_id = f.id
+                           AND p.status NOT IN ('Lapsed','Sold','Matured')
+       LEFT JOIN policy_latest pl ON pl.id = p.id
+      GROUP BY f.id
+      ORDER BY f.code`
+  );
   res.json(rows);
 }));
 
 router.post('/funds', canEdit, wrap(async (req, res) => {
+  const code = str(req.body.code);
+  if (!code) return res.status(400).json({ error: 'A code is required' });
   const { rows } = await q(
     `INSERT INTO funds (code, name, notes) VALUES ($1,$2,$3)
-     ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name RETURNING *`,
-    [str(req.body.code), str(req.body.name), str(req.body.notes)]
+     ON CONFLICT (code) DO UPDATE SET
+       name  = COALESCE(NULLIF(EXCLUDED.name,''),  funds.name),
+       notes = COALESCE(NULLIF(EXCLUDED.notes,''), funds.notes)
+     RETURNING *`,
+    [code, str(req.body.name), str(req.body.notes)]
   );
+  await audit(req.user.uid, 'fund', rows[0].id, 'create', code);
   res.status(201).json(rows[0]);
+}));
+
+router.put('/funds/:id', canEdit, wrap(async (req, res) => {
+  const code = str(req.body.code);
+  if (!code) return res.status(400).json({ error: 'A code is required' });
+  try {
+    const { rows } = await q(
+      `UPDATE funds SET code = $1, name = $2, notes = $3 WHERE id = $4 RETURNING *`,
+      [code, str(req.body.name), str(req.body.notes), req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Entity not found' });
+    await audit(req.user.uid, 'fund', rows[0].id, 'update', code);
+    res.json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505')
+      return res.status(409).json({ error: 'Another entity already uses that code' });
+    throw e;
+  }
+}));
+
+/** Refuses to orphan policies — reassign them first. */
+router.delete('/funds/:id', canEdit, wrap(async (req, res) => {
+  const { rows: used } = await q(
+    'SELECT COUNT(*)::int AS n FROM policies WHERE fund_id = $1', [req.params.id]
+  );
+  if (used[0].n > 0)
+    return res.status(409).json({
+      error: `${used[0].n} ${used[0].n === 1 ? 'policy is' : 'policies are'} still owned by this entity. ` +
+             'Reassign them to another owner first.' });
+
+  const { rows } = await q('DELETE FROM funds WHERE id = $1 RETURNING code', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Entity not found' });
+  await audit(req.user.uid, 'fund', Number(req.params.id), 'delete', rows[0].code);
+  res.json({ ok: true });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -258,7 +309,8 @@ router.post('/policies', canEdit, wrap(async (req, res) => {
 router.put('/policies/:id', canEdit, wrap(async (req, res) => {
   const body = { ...req.body };
   if (body.insured_name || body.insured_last_name) body.insured_id = await resolveInsured(body);
-  if (body.fund_code) body.fund_id = await resolveFund(body);
+  // Present-but-empty means "no owner", so test for the key rather than truthiness.
+  if ('fund_code' in body || 'fund_id' in body) body.fund_id = await resolveFund(body);
   const { sets, vals, next } = buildSet(POLICY_FIELDS, body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(
@@ -270,11 +322,36 @@ router.put('/policies/:id', canEdit, wrap(async (req, res) => {
   res.json(rows[0]);
 }));
 
+/**
+ * Hard delete. Cascades to value snapshots, transactions and additional-insured
+ * links, so the audit entry captures what was destroyed before it goes — the
+ * activity log is the only remaining record afterwards.
+ */
 router.delete('/policies/:id', requireRole('admin'), wrap(async (req, res) => {
-  const { rowCount } = await q('DELETE FROM policies WHERE id = $1', [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'Policy not found' });
-  await audit(req.user.uid, 'policy', req.params.id, 'delete', '');
-  res.json({ ok: true });
+  const { rows } = await q(
+    `SELECT p.*, i.first_name, i.last_name,
+            (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id) AS value_count,
+            (SELECT COUNT(*)::int FROM transactions t WHERE t.policy_id = p.id) AS txn_count,
+            (SELECT COALESCE(SUM(amount),0) FROM transactions t WHERE t.policy_id = p.id) AS invested
+       FROM policies p LEFT JOIN insureds i ON i.id = p.insured_id
+      WHERE p.id = $1`,
+    [req.params.id]
+  );
+  const p = rows[0];
+  if (!p) return res.status(404).json({ error: 'Policy not found' });
+
+  // Typed confirmation must match the policy number exactly.
+  if (str(req.body?.confirm) !== str(p.policy_number))
+    return res.status(400).json({ error: 'Confirmation text does not match the policy number' });
+
+  await q('DELETE FROM policies WHERE id = $1', [req.params.id]);
+  await audit(req.user.uid, 'policy', Number(req.params.id), 'delete',
+    `${p.policy_number} · ${p.carrier_name} · ${[p.last_name, p.first_name].filter(Boolean).join(', ')} · ` +
+    `face ${p.face_amount} · ${p.value_count} value snapshots · ${p.txn_count} transactions · ` +
+    `${p.invested} invested`);
+
+  res.json({ ok: true, deleted: {
+    policy_number: p.policy_number, values: p.value_count, transactions: p.txn_count } });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -446,6 +523,146 @@ router.get('/servicing', wrap(async (req, res) => {
   const rank = { critical: 0, serious: 1, warning: 2, info: 3 };
   alerts.sort((a, b) => rank[a.severity] - rank[b.severity]);
   res.json({ upcoming: rows.filter((r) => r.next_premium_due), alerts });
+}));
+
+/* ------------------------------------------------------------------ *
+ * reports
+ * ------------------------------------------------------------------ */
+
+const MODE_MONTHS = { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 };
+
+/**
+ * Projects each active policy's premium payments forward and groups them by
+ * calendar month. A due date already in the past is reported in the current
+ * month and flagged overdue rather than silently rolled forward.
+ */
+router.get('/reports/premium-forecast', wrap(async (req, res) => {
+  const months = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
+  const fund = str(req.query.fund);
+
+  const { rows } = await q(
+    `SELECT id, policy_number, carrier_name, display_name, insured_first, insured_last,
+            fund_code, premium_required, premium_mode, next_premium_due, status,
+            face_amount, cost_of_insurance, account_value
+       FROM policy_latest
+      WHERE status NOT IN ('Lapsed','Sold','Matured')
+        AND ($1 = '' OR fund_code = $1)
+      ORDER BY insured_last, insured_first`,
+    [fund]
+  );
+
+  const now = new Date();
+  const startMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const horizon = new Date(startMonth);
+  horizon.setUTCMonth(horizon.getUTCMonth() + months);
+
+  const buckets = new Map();
+  const monthKey = (d) =>
+    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  for (let i = 0; i < months; i++) {
+    const d = new Date(startMonth);
+    d.setUTCMonth(d.getUTCMonth() + i);
+    buckets.set(monthKey(d), { month: monthKey(d), total: 0, payments: [] });
+  }
+
+  const noSchedule = [];
+  for (const p of rows) {
+    const amount = Number(p.premium_required) || 0;
+    const step = MODE_MONTHS[p.premium_mode] || 12;
+    const insured = p.display_name ||
+      `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
+
+    if (!amount || !p.next_premium_due) {
+      noSchedule.push({ ...p, insured,
+        reason: !amount ? 'No premium amount recorded' : 'No next due date recorded' });
+      continue;
+    }
+
+    let due = new Date(`${String(p.next_premium_due).slice(0, 10)}T00:00:00Z`);
+    let overdue = false;
+    if (due < startMonth) {
+      overdue = true;                       // surface it now, don't skip it
+      due = new Date(startMonth);
+    }
+    let guard = 0;
+    while (due < horizon && guard++ < 240) {
+      const b = buckets.get(monthKey(due));
+      if (b) {
+        b.total += amount;
+        b.payments.push({
+          policy_id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
+          insured, fund_code: p.fund_code, amount, mode: p.premium_mode,
+          due_date: due.toISOString().slice(0, 10), overdue,
+        });
+      }
+      overdue = false;
+      due.setUTCMonth(due.getUTCMonth() + step);
+    }
+  }
+
+  const schedule = [...buckets.values()];
+  let running = 0;
+  for (const b of schedule) { running += b.total; b.cumulative = running; }
+
+  res.json({
+    months,
+    generatedAt: new Date().toISOString(),
+    schedule,
+    grandTotal: running,
+    policiesScheduled: rows.length - noSchedule.length,
+    noSchedule,
+  });
+}));
+
+/** Everything a portfolio summary needs that /analytics/summary doesn't cover. */
+router.get('/reports/portfolio', wrap(async (req, res) => {
+  const fund = str(req.query.fund);
+  const [totals, byCarrier, byProduct, byFund, ages] = await Promise.all([
+    q(`SELECT COUNT(*)::int AS policy_count,
+              COALESCE(SUM(face_amount),0) AS total_face,
+              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS total_death_benefit,
+              COALESCE(SUM(cash_surrender_value),0) AS total_csv,
+              COALESCE(SUM(account_value),0) AS total_av,
+              COALESCE(SUM(total_invested),0) AS total_invested,
+              COALESCE(SUM(total_acquisition),0) AS total_acquisition,
+              COALESCE(SUM(total_premiums),0) AS total_premiums,
+              COALESCE(SUM(cost_of_insurance),0) AS monthly_coi,
+              COALESCE(SUM(premium_required),0) AS annual_premium
+         FROM policy_latest
+        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)`, [fund]),
+    q(`SELECT carrier_name, COUNT(*)::int AS n,
+              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face
+         FROM policy_latest
+        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
+        GROUP BY carrier_name ORDER BY face DESC`, [fund]),
+    q(`SELECT COALESCE(NULLIF(product_type,''),'Unclassified') AS product_type,
+              COUNT(*)::int AS n,
+              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face
+         FROM policy_latest
+        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
+        GROUP BY 1 ORDER BY face DESC`, [fund]),
+    q(`SELECT COALESCE(fund_code,'Unassigned') AS fund_code, COUNT(*)::int AS n,
+              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face,
+              COALESCE(SUM(total_invested),0) AS invested
+         FROM policy_latest
+        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
+        GROUP BY 1 ORDER BY face DESC`, [fund]),
+    q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(insured_dob))),0) AS avg_age,
+              COALESCE(MIN(EXTRACT(YEAR FROM age(insured_dob))),0) AS min_age,
+              COALESCE(MAX(EXTRACT(YEAR FROM age(insured_dob))),0) AS max_age
+         FROM policy_latest
+        WHERE status NOT IN ('Lapsed','Sold','Matured') AND insured_dob IS NOT NULL
+          AND ($1 = '' OR fund_code = $1)`, [fund]),
+  ]);
+
+  res.json({
+    generatedAt: new Date().toISOString(),
+    totals: totals.rows[0],
+    byCarrier: byCarrier.rows,
+    byProduct: byProduct.rows,
+    byFund: byFund.rows,
+    ages: ages.rows[0],
+  });
 }));
 
 /* ------------------------------------------------------------------ *
