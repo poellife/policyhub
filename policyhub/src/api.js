@@ -1,11 +1,12 @@
 import express from 'express';
 import { q, audit } from './db.js';
-import { requireAuth, requireRole, login, changePassword, createUser, clearToken } from './auth.js';
+import { requireAuth, requireRole, loadScope, login, changePassword, createUser, clearToken } from './auth.js';
 
 const router = express.Router();
-const canEdit = requireRole('admin', 'editor');
+const canEdit = requireRole('admin', 'editor', 'manager');
+const adminOrManager = requireRole('admin', 'manager');
 /** Internal staff. Investors are deliberately excluded from every one of these. */
-const staffOnly = requireRole('admin', 'editor', 'viewer');
+const staffOnly = requireRole('admin', 'editor', 'viewer', 'manager');
 
 /* ------------------------------------------------------------------ *
  * Investor scoping
@@ -17,25 +18,71 @@ const staffOnly = requireRole('admin', 'editor', 'viewer');
  * ------------------------------------------------------------------ */
 
 const isInvestor = (req) => req.user?.role === 'investor';
+const isManager  = (req) => req.user?.role === 'manager';
+
+/**
+ * Two independent visibility scopes, never both active on one account:
+ *   inv   — an investor sees only policies they hold a percentage of
+ *   funds — a portfolio manager sees only policies owned by their entities
+ * Both null for admin / editor / viewer, which means "the whole book".
+ */
 const scopeId = (req) => (isInvestor(req) ? Number(req.user.iid) || -1 : null);
+const fundScope = (req) =>
+  isManager(req) ? (req.user.fundIds && req.user.fundIds.length ? req.user.fundIds : [-1]) : null;
 
-/** SQL fragment restricting `<policyCol>` to the scoped investor's holdings. */
-const ownedBy = (policyCol, paramIndex) =>
-  `($${paramIndex}::int IS NULL OR EXISTS (
-      SELECT 1 FROM policy_investors pix
-       WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${paramIndex}))`;
+/**
+ * WHERE fragment limiting a row to what the caller may see.
+ * `iP` is the investor-scope parameter index, `fP` the fund-scope one.
+ */
+const visibleTo = (policyCol, fundCol, iP, fP) =>
+  `(($${iP}::int IS NULL OR EXISTS (
+        SELECT 1 FROM policy_investors pix
+         WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${iP}))
+    AND ($${fP}::int[] IS NULL OR ${fundCol} = ANY($${fP})))`;
 
-/** The investor's percentage of a policy, or 100 for staff (whole book). */
+/** Back-compat shorthand where the fund column is the standard one. */
+const ownedBy = (policyCol, iP, fP = null, fundCol = null) =>
+  fP === null
+    ? `($${iP}::int IS NULL OR EXISTS (
+         SELECT 1 FROM policy_investors pix
+          WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${iP}))`
+    : visibleTo(policyCol, fundCol, iP, fP);
+
+/** The investor's percentage of a policy, or 100 for everyone else. */
 const shareOf = (policyCol, paramIndex) =>
   `COALESCE((SELECT pix.pct FROM policy_investors pix
               WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${paramIndex}), 100)`;
 
-/** Blocks investors from staff-only routes with a clear message. */
+/** Blocks investors from routes meant for internal users. */
 function blockInvestors(req, res, next) {
   if (isInvestor(req))
     return res.status(403).json({ error: 'Not available on an investor account' });
   next();
 }
+
+/** Blocks anyone who isn't full internal staff — used for the Settings surface. */
+function blockScoped(req, res, next) {
+  if (isInvestor(req) || isManager(req))
+    return res.status(403).json({ error: 'Not available on this account' });
+  next();
+}
+
+/** A manager may only touch a policy inside one of their entities. */
+async function assertPolicyInScope(req, policyId) {
+  const funds = fundScope(req);
+  if (funds === null) return true;
+  const { rows } = await q('SELECT fund_id FROM policies WHERE id = $1', [policyId]);
+  if (!rows[0]) return false;
+  return funds.includes(rows[0].fund_id);
+}
+
+const wrapMw = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/** Middleware form of the above, for routes carrying the policy id as :id. */
+const inPolicyScope = (param = 'id') => wrapMw(async (req, res, next) => {
+  if (await assertPolicyInScope(req, req.params[param])) return next();
+  res.status(404).json({ error: 'Policy not found' });
+});
 
 /* ------------------------------------------------------------------ *
  * helpers
@@ -123,27 +170,39 @@ router.get('/auth/me', requireAuth, wrap(async (req, res) => {
     const { rows } = await q('SELECT id, name FROM investors WHERE id = $1', [req.user.iid]);
     out.investor = rows[0] || null;
   }
+  if (req.user.role === 'manager') {
+    const { rows } = await q(
+      `SELECT f.id, f.code, f.name FROM user_funds uf
+         JOIN funds f ON f.id = uf.fund_id
+        WHERE uf.user_id = $1 ORDER BY f.code`, [req.user.uid]);
+    out.funds = rows;
+  }
   res.json(out);
 }));
 router.post('/auth/password', requireAuth, wrap(changePassword));
-router.get('/users', requireAuth, requireRole('admin'), wrap(async (req, res) => {
+router.get('/users', requireAuth, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
-            u.investor_id, i.name AS investor_name
+            u.investor_id, i.name AS investor_name,
+            COALESCE((SELECT string_agg(f.code, ', ' ORDER BY f.code)
+                        FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
+                       WHERE uf.user_id = u.id), '') AS fund_codes
        FROM users u LEFT JOIN investors i ON i.id = u.investor_id
       ORDER BY u.id`
   );
   res.json(rows);
 }));
-router.post('/users', requireAuth, requireRole('admin'), wrap(createUser));
+router.post('/users', requireAuth, blockScoped, requireRole('admin'), wrap(createUser));
 
-router.use(requireAuth); // everything below requires a session
+router.use(requireAuth);        // everything below requires a session
+router.use(wrap(loadScope));    // and carries the caller's entity scope
 
 /* ------------------------------------------------------------------ *
  * funds
  * ------------------------------------------------------------------ */
 
 router.get('/funds', blockInvestors, wrap(async (req, res) => {
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT f.*,
             COUNT(p.id)::int AS policy_count,
@@ -153,13 +212,15 @@ router.get('/funds', blockInvestors, wrap(async (req, res) => {
        LEFT JOIN policies p ON p.fund_id = f.id
                            AND p.status NOT IN ('Lapsed','Sold','Matured')
        LEFT JOIN policy_latest pl ON pl.id = p.id
+      WHERE ($1::int[] IS NULL OR f.id = ANY($1))
       GROUP BY f.id
-      ORDER BY f.code`
+      ORDER BY f.code`,
+    [funds]
   );
   res.json(rows);
 }));
 
-router.post('/funds', blockInvestors, canEdit, wrap(async (req, res) => {
+router.post('/funds', blockScoped, requireRole('admin','editor'), wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   const { rows } = await q(
@@ -174,7 +235,7 @@ router.post('/funds', blockInvestors, canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.put('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+router.put('/funds/:id', blockScoped, requireRole('admin','editor'), wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   try {
@@ -193,7 +254,7 @@ router.put('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
 }));
 
 /** Refuses to orphan policies — reassign them first. */
-router.delete('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+router.delete('/funds/:id', blockScoped, requireRole('admin','editor'), wrap(async (req, res) => {
   const { rows: used } = await q(
     'SELECT COUNT(*)::int AS n FROM policies WHERE fund_id = $1', [req.params.id]
   );
@@ -215,33 +276,34 @@ router.delete('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
 router.get('/insureds', wrap(async (req, res) => {
   const search = str(req.query.search);
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT i.*, COUNT(p.id)::int AS policy_count
        FROM insureds i
-       JOIN policies p ON p.insured_id = i.id AND ${ownedBy('p.id', 2)}
+       JOIN policies p ON p.insured_id = i.id AND ${visibleTo('p.id', 'p.fund_id', 2, 3)}
       WHERE ($1 = '' OR i.first_name ILIKE '%'||$1||'%' OR i.last_name ILIKE '%'||$1||'%'
              OR i.display_name ILIKE '%'||$1||'%')
       GROUP BY i.id ORDER BY i.last_name, i.first_name`,
-    [search, scope]
+    [search, scope, funds]
   );
   res.json(rows);
 }));
 
 router.get('/insureds/:id', wrap(async (req, res) => {
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT i.* FROM insureds i
       WHERE i.id = $1
-        AND ($2::int IS NULL OR EXISTS (
-              SELECT 1 FROM policies p
-               WHERE p.insured_id = i.id AND ${ownedBy('p.id', 2)}))`,
-    [req.params.id, scope]
+        AND EXISTS (SELECT 1 FROM policies p
+                     WHERE p.insured_id = i.id AND ${visibleTo('p.id', 'p.fund_id', 2, 3)})`,
+    [req.params.id, scope, funds]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Insured not found' });
   const pol = await q(
     `SELECT pl.* FROM policy_latest pl
-      WHERE pl.insured_id = $1 AND ${ownedBy('pl.id', 2)}`,
-    [req.params.id, scope]
+      WHERE pl.insured_id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
+    [req.params.id, scope, funds]
   );
   res.json({ ...rows[0], policies: pol.rows });
 }));
@@ -258,6 +320,14 @@ router.post('/insureds', blockInvestors, canEdit, wrap(async (req, res) => {
 }));
 
 router.put('/insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const mFunds = fundScope(req);
+  if (mFunds !== null) {
+    const { rows: own } = await q(
+      `SELECT 1 FROM policies WHERE insured_id = $1 AND fund_id = ANY($2) LIMIT 1`,
+      [req.params.id, mFunds]
+    );
+    if (!own[0]) return res.status(404).json({ error: 'Insured not found' });
+  }
   const { sets, vals, next } = buildSet(INSURED_FIELDS, req.body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(
@@ -278,6 +348,7 @@ router.get('/policies', wrap(async (req, res) => {
   const status = str(req.query.status);
   const fund = str(req.query.fund);
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT pl.*, ${shareOf('pl.id', 4)} AS my_pct
        FROM policy_latest pl
@@ -288,20 +359,21 @@ router.get('/policies', wrap(async (req, res) => {
              OR pl.display_name ILIKE '%'||$1||'%')
         AND ($2 = '' OR pl.status = $2)
         AND ($3 = '' OR pl.fund_code = $3)
-        AND ${ownedBy('pl.id', 4)}
+        AND ${visibleTo('pl.id', 'pl.fund_id', 4, 5)}
       ORDER BY pl.insured_last, pl.insured_first, pl.policy_number`,
-    [search, status, fund, scope]
+    [search, status, fund, scope, funds]
   );
   res.json(rows);
 }));
 
 router.get('/policies/:id', wrap(async (req, res) => {
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT pl.*, ${shareOf('pl.id', 2)} AS my_pct
        FROM policy_latest pl
-      WHERE pl.id = $1 AND ${ownedBy('pl.id', 2)}`,
-    [req.params.id, scope]
+      WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
+    [req.params.id, scope, funds]
   );
   // A policy the investor doesn't hold is reported as missing, not forbidden —
   // "forbidden" would confirm it exists.
@@ -334,7 +406,7 @@ router.get('/policies/:id', wrap(async (req, res) => {
 
 /* ---- additional lives on a policy (survivorship / joint) ---- */
 
-router.post('/policies/:id/insureds', blockInvestors, canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/insureds', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const insuredId = await resolveInsured(req.body);
   if (!insuredId) return res.status(400).json({ error: 'A last name is required' });
 
@@ -361,6 +433,9 @@ router.post('/policies/:id/insureds', blockInvestors, canEdit, wrap(async (req, 
 }));
 
 router.delete('/policy-insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows: link } = await q('SELECT policy_id FROM policy_insureds WHERE id = $1', [req.params.id]);
+  if (!link[0] || !(await assertPolicyInScope(req, link[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
   const { rowCount } = await q('DELETE FROM policy_insureds WHERE id = $1', [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'Not found' });
   await audit(req.user.uid, 'policy_insured', req.params.id, 'delete', '');
@@ -371,6 +446,9 @@ router.post('/policies', blockInvestors, canEdit, wrap(async (req, res) => {
   const body = { ...req.body };
   body.insured_id = await resolveInsured(body);
   body.fund_id = await resolveFund(body);
+  const funds = fundScope(req);
+  if (funds !== null && !funds.includes(body.fund_id))
+    return res.status(403).json({ error: 'Assign the policy to one of your own entities' });
   const { cols, vals } = buildSet(POLICY_FIELDS, body);
   if (!cols.includes('policy_number'))
     return res.status(400).json({ error: 'Policy number is required' });
@@ -382,11 +460,15 @@ router.post('/policies', blockInvestors, canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.put('/policies/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+router.put('/policies/:id', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const body = { ...req.body };
   if (body.insured_name || body.insured_last_name) body.insured_id = await resolveInsured(body);
   // Present-but-empty means "no owner", so test for the key rather than truthiness.
   if ('fund_code' in body || 'fund_id' in body) body.fund_id = await resolveFund(body);
+  // A manager must not be able to move a policy out of their own entities.
+  const mgrFunds = fundScope(req);
+  if (mgrFunds !== null && 'fund_id' in body && !mgrFunds.includes(body.fund_id))
+    return res.status(403).json({ error: 'You can only move a policy between your own entities' });
   const { sets, vals, next } = buildSet(POLICY_FIELDS, body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(
@@ -403,7 +485,7 @@ router.put('/policies/:id', blockInvestors, canEdit, wrap(async (req, res) => {
  * links, so the audit entry captures what was destroyed before it goes — the
  * activity log is the only remaining record afterwards.
  */
-router.delete('/policies/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.delete('/policies/:id', blockInvestors, adminOrManager, inPolicyScope('id'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT p.*, i.first_name, i.last_name,
             (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id) AS value_count,
@@ -434,7 +516,7 @@ router.delete('/policies/:id', blockInvestors, requireRole('admin'), wrap(async 
  * value snapshots
  * ------------------------------------------------------------------ */
 
-router.post('/policies/:id/values', blockInvestors, canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/values', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const { cols, vals } = buildSet(VALUE_FIELDS, req.body);
   if (!cols.includes('as_of_date'))
     return res.status(400).json({ error: 'An "as of" date is required' });
@@ -452,6 +534,9 @@ router.post('/policies/:id/values', blockInvestors, canEdit, wrap(async (req, re
 }));
 
 router.delete('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows } = await q('SELECT policy_id FROM policy_values WHERE id = $1', [req.params.id]);
+  if (!rows[0] || !(await assertPolicyInScope(req, rows[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
   await q('DELETE FROM policy_values WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 }));
@@ -460,7 +545,7 @@ router.delete('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
  * transactions
  * ------------------------------------------------------------------ */
 
-router.post('/policies/:id/transactions', blockInvestors, canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/transactions', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const { cols, vals } = buildSet(TXN_FIELDS, req.body);
   if (!cols.includes('txn_date') || !cols.includes('txn_type'))
     return res.status(400).json({ error: 'Date and type are required' });
@@ -475,6 +560,9 @@ router.post('/policies/:id/transactions', blockInvestors, canEdit, wrap(async (r
 }));
 
 router.delete('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows } = await q('SELECT policy_id FROM transactions WHERE id = $1', [req.params.id]);
+  if (!rows[0] || !(await assertPolicyInScope(req, rows[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
   await q('DELETE FROM transactions WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 }));
@@ -485,9 +573,11 @@ router.delete('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res
 
 router.get('/analytics/summary', wrap(async (req, res) => {
   const scope = scopeId(req);
+  const funds = fundScope(req);
   // For an investor every money figure is multiplied by their percentage, so
   // the dashboard reads as *their* portfolio rather than the whole book.
   const w = `(${shareOf('pl.id', 1)} / 100.0)`;
+  const vis = visibleTo('pl.id', 'pl.fund_id', 1, 2);
 
   const [totals, byCarrier, invested, ages] = await Promise.all([
     q(`SELECT
@@ -502,24 +592,24 @@ router.get('/analytics/summary', wrap(async (req, res) => {
          COALESCE(SUM(pl.total_premiums * ${w}),0)                 AS total_premiums,
          COALESCE(SUM(pl.cost_of_insurance * ${w}),0)              AS monthly_coi
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}`, [scope]),
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}`, [scope, funds]),
     q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
               COALESCE(SUM(pl.face_amount * ${w}),0) AS face
          FROM policy_latest pl
-        WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}
-        GROUP BY pl.carrier_name ORDER BY face DESC`, [scope]),
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}
+        GROUP BY pl.carrier_name ORDER BY face DESC`, [scope, funds]),
     q(`SELECT to_char(date_trunc('month', t.txn_date),'YYYY-MM') AS month,
               SUM(t.amount * (COALESCE((SELECT pix.pct FROM policy_investors pix
                     WHERE pix.policy_id = t.policy_id AND pix.investor_id = $1), 100) / 100.0)) AS amount
          FROM transactions t
         WHERE t.txn_type IN ('Acquisition Cost','Premium Payment','Fee','Servicing','Commission')
-          AND ${ownedBy('t.policy_id', 1)}
-        GROUP BY 1 ORDER BY 1`, [scope]),
+          AND ${visibleTo('t.policy_id', '(SELECT fund_id FROM policies WHERE id = t.policy_id)', 1, 2)}
+        GROUP BY 1 ORDER BY 1`, [scope, funds]),
     q(`SELECT
          COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
          COUNT(*) FILTER (WHERE pl.insured_dob IS NOT NULL)::int AS with_dob
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}`, [scope]),
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}`, [scope, funds]),
   ]);
 
   // Running total of capital deployed. Months with no activity are filled in
@@ -556,6 +646,7 @@ router.get('/analytics/summary', wrap(async (req, res) => {
 
 router.get('/servicing', wrap(async (req, res) => {
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
             pl.insured_first, pl.insured_last,
@@ -567,9 +658,10 @@ router.get('/servicing', wrap(async (req, res) => {
             pl.premium_required AS premium_required_full,
             (pl.next_premium_due - CURRENT_DATE) AS days_until_due
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY pl.next_premium_due NULLS LAST`,
-    [scope]
+    [scope, funds]
   );
 
   const alerts = [];
@@ -630,6 +722,9 @@ const INVESTOR_FIELDS = {
 
 router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
   const search = str(req.query.search);
+  const funds = fundScope(req);
+  // A manager sees only investors who hold a position inside their entities,
+  // and the figures shown cover only those positions.
   const { rows } = await q(
     `SELECT inv.*,
             COUNT(pi.id)::int AS position_count,
@@ -640,16 +735,28 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
        LEFT JOIN policy_investors pi ON pi.investor_id = inv.id
        LEFT JOIN policy_latest pl ON pl.id = pi.policy_id
                                  AND pl.status NOT IN ('Lapsed','Sold','Matured')
+                                 AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
              OR inv.email ILIKE '%'||$1||'%')
+        AND ($2::int[] IS NULL OR EXISTS (
+              SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
+               WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
       GROUP BY inv.id ORDER BY inv.name`,
-    [search]
+    [search, funds]
   );
   res.json(rows);
 }));
 
 router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) => {
-  const { rows } = await q('SELECT * FROM investors WHERE id = $1', [req.params.id]);
+  const funds = fundScope(req);
+  const { rows } = await q(
+    `SELECT inv.* FROM investors inv
+      WHERE inv.id = $1
+        AND ($2::int[] IS NULL OR EXISTS (
+              SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
+               WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))`,
+    [req.params.id, funds]
+  );
   if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
   const positions = await q(
     `SELECT pi.id AS link_id, pi.pct, pi.acquired_on, pi.notes AS link_notes,
@@ -659,14 +766,15 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
             pl.account_value, pl.cost_of_insurance, pl.premium_required,
             pl.total_invested
        FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
-      WHERE pi.investor_id = $1
+      WHERE pi.investor_id = $1 AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       ORDER BY pl.insured_last, pl.policy_number`,
-    [req.params.id]
+    [req.params.id, funds]
   );
-  const logins = await q(
-    'SELECT id, email, full_name, is_active, last_login_at FROM users WHERE investor_id = $1',
-    [req.params.id]
-  );
+  // Login details are account administration — managers don't get them.
+  const logins = funds === null
+    ? await q('SELECT id, email, full_name, is_active, last_login_at FROM users WHERE investor_id = $1',
+        [req.params.id])
+    : { rows: [] };
   res.json({ ...rows[0], positions: positions.rows, logins: logins.rows });
 }));
 
@@ -693,7 +801,7 @@ router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   res.json(rows[0]);
 }));
 
-router.delete('/investors/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.delete('/investors/:id', blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const [{ rows: pos }, { rows: usr }] = await Promise.all([
     q('SELECT COUNT(*)::int AS n FROM policy_investors WHERE investor_id = $1', [req.params.id]),
     q('SELECT COUNT(*)::int AS n FROM users WHERE investor_id = $1', [req.params.id]),
@@ -722,7 +830,7 @@ async function allocatedPct(policyId, excludeLinkId = null) {
   return Number(rows[0].total) || 0;
 }
 
-router.post('/policies/:id/investors', blockInvestors, canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/investors', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const investorId = int(req.body.investor_id);
   const pct = num(req.body.pct);
   if (!investorId) return res.status(400).json({ error: 'Choose an investor' });
@@ -755,7 +863,8 @@ router.put('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (req
   if (pct === null || pct <= 0 || pct > 100)
     return res.status(400).json({ error: 'Percentage must be between 0 and 100' });
   const { rows: cur } = await q('SELECT * FROM policy_investors WHERE id = $1', [req.params.linkId]);
-  if (!cur[0]) return res.status(404).json({ error: 'Allocation not found' });
+  if (!cur[0] || !(await assertPolicyInScope(req, cur[0].policy_id)))
+    return res.status(404).json({ error: 'Allocation not found' });
 
   const others = await allocatedPct(cur[0].policy_id, cur[0].id);
   if (others + pct > 100.000001)
@@ -772,6 +881,9 @@ router.put('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (req
 }));
 
 router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows: cur } = await q('SELECT policy_id FROM policy_investors WHERE id = $1', [req.params.linkId]);
+  if (!cur[0] || !(await assertPolicyInScope(req, cur[0].policy_id)))
+    return res.status(404).json({ error: 'Allocation not found' });
   const { rows } = await q('DELETE FROM policy_investors WHERE id = $1 RETURNING *', [req.params.linkId]);
   if (!rows[0]) return res.status(404).json({ error: 'Allocation not found' });
   await audit(req.user.uid, 'policy_investor', Number(req.params.linkId), 'delete',
@@ -795,6 +907,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   const fund = str(req.query.fund);
 
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
             pl.insured_first, pl.insured_last,
@@ -805,9 +918,9 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
        FROM policy_latest pl
       WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
         AND ($1 = '' OR pl.fund_code = $1)
-        AND ${ownedBy('pl.id', 2)}
+        AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}
       ORDER BY pl.insured_last, pl.insured_first`,
-    [fund, scope]
+    [fund, scope, funds]
   );
 
   const now = new Date();
@@ -877,7 +990,9 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
 router.get('/reports/portfolio', wrap(async (req, res) => {
   const fund = str(req.query.fund);
   const scope = scopeId(req);
+  const funds = fundScope(req);
   const w = `(${shareOf('pl.id', 2)} / 100.0)`;
+  const vis3 = visibleTo('pl.id', 'pl.fund_id', 2, 3);
   const [totals, byCarrier, byProduct, byFund, ages] = await Promise.all([
     q(`SELECT COUNT(*)::int AS policy_count,
               COALESCE(SUM(pl.face_amount * ${w}),0) AS total_face,
@@ -891,33 +1006,33 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
               COALESCE(SUM(pl.premium_required * ${w}),0) AS annual_premium
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}`, [fund, scope]),
+          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}`, [fund, scope, funds]),
     q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
-        GROUP BY pl.carrier_name ORDER BY face DESC`, [fund, scope]),
+          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+        GROUP BY pl.carrier_name ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(NULLIF(pl.product_type,''),'Unclassified') AS product_type,
               COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
-        GROUP BY 1 ORDER BY face DESC`, [fund, scope]),
+          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+        GROUP BY 1 ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(pl.fund_code,'Unassigned') AS fund_code, COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face,
               COALESCE(SUM(pl.total_invested * ${w}),0) AS invested
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
-        GROUP BY 1 ORDER BY face DESC`, [fund, scope]),
+          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+        GROUP BY 1 ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
               COALESCE(MIN(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS min_age,
               COALESCE(MAX(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS max_age
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND pl.insured_dob IS NOT NULL
-          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}`, [fund, scope]),
+          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}`, [fund, scope, funds]),
   ]);
 
   res.json({
@@ -990,7 +1105,7 @@ export async function resolveInsured(body) {
  * audit trail
  * ------------------------------------------------------------------ */
 
-router.get('/audit', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.get('/audit', blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT a.*, u.email FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
       ORDER BY a.created_at DESC LIMIT 300`

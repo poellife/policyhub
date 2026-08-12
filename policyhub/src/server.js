@@ -7,7 +7,7 @@ import multer from 'multer';
 
 import { initDb } from './db.js';
 import api, { wrap } from './api.js';
-import { requireAuth, requireRole } from './auth.js';
+import { requireAuth, requireRole, loadScope } from './auth.js';
 import { previewCsv, runImport, TEMPLATES } from './import.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -43,28 +43,30 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-app.post('/api/import/preview', requireAuth, requireRole('admin','editor'), upload.single('file'),
+app.post('/api/import/preview', requireAuth, requireRole('admin','editor','manager'), upload.single('file'),
   wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     res.json(previewCsv(req.file.buffer, req.body.type || 'policies'));
   })
 );
 
-app.post('/api/import/run', requireAuth, requireRole('admin', 'editor'),
-  upload.single('file'),
+app.post('/api/import/run', requireAuth, requireRole('admin', 'editor', 'manager'),
+  wrap(loadScope), upload.single('file'),
   wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const result = await runImport(
       req.file.buffer,
       req.body.type || 'policies',
-      { asOfDate: req.body.asOfDate },
+      // A manager's import is confined to their own entities.
+      { asOfDate: req.body.asOfDate,
+        fundScope: req.user.role === 'manager' ? (req.user.fundIds || [-1]) : null },
       req.user
     );
     res.json(result);
   })
 );
 
-app.get('/api/import/template/:type', requireAuth, requireRole('admin','editor'), (req, res) => {
+app.get('/api/import/template/:type', requireAuth, requireRole('admin','editor','manager'), (req, res) => {
   const csv = TEMPLATES[req.params.type];
   if (!csv) return res.status(404).json({ error: 'Unknown template' });
   res.setHeader('Content-Type', 'text/csv');

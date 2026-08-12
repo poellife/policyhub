@@ -38,6 +38,45 @@ activity log is the only record that survives. Setting the status to Sold, Matur
 or Lapsed is the non-destructive alternative: it drops the policy out of the
 dashboard, alerts and reports while keeping its history.
 
+## Roles
+
+| Role | Sees | Can change | Settings |
+|---|---|---|---|
+| **admin** | everything | everything | yes |
+| **editor** | everything | everything except users and deletes | yes |
+| **viewer** | everything | nothing | password only |
+| **manager** | only their owning entities | everything inside them, including import and delete | **no** — password only |
+| **investor** | only policies they hold a share of | nothing | password only |
+
+### Portfolio managers
+
+A manager is attached to one or more **owning entities** and works inside them as
+though the rest of the book did not exist. They get the full internal interface —
+dashboard, policies, servicing, insureds, investors, reports, CSV import — with
+every query filtered to their entities.
+
+They cannot reach the Settings surface at all: no owner-entity administration, no
+user management, no activity log. They keep an **Account** tab for changing their
+own password, since locking that out would leave them unable to rotate it.
+
+The boundary is enforced in SQL and in route middleware, not by hiding buttons:
+
+- Reads are filtered by `fund_id` on every list, detail, analytics and report query
+- Per-policy writes go through a scope check on the policy's entity
+- A manager cannot create a policy in another entity, nor move one of theirs out
+- CSV import is checked row by row; a row whose Owner is outside their entities is
+  rejected with that reason, and a policy that currently belongs to another entity
+  cannot be overwritten
+- The investor directory is filtered to investors holding positions in their
+  entities, and investor login details are withheld
+
+`scripts/manager-security-test.mjs` attempts each of these directly against the
+API and asserts every cross-entity attempt fails.
+
+Entity assignments are read from the database on each request rather than baked
+into the session token, so changing a manager's entities takes effect immediately
+instead of at their next sign-in.
+
 ## Fractional ownership and the investor portal
 
 An owning **entity** (LCG1, LCG2) holds a policy on paper. **Investors** hold
@@ -82,7 +121,8 @@ cost, capital invested) **are** visible to investors, as configured.
 ## Data model
 
 ```
-users            login accounts (bcrypt hashes, roles: admin / editor / viewer)
+users            login accounts (bcrypt; roles: admin / editor / viewer / manager / investor)
+user_funds       which owning entities a portfolio manager may work inside
 funds            owning entity: code, full legal name, notes (LCG2, LCG3, …)
 insureds         person: DOB, gender, state, life expectancy, date of death
 policies         carrier, policy #, product type (UL/SUL/VUL/IUL/GUL/Term/WL), face,

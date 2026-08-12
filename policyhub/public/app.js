@@ -104,7 +104,15 @@ function toast(msg) {
 
 function formValues(form) {
   const out = {};
-  for (const [k, v] of new FormData(form).entries()) out[k] = v;
+  for (const [k, v] of new FormData(form).entries()) {
+    // A multi-select contributes several entries under one name.
+    if (k in out) out[k] = Array.isArray(out[k]) ? [...out[k], v] : [out[k], v];
+    else out[k] = v;
+  }
+  // Always send multi-selects as arrays, even with a single selection.
+  form.querySelectorAll('select[multiple]').forEach((sel) => {
+    out[sel.name] = [...sel.selectedOptions].map((o) => o.value);
+  });
   return out;
 }
 
@@ -178,8 +186,17 @@ const INVESTOR_NAV = [
   ['settings', 'Account'],
 ];
 
+// A portfolio manager works inside their own entities. They get no Settings tab
+// — no owner entities, no user management, no activity log — but they still need
+// somewhere to change their own password, so that becomes "Account".
+const MANAGER_NAV = STAFF_NAV.map(([r, label]) =>
+  r === 'settings' ? ['settings', 'Account'] : [r, label]);
+
 const isInvestorUser = () => state.user?.role === 'investor';
-const navItems = () => (isInvestorUser() ? INVESTOR_NAV : STAFF_NAV);
+const isManagerUser  = () => state.user?.role === 'manager';
+const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?.role);
+const navItems = () =>
+  isInvestorUser() ? INVESTOR_NAV : isManagerUser() ? MANAGER_NAV : STAFF_NAV;
 
 /* Display multiplier: an investor viewing "my share" sees every figure scaled
    by their percentage of that policy. Staff always see the whole policy. */
@@ -207,7 +224,9 @@ function shell(inner) {
         <span class="muted" style="font-size:13px">${esc(
           isInvestorUser() && state.user.investor
             ? state.user.investor.name
-            : state.user?.name || state.user?.email || '')}</span>
+            : isManagerUser() && state.user.funds?.length
+              ? `${state.user.name || state.user.email} · ${state.user.funds.map((f) => f.code).join(', ')}`
+              : state.user?.name || state.user?.email || '')}</span>
         <button class="btn-sm" id="logoutBtn">Sign out</button>
       </div>
     </div>
@@ -251,7 +270,10 @@ function wireLogin() {
     btn.disabled = true;
     btn.innerHTML = '<span class="spin"></span> Signing in…';
     try {
-      state.user = await api('/auth/login', { method: 'POST', body: formValues(e.target) });
+      await api('/auth/login', { method: 'POST', body: formValues(e.target) });
+      // The login response is minimal; /auth/me carries the scope details the
+      // interface needs (investor name, manager entities).
+      state.user = await api('/auth/me');
       location.hash = '#/dashboard';
       await render();
     } catch (err) {
@@ -458,7 +480,7 @@ async function policiesView() {
       <div class="spacer"></div>
       ${shareToggle()}
       <button id="exportBtn">Export CSV</button>
-      ${isInvestorUser() ? '' : '<button class="primary" id="newPolicyBtn">New policy</button>'}
+      ${canEditData() ? '<button class="primary" id="newPolicyBtn">New policy</button>' : ''}
     </div>
 
     <div class="toolbar">
@@ -576,9 +598,9 @@ async function policyView() {
       </div>
       <div class="spacer"></div>
       ${shareToggle(p.my_pct)}
-      ${state.user.role === 'admin' ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
-      ${!isInvestorUser() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
-      ${isInvestorUser() ? '' : '<button class="primary" id="editBtn">Edit policy</button>'}
+      ${['admin', 'manager'].includes(state.user.role) ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
+      ${canEditData() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
+      ${canEditData() ? '<button class="primary" id="editBtn">Edit policy</button>' : ''}
     </div>
 
     <div class="kpi-row">
@@ -646,7 +668,7 @@ function overviewTab(p) {
       <td class="num">${ageFrom(i.dob) ?? '—'}</td>
       <td class="num">${i.le_months ?? '—'}</td>
       <td>${i.date_of_death ? fmtDate(i.date_of_death) : dash}</td>
-      <td>${isInvestorUser() ? '' : `
+      <td>${!canEditData() ? '' : `
         <button class="btn-sm" data-edit-life="${i.id}">Edit</button>
         ${isPrimary ? '' : `<button class="btn-sm btn-danger" data-remove-life="${linkId}">Remove</button>`}`}
       </td>
@@ -662,7 +684,7 @@ function overviewTab(p) {
   <div class="card">
     <div class="card-head"><h2>${isInvestorUser() ? 'Your position' : 'Ownership'}</h2>
       <div class="spacer"></div>
-      ${isInvestorUser() ? '' : `<span class="muted" style="font-size:12px">
+      ${!canEditData() ? '' : `<span class="muted" style="font-size:12px">
         ${allocated.toFixed(allocated % 1 ? 4 : 0)}% allocated${
           unallocated > 0.000001 ? ` · ${unallocated.toFixed(unallocated % 1 ? 4 : 0)}% unallocated` : ''}</span>
       <button class="btn-sm primary" id="addOwnerBtn" ${unallocated <= 0.000001 ? 'disabled title="Fully allocated"' : ''}>Add investor</button>`}
@@ -682,7 +704,7 @@ function overviewTab(p) {
                 <td class="num">${money(dbFull * Number(o.pct) / 100, 2)}</td>
                 <td class="num">${money(invFull * Number(o.pct) / 100, 2)}</td>
                 <td>${o.acquired_on ? fmtDate(o.acquired_on) : '<span class="muted">—</span>'}</td>
-                ${isInvestorUser() ? '' : `<td>
+                ${!canEditData() ? '' : `<td>
                   <button class="btn-sm" data-edit-owner="${o.id}" data-pct="${o.pct}"
                     data-name="${esc(o.name)}" data-acq="${o.acquired_on || ''}">Edit</button>
                   <button class="btn-sm btn-danger" data-del-owner="${o.id}" data-name="${esc(o.name)}">Remove</button>
@@ -703,7 +725,7 @@ function overviewTab(p) {
   ${ownershipCard}
   <div class="card">
     <div class="card-head"><h2>Lives insured</h2><div class="spacer"></div>
-      ${isInvestorUser() ? '' : '<button class="btn-sm primary" id="addLifeBtn">Add insured</button>'}</div>
+      ${canEditData() ? '<button class="btn-sm primary" id="addLifeBtn">Add insured</button>' : ''}</div>
     <div class="table-wrap">
       <table class="data">
         <thead><tr>
@@ -838,7 +860,7 @@ function valuesTab(p, values) {
 
   <div class="card">
     <div class="card-head"><h2>Recorded snapshots</h2><div class="spacer"></div>
-      <button class="btn-sm primary" id="addValueBtn">Add snapshot</button></div>
+      ${canEditData() ? '<button class="btn-sm primary" id="addValueBtn">Add snapshot</button>' : ''}</div>
     <div class="table-wrap">
       <table class="data">
         <thead><tr>
@@ -858,7 +880,7 @@ function valuesTab(p, values) {
                 <td class="num">${money(v.loan_balance, 2)}</td>
                 <td>${fmtDate(v.date_of_last_withdrawal)}</td>
                 <td class="muted">${esc(v.source)}</td>
-                <td><button class="btn-sm btn-danger" data-del-value="${v.id}">Delete</button></td>
+                <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-value="${v.id}">Delete</button>` : ''}</td>
               </tr>`).join('')}
         </tbody>
       </table>
@@ -893,7 +915,7 @@ function transactionsTab(p) {
 
   <div class="card">
     <div class="card-head"><h2>Ledger</h2><div class="spacer"></div>
-      <button class="btn-sm primary" id="addTxnBtn">Add transaction</button></div>
+      ${canEditData() ? '<button class="btn-sm primary" id="addTxnBtn">Add transaction</button>' : ''}</div>
     <div class="table-wrap">
       <table class="data">
         <thead><tr><th>Date</th><th>Type</th><th class="num">Amount</th><th>Remarks</th><th>Source</th><th></th></tr></thead>
@@ -906,7 +928,7 @@ function transactionsTab(p) {
                 <td class="num">${money(t.amount, 2)}</td>
                 <td class="secondary">${esc(t.remarks)}</td>
                 <td class="muted">${esc(t.source)}</td>
-                <td><button class="btn-sm btn-danger" data-del-txn="${t.id}">Delete</button></td>
+                <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-txn="${t.id}">Delete</button>` : ''}</td>
               </tr>`).join('')}
         </tbody>
       </table>
@@ -941,8 +963,8 @@ function servicingTab(p, monthsCovered) {
           <dt>Values as of</dt><dd>${fmtDate(p.value_as_of)}</dd>
         </dl>
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn-sm primary" id="logPremiumBtn">Log premium payment</button>
-          <button class="btn-sm" id="advanceDueBtn">Advance next due date</button>
+          ${canEditData() ? `<button class="btn-sm primary" id="logPremiumBtn">Log premium payment</button>
+          <button class="btn-sm" id="advanceDueBtn">Advance next due date</button>` : ''}
         </div>
       </div>
     </div>
@@ -1388,7 +1410,7 @@ async function insuredsView() {
         <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div>
       <div class="spacer"></div>
       <button id="exportInsuredsBtn">Export CSV</button>
-      <button class="primary" id="newInsuredBtn">New insured</button>
+      ${canEditData() ? '<button class="primary" id="newInsuredBtn">New insured</button>' : ''}
     </div>
 
     <div class="toolbar">
@@ -1416,7 +1438,7 @@ async function insuredsView() {
               <td class="num">${i.le_months ?? '—'}</td>
               <td class="num">${i.policy_count}</td>
               <td>${i.date_of_death ? fmtDate(i.date_of_death) : '<span class="muted">—</span>'}</td>
-              <td><button class="btn-sm" data-edit-insured="${i.id}">Edit</button></td>
+              <td>${canEditData() ? `<button class="btn-sm" data-edit-insured="${i.id}">Edit</button>` : ''}</td>
             </tr>`).join('')}
         </tbody>
       </table>
@@ -1430,7 +1452,7 @@ async function insuredsView() {
         clearTimeout(timer);
         timer = setTimeout(() => { state.insuredSearch = e.target.value; render(); }, 250);
       });
-      $('#newInsuredBtn').addEventListener('click', () => openInsuredDialog(null));
+      $('#newInsuredBtn')?.addEventListener('click', () => openInsuredDialog(null));
       document.querySelectorAll('[data-edit-insured]').forEach((b) =>
         b.addEventListener('click', async () => {
           const ins = await api(`/insureds/${b.dataset.editInsured}`);
@@ -1461,7 +1483,7 @@ const INVESTOR_TYPES = ['Individual', 'Entity', 'Trust', 'IRA', 'Other'];
 async function investorsView() {
   const rows = await api(`/investors?search=${encodeURIComponent(state.investorSearch)}`);
   state.investors = rows;
-  const canEditNow = ['admin', 'editor'].includes(state.user.role);
+  const canEditNow = canEditData();
 
   const totals = rows.reduce((a, r) => ({
     db: a.db + Number(r.death_benefit || 0),
@@ -1799,18 +1821,22 @@ async function handleFile(file) {
 async function settingsView() {
   const isAdmin = state.user.role === 'admin';
   const canEdit = ['admin', 'editor'].includes(state.user.role);
-  const investorUser = isInvestorUser();
+  // Anything beyond the password panel is off-limits to scoped accounts.
+  const accountOnly = isInvestorUser() || isManagerUser();
+  const investorUser = accountOnly;
   const [users, audit, funds] = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
-    investorUser ? Promise.resolve([]) : api('/funds'),
+    accountOnly ? Promise.resolve([]) : api('/funds'),
   ]);
   state.funds = funds;
 
   const html = `
-    <div class="page-head"><div><h1>${investorUser ? 'Account' : 'Settings'}</h1>
+    <div class="page-head"><div><h1>${accountOnly ? 'Account' : 'Settings'}</h1>
       <div class="sub">Signed in as ${esc(state.user.email)}${
-        investorUser && state.user.investor ? ` · ${esc(state.user.investor.name)}` : ` (${esc(state.user.role)})`}</div></div></div>
+        isInvestorUser() && state.user.investor ? ` · ${esc(state.user.investor.name)}`
+        : isManagerUser() && state.user.funds?.length ? ` · manager of ${state.user.funds.map((f) => esc(f.code)).join(', ')}`
+        : ` (${esc(state.user.role)})`}</div></div></div>
 
     <div class="grid-2">
       <div class="card">
@@ -1830,11 +1856,11 @@ async function settingsView() {
         <div class="card-head"><h2>Users</h2><div class="spacer"></div>
           <button class="btn-sm primary" id="addUserBtn">Add user</button></div>
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Investor</th><th>Last sign-in</th></tr></thead>
+          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Investor / entities</th><th>Last sign-in</th></tr></thead>
           <tbody>${users.map((u) => `<tr>
             <td class="strong">${esc(u.email)}</td><td>${esc(u.full_name)}</td>
             <td>${esc(u.role)}</td>
-            <td class="secondary">${esc(u.investor_name || '')}</td>
+            <td class="secondary">${esc(u.investor_name || u.fund_codes || '')}</td>
             <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-US') : 'never'}</td>
           </tr>`).join('')}</tbody>
         </table></div>
@@ -1917,7 +1943,16 @@ async function settingsView() {
           ${inputField('Email *', 'email', '', 'email', 'required')}
           ${inputField('Full name', 'full_name')}
           ${inputField('Password (10+ characters) *', 'password', '', 'password', 'required minlength=10')}
-          ${selectField('Role', 'role', 'editor', ['admin', 'editor', 'viewer', 'investor'])}
+          ${selectField('Role', 'role', 'editor', ['admin', 'editor', 'viewer', 'manager', 'investor'])}
+          <div class="field" id="fundPick" style="display:none">
+            <label>Owner entities *</label>
+            <select name="fund_ids" multiple size="${Math.min(5, Math.max(2, funds.length))}">
+              ${funds.map((f) => `<option value="${f.id}">${esc(f.code)}${f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+            </select>
+            <span class="muted" style="font-size:12px">
+              Hold ⌘ or Ctrl to pick several. This manager gets full access to the policies
+              in these entities, and no access to Settings.</span>
+          </div>
           <div class="field" id="investorPick" style="display:none">
             <label>Investor *</label>
             <select name="investor_id">
@@ -1935,6 +1970,7 @@ async function settingsView() {
         const roleSel = $('select[name=role]', dlg);
         const sync = () => {
           $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
+          $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
         };
         roleSel.addEventListener('change', sync);
         sync();

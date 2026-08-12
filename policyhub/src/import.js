@@ -105,7 +105,7 @@ const VALUE_KEYS = [
   'premium_paid_to_date', 'monthly_deduction', 'loan_balance', 'date_of_last_withdrawal',
 ];
 
-async function findPolicyId(row) {
+async function findPolicyId(row, allowedFunds = null) {
   const pn = str(row.policy_number);
   if (!pn) return null;
   const carrier = str(row.carrier_name);
@@ -113,8 +113,9 @@ async function findPolicyId(row) {
     `SELECT id FROM policies
       WHERE lower(policy_number) = lower($1)
         AND ($2 = '' OR lower(carrier_name) = lower($2))
+        AND ($3::int[] IS NULL OR fund_id = ANY($3))
       ORDER BY id LIMIT 1`,
-    [pn, carrier]
+    [pn, carrier, allowedFunds]
   );
   return rows[0]?.id || null;
 }
@@ -127,6 +128,7 @@ async function findPolicyId(row) {
 async function importPolicies(rows, opts, user) {
   const result = { created: 0, updated: 0, values: 0, errors: [] };
   const defaultAsOf = date(opts.asOfDate) || new Date().toISOString().slice(0, 10);
+  const allowedFunds = opts.fundScope || null;   // null = whole book
 
   for (const [i, row] of rows.entries()) {
     const line = i + 2;
@@ -140,6 +142,23 @@ async function importPolicies(rows, opts, user) {
       const insuredId = await resolveInsured(row);
       const fundId = await resolveFund(row);
       const existingId = await findPolicyId(row);
+
+      // A portfolio manager may only import into their own entities, and may
+      // not overwrite a policy that currently belongs to someone else's.
+      if (allowedFunds) {
+        if (!allowedFunds.includes(fundId)) {
+          result.errors.push({ line,
+            message: `Owner "${str(row.owner_account) || str(row.fund_code) || 'blank'}" is not one of your entities` });
+          continue;
+        }
+        if (existingId) {
+          const { rows: cur } = await q('SELECT fund_id FROM policies WHERE id = $1', [existingId]);
+          if (!cur[0] || !allowedFunds.includes(cur[0].fund_id)) {
+            result.errors.push({ line, message: 'That policy belongs to another entity' });
+            continue;
+          }
+        }
+      }
 
       const cols = {
         policy_number: str(row.policy_number),
@@ -243,11 +262,12 @@ async function importPolicies(rows, opts, user) {
 async function importValues(rows, opts) {
   const result = { created: 0, updated: 0, values: 0, errors: [] };
   const defaultAsOf = date(opts.asOfDate);
+  const allowedFunds = opts.fundScope || null;
 
   for (const [i, row] of rows.entries()) {
     const line = i + 2;
     try {
-      const policyId = await findPolicyId(row);
+      const policyId = await findPolicyId(row, allowedFunds);
       if (!policyId) {
         result.errors.push({ line, message: `No policy matches "${str(row.policy_number)}"` });
         continue;
@@ -288,12 +308,13 @@ async function importValues(rows, opts) {
 const TXN_TYPES = ['Acquisition Cost', 'Premium Payment', 'Withdrawal', 'Loan',
                    'Fee', 'Commission', 'Servicing', 'Other'];
 
-async function importTransactions(rows) {
+async function importTransactions(rows, opts = {}) {
   const result = { created: 0, updated: 0, values: 0, errors: [] };
+  const allowedFunds = opts.fundScope || null;
   for (const [i, row] of rows.entries()) {
     const line = i + 2;
     try {
-      const policyId = await findPolicyId(row);
+      const policyId = await findPolicyId(row, allowedFunds);
       if (!policyId) {
         result.errors.push({ line, message: `No policy matches "${str(row.policy_number)}"` });
         continue;

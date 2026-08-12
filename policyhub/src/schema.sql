@@ -121,6 +121,16 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS investor_id INTEGER
   REFERENCES investors(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_users_investor ON users (investor_id);
 
+-- Portfolio managers are scoped to one or more owning entities. Inside those
+-- entities they have full read/write; outside them the data does not exist.
+CREATE TABLE IF NOT EXISTS user_funds (
+  user_id    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+  fund_id    INTEGER NOT NULL REFERENCES funds(id)  ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, fund_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_funds_user ON user_funds (user_id);
+
 -- Additional lives on a policy (survivorship / second-to-die / joint).
 -- The PRIMARY insured stays on policies.insured_id; this table holds the
 -- extra lives, so there is exactly one source of truth for each.

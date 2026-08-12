@@ -38,6 +38,20 @@ export function requireAuth(req, res, next) {
   }
 }
 
+/**
+ * Portfolio managers are scoped to a set of owning entities. That set is read
+ * from the database on each request rather than baked into the token, so
+ * changing someone's entities takes effect immediately instead of at next login.
+ */
+export async function loadScope(req, res, next) {
+  req.user.fundIds = null;
+  if (req.user?.role === 'manager') {
+    const { rows } = await q('SELECT fund_id FROM user_funds WHERE user_id = $1', [req.user.uid]);
+    req.user.fundIds = rows.map((r) => r.fund_id);
+  }
+  next();
+}
+
 export function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Not signed in' });
@@ -109,7 +123,7 @@ export async function changePassword(req, res) {
 export async function createUser(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const role = ['admin', 'editor', 'viewer', 'investor'].includes(req.body.role)
+  const role = ['admin', 'editor', 'viewer', 'investor', 'manager'].includes(req.body.role)
     ? req.body.role
     : 'viewer';
   // An investor login is meaningless without the investor it belongs to.
@@ -127,7 +141,19 @@ export async function createUser(req, res) {
        VALUES ($1,$2,$3,$4,$5) RETURNING id, email, full_name, role, investor_id`,
       [email, hash, String(req.body.full_name || ''), role, investorId]
     );
-    await audit(req.user.uid, 'user', rows[0].id, 'create', email);
+    // Portfolio managers carry a list of entities they may work inside.
+    if (role === 'manager') {
+      const fundIds = (Array.isArray(req.body.fund_ids) ? req.body.fund_ids : [])
+        .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+      if (!fundIds.length) {
+        await q('DELETE FROM users WHERE id = $1', [rows[0].id]);
+        return res.status(400).json({ error: 'Choose at least one owner entity for this manager' });
+      }
+      for (const fid of fundIds)
+        await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+          [rows[0].id, fid]);
+    }
+    await audit(req.user.uid, 'user', rows[0].id, 'create', `${email} (${role})`);
     res.status(201).json(rows[0]);
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'That email already exists' });
