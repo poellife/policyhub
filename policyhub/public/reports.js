@@ -8,13 +8,13 @@
    in a 512 MB instance.
    ===================================================================== */
 
-import { lineChart, barChart, fmtMoney, fmtCompact } from './charts.js';
+import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const money = (v, dp = 0) =>
+const money = (v, dp = 2) =>
   v === null || v === undefined || v === '' ? '—' : fmtMoney(v, dp);
 
 const fmtDate = (d) => {
@@ -148,11 +148,11 @@ function buildSummary(d, o) {
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 6 : 4}">
       ${tile('Policies in force', t.policy_count, `Average insured age ${Math.round(Number(d.ages.avg_age)) || '—'}`)}
-      ${tile('Total death benefit', fmtCompact(dbTotal), `Face at issue ${fmtCompact(t.total_face)}`)}
-      ${tile('Cash surrender value', fmtCompact(t.total_csv), `Account value ${fmtCompact(t.total_av)}`)}
-      ${tile('Annual premium', fmtCompact(t.annual_premium), `Cost of insurance ${fmtCompact(t.monthly_coi)}/mo`)}
-      ${o.showBasis ? tile('Capital invested', fmtCompact(invested),
-          `${fmtCompact(t.total_acquisition)} acquisition · ${fmtCompact(t.total_premiums)} premium`) : ''}
+      ${tile('Total death benefit', fmtExact(dbTotal), `Face at issue ${fmtExact(t.total_face)}`)}
+      ${tile('Cash surrender value', fmtExact(t.total_csv), `Account value ${fmtExact(t.total_av)}`)}
+      ${tile('Annual premium', fmtExact(t.annual_premium), `Cost of insurance ${fmtExact(t.monthly_coi)}/mo`)}
+      ${o.showBasis ? tile('Capital invested', fmtExact(invested),
+          `${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premium`) : ''}
       ${o.showBasis ? tile('Benefit multiple', invested ? `${(dbTotal / invested).toFixed(2)}×` : '—',
           'Death benefit ÷ capital invested') : ''}
     </div>
@@ -257,10 +257,10 @@ function buildForecast(d, o) {
     ${confidential(false)}
 
     <div class="rpt-tiles" data-count="4">
-      ${tile('Next 12 months', fmtCompact(next12), 'Capital required')}
-      ${tile(`Full ${d.months}-month total`, fmtCompact(d.grandTotal), `${d.policiesScheduled} policies scheduled`)}
-      ${tile('Average active month', fmtCompact(avg), `${active.length} months with payments due`)}
-      ${tile('Peak month', peak ? fmtCompact(peak.total) : '—', peak ? monthLabel(peak.month) : '')}
+      ${tile('Next 12 months', fmtExact(next12), 'Capital required')}
+      ${tile(`Full ${d.months}-month total`, fmtExact(d.grandTotal), `${d.policiesScheduled} policies scheduled`)}
+      ${tile('Average active month', fmtExact(avg), `${active.length} months with payments due`)}
+      ${tile('Peak month', peak ? fmtExact(peak.total) : '—', peak ? monthLabel(peak.month) : '')}
     </div>
 
     <div class="rpt-block avoid-break">
@@ -354,20 +354,20 @@ function buildFactSheets(sheets, o) {
 
       <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 4}">
         <div class="rpt-tile"><div class="rpt-tile-label">Death benefit</div>
-          <div class="rpt-tile-value">${fmtCompact(p.death_benefit ?? p.face_amount)}</div>
-          <div class="rpt-tile-note">Face at issue ${fmtCompact(p.face_amount)}</div></div>
+          <div class="rpt-tile-value">${fmtExact(p.death_benefit ?? p.face_amount)}</div>
+          <div class="rpt-tile-note">Face at issue ${fmtExact(p.face_amount)}</div></div>
         <div class="rpt-tile"><div class="rpt-tile-label">Cash surrender value</div>
-          <div class="rpt-tile-value">${fmtCompact(p.cash_surrender_value)}</div>
-          <div class="rpt-tile-note">AV ${fmtCompact(p.account_value)}</div></div>
+          <div class="rpt-tile-value">${fmtExact(p.cash_surrender_value)}</div>
+          <div class="rpt-tile-note">AV ${fmtExact(p.account_value)}</div></div>
         <div class="rpt-tile"><div class="rpt-tile-label">Annual premium</div>
-          <div class="rpt-tile-value">${fmtCompact(p.premium_required)}</div>
+          <div class="rpt-tile-value">${fmtExact(p.premium_required)}</div>
           <div class="rpt-tile-note">${esc(p.premium_mode || '')}</div></div>
         <div class="rpt-tile"><div class="rpt-tile-label">Coverage runway</div>
           <div class="rpt-tile-value">${runway ? `${runway} mo` : '—'}</div>
           <div class="rpt-tile-note">Account value ÷ monthly COI</div></div>
         ${o.showBasis ? `<div class="rpt-tile"><div class="rpt-tile-label">Capital invested</div>
-          <div class="rpt-tile-value">${fmtCompact(p.total_invested)}</div>
-          <div class="rpt-tile-note">${fmtCompact(p.total_acquisition)} acquisition</div></div>` : ''}
+          <div class="rpt-tile-value">${fmtExact(p.total_invested)}</div>
+          <div class="rpt-tile-note">${fmtExact(p.total_acquisition)} acquisition</div></div>` : ''}
       </div>
 
       <div class="rpt-cols">
@@ -453,8 +453,11 @@ function buildFactSheets(sheets, o) {
 /* ------------------------------- view -------------------------------- */
 
 export async function reportsView(api, state) {
+  const investorUser = state.user?.role === 'investor';
   const [funds, policies] = await Promise.all([
-    state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
+    // Owner entities are internal reference data; investors are denied them.
+    investorUser ? Promise.resolve([])
+      : state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
     api('/policies'),
   ]);
   state.funds = funds;
@@ -465,8 +468,9 @@ export async function reportsView(api, state) {
 
   const html = `
     <div class="page-head no-print">
-      <div><h1>Reports</h1>
-        <div class="sub">Print-ready documents. Generate, review, then save as PDF.</div></div>
+      <div><h1>${investorUser ? 'Statements' : 'Reports'}</h1>
+        <div class="sub">Print-ready documents. Generate, review, then save as PDF.${
+          investorUser ? ' Figures reflect your ownership percentage.' : ''}</div></div>
     </div>
 
     <div class="card no-print">
@@ -486,7 +490,7 @@ export async function reportsView(api, state) {
         <div class="field-row">
           <div class="field"><label>As-of date</label>
             <input type="date" id="rptAsOf" value="${new Date().toISOString().slice(0, 10)}"></div>
-          <div class="field"><label>Owner / fund</label>
+          <div class="field" style="${investorUser ? 'display:none' : ''}"><label>Owner / fund</label>
             <select id="rptFund"><option value="">All owners</option>
               ${funds.map((f) => `<option ${r.fund === f.code ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
             </select></div>

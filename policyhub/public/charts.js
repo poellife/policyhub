@@ -16,6 +16,16 @@ export const fmtMoney = (v, dp = 0) =>
         minimumFractionDigits: dp, maximumFractionDigits: dp,
       });
 
+/** Full precision, always two decimals — for stat tiles and table totals.
+    fmtCompact stays for chart axes, where exact values are unreadable. */
+export const fmtExact = (v) =>
+  v === null || v === undefined || v === '' || Number.isNaN(Number(v))
+    ? '—'
+    : Number(v).toLocaleString('en-US', {
+        style: 'currency', currency: 'USD',
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+      });
+
 export const fmtCompact = (v) => {
   const n = Number(v) || 0;
   const a = Math.abs(n);

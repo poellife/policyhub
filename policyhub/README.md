@@ -20,6 +20,7 @@ leaves your database.
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
 | **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
+| **Investors** | Directory of investors with position counts and their share of death benefit, capital invested and cash value. Each investor has a page listing every position and its percentage. |
 | **Settings** | Password change, **owner entities**, user management (admin), and a full activity log. |
 
 **Owner entities** are managed in Settings — create, rename, annotate, and see each
@@ -36,6 +37,38 @@ insured, face amount, capital invested and the number of rows destroyed — the
 activity log is the only record that survives. Setting the status to Sold, Matured
 or Lapsed is the non-destructive alternative: it drops the policy out of the
 dashboard, alerts and reports while keeping its history.
+
+## Fractional ownership and the investor portal
+
+An owning **entity** (LCG1, LCG2) holds a policy on paper. **Investors** hold
+economic percentages of it. Both are recorded: a policy's Overview tab carries an
+ownership cap table showing each investor's share, the dollar value of that share,
+and any unallocated remainder. Allocations are refused if they would push a policy
+past 100%.
+
+A user account with the role **investor** is tied to one investor record and sees
+only the policies that investor holds a piece of. That restriction is enforced in
+SQL on every read endpoint, not by hiding buttons — `scripts/investor-security-test.mjs`
+attempts cross-investor access directly against the API and asserts every attempt
+fails.
+
+What an investor login gets:
+
+- **Portfolio** — dashboard totals weighted by their ownership percentage
+- **My policies** — only their positions, with a *My share / Full policy* toggle
+  that rescales every figure on the page
+- **Premiums** — their share of upcoming premium obligations
+- **Statements** — the same four reports, scoped and weighted to their holdings
+- **Account** — password change only
+
+What they cannot reach, by role and by query: other investors' positions, the
+investor directory, owner entities, the user list, the activity log, CSV import,
+and every write endpoint including on policies they do hold. On a policy shared
+with another investor they see only their own cap-table line — never a co-owner's
+name or percentage.
+
+Insured details (name, date of birth, life expectancy) and cost basis (acquisition
+cost, capital invested) **are** visible to investors, as configured.
 
 ### Alert rules
 
@@ -58,6 +91,10 @@ policy_insureds  additional lives on a policy (joint / survivorship / secondary)
                  the primary insured stays on policies.insured_id
 policy_values    one row per as-of date: AV, CSV, COI, death benefit, loan, last withdrawal
 transactions     dated ledger: acquisition cost, premium payment, fee, withdrawal, …
+investors        investor of record: name, legal name, type, contact, tax id last 4
+policy_investors fractional allocation: policy + investor + percentage; a policy's
+                 allocations may total under 100% but never over
+users.investor_id ties a login to an investor; that session is scoped to their book
 audit_log        who changed what, when
 ```
 
@@ -143,6 +180,17 @@ mode. Cost of insurance on universal life rises with insured age, so later years
 understate the true requirement — the report says so on its face rather than
 implying false precision. Policies missing a premium amount or a next-due date
 are listed separately and excluded from the totals rather than silently dropped.
+
+## Number formatting
+
+Stat tiles, table totals and every money figure in the interface and reports show
+the exact amount to the cent — `$1,940,000.00`, never `$1.9M`. Rounded display on a
+book of record hides the number people actually need to reconcile against.
+
+The one exception is **chart axes and bar labels**, which stay in compact form
+(`$20M`, `$150K`). Exact values there would collide and be unreadable, and an axis
+tick is a scale reference rather than a figure anyone reconciles. Hover any point
+for the precise value.
 
 ## Design
 

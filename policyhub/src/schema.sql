@@ -80,6 +80,47 @@ CREATE INDEX IF NOT EXISTS idx_policies_insured ON policies (insured_id);
 CREATE INDEX IF NOT EXISTS idx_policies_status  ON policies (status);
 CREATE INDEX IF NOT EXISTS idx_policies_due     ON policies (next_premium_due);
 
+-- ---------------------------------------------------------------------
+--  Investors and fractional ownership
+--
+--  An owning entity (funds) holds a policy on paper; investors hold
+--  economic percentages of it. A policy's allocations may total less than
+--  100% (the remainder is unallocated / house) but never more.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investors (
+  id            SERIAL PRIMARY KEY,
+  name          TEXT NOT NULL,
+  legal_name    TEXT NOT NULL DEFAULT '',
+  investor_type TEXT NOT NULL DEFAULT 'Individual', -- Individual | Entity | Trust | IRA | Other
+  email         TEXT NOT NULL DEFAULT '',
+  phone         TEXT NOT NULL DEFAULT '',
+  tax_id_last4  TEXT NOT NULL DEFAULT '',
+  notes         TEXT NOT NULL DEFAULT '',
+  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_investors_name ON investors (lower(name));
+
+CREATE TABLE IF NOT EXISTS policy_investors (
+  id           SERIAL PRIMARY KEY,
+  policy_id    INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+  investor_id  INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  pct          NUMERIC(9,6) NOT NULL CHECK (pct > 0 AND pct <= 100),
+  acquired_on  DATE,
+  notes        TEXT NOT NULL DEFAULT '',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (policy_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pi_policy   ON policy_investors (policy_id);
+CREATE INDEX IF NOT EXISTS idx_pi_investor ON policy_investors (investor_id);
+
+-- A login may be tied to an investor; that user sees only that investor's
+-- positions. Staff logins leave this null.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS investor_id INTEGER
+  REFERENCES investors(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_users_investor ON users (investor_id);
+
 -- Additional lives on a policy (survivorship / second-to-die / joint).
 -- The PRIMARY insured stays on policies.insured_id; this table holds the
 -- extra lives, so there is exactly one source of truth for each.

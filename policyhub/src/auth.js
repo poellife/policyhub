@@ -10,7 +10,8 @@ const MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 export function issueToken(res, user) {
   const token = jwt.sign(
-    { uid: user.id, email: user.email, role: user.role, name: user.full_name },
+    { uid: user.id, email: user.email, role: user.role, name: user.full_name,
+      iid: user.investor_id || null },   // investor logins carry their investor id
     SECRET,
     { expiresIn: '12h' }
   );
@@ -108,9 +109,13 @@ export async function changePassword(req, res) {
 export async function createUser(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const role = ['admin', 'editor', 'viewer'].includes(req.body.role)
+  const role = ['admin', 'editor', 'viewer', 'investor'].includes(req.body.role)
     ? req.body.role
     : 'viewer';
+  // An investor login is meaningless without the investor it belongs to.
+  const investorId = role === 'investor' ? parseInt(req.body.investor_id, 10) : null;
+  if (role === 'investor' && !Number.isInteger(investorId))
+    return res.status(400).json({ error: 'Choose which investor this login belongs to' });
   if (!email || password.length < 10)
     return res
       .status(400)
@@ -118,9 +123,9 @@ export async function createUser(req, res) {
   const hash = await bcrypt.hash(password, 12);
   try {
     const { rows } = await q(
-      `INSERT INTO users (email, password_hash, full_name, role)
-       VALUES ($1,$2,$3,$4) RETURNING id, email, full_name, role`,
-      [email, hash, String(req.body.full_name || ''), role]
+      `INSERT INTO users (email, password_hash, full_name, role, investor_id)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id, email, full_name, role, investor_id`,
+      [email, hash, String(req.body.full_name || ''), role, investorId]
     );
     await audit(req.user.uid, 'user', rows[0].id, 'create', email);
     res.status(201).json(rows[0]);

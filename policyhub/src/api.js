@@ -4,6 +4,38 @@ import { requireAuth, requireRole, login, changePassword, createUser, clearToken
 
 const router = express.Router();
 const canEdit = requireRole('admin', 'editor');
+/** Internal staff. Investors are deliberately excluded from every one of these. */
+const staffOnly = requireRole('admin', 'editor', 'viewer');
+
+/* ------------------------------------------------------------------ *
+ * Investor scoping
+ *
+ * An investor login may only ever reach policies it holds a percentage
+ * of. That is enforced here, in the SQL, rather than in the UI — every
+ * read endpoint passes `scopeId(req)` into an EXISTS check. A null scope
+ * (staff) matches everything.
+ * ------------------------------------------------------------------ */
+
+const isInvestor = (req) => req.user?.role === 'investor';
+const scopeId = (req) => (isInvestor(req) ? Number(req.user.iid) || -1 : null);
+
+/** SQL fragment restricting `<policyCol>` to the scoped investor's holdings. */
+const ownedBy = (policyCol, paramIndex) =>
+  `($${paramIndex}::int IS NULL OR EXISTS (
+      SELECT 1 FROM policy_investors pix
+       WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${paramIndex}))`;
+
+/** The investor's percentage of a policy, or 100 for staff (whole book). */
+const shareOf = (policyCol, paramIndex) =>
+  `COALESCE((SELECT pix.pct FROM policy_investors pix
+              WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${paramIndex}), 100)`;
+
+/** Blocks investors from staff-only routes with a clear message. */
+function blockInvestors(req, res, next) {
+  if (isInvestor(req))
+    return res.status(403).json({ error: 'Not available on an investor account' });
+  next();
+}
 
 /* ------------------------------------------------------------------ *
  * helpers
@@ -85,13 +117,21 @@ const TXN_FIELDS = { txn_date: date, txn_type: str, amount: num, remarks: str };
 
 router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
-router.get('/auth/me', requireAuth, (req, res) =>
-  res.json({ id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role })
-);
+router.get('/auth/me', requireAuth, wrap(async (req, res) => {
+  const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role };
+  if (req.user.role === 'investor' && req.user.iid) {
+    const { rows } = await q('SELECT id, name FROM investors WHERE id = $1', [req.user.iid]);
+    out.investor = rows[0] || null;
+  }
+  res.json(out);
+}));
 router.post('/auth/password', requireAuth, wrap(changePassword));
 router.get('/users', requireAuth, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
-    'SELECT id, email, full_name, role, is_active, last_login_at FROM users ORDER BY id'
+    `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
+            u.investor_id, i.name AS investor_name
+       FROM users u LEFT JOIN investors i ON i.id = u.investor_id
+      ORDER BY u.id`
   );
   res.json(rows);
 }));
@@ -103,7 +143,7 @@ router.use(requireAuth); // everything below requires a session
  * funds
  * ------------------------------------------------------------------ */
 
-router.get('/funds', wrap(async (req, res) => {
+router.get('/funds', blockInvestors, wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT f.*,
             COUNT(p.id)::int AS policy_count,
@@ -119,7 +159,7 @@ router.get('/funds', wrap(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/funds', canEdit, wrap(async (req, res) => {
+router.post('/funds', blockInvestors, canEdit, wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   const { rows } = await q(
@@ -134,7 +174,7 @@ router.post('/funds', canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.put('/funds/:id', canEdit, wrap(async (req, res) => {
+router.put('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   try {
@@ -153,7 +193,7 @@ router.put('/funds/:id', canEdit, wrap(async (req, res) => {
 }));
 
 /** Refuses to orphan policies — reassign them first. */
-router.delete('/funds/:id', canEdit, wrap(async (req, res) => {
+router.delete('/funds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const { rows: used } = await q(
     'SELECT COUNT(*)::int AS n FROM policies WHERE fund_id = $1', [req.params.id]
   );
@@ -174,25 +214,39 @@ router.delete('/funds/:id', canEdit, wrap(async (req, res) => {
 
 router.get('/insureds', wrap(async (req, res) => {
   const search = str(req.query.search);
+  const scope = scopeId(req);
   const { rows } = await q(
     `SELECT i.*, COUNT(p.id)::int AS policy_count
-       FROM insureds i LEFT JOIN policies p ON p.insured_id = i.id
+       FROM insureds i
+       JOIN policies p ON p.insured_id = i.id AND ${ownedBy('p.id', 2)}
       WHERE ($1 = '' OR i.first_name ILIKE '%'||$1||'%' OR i.last_name ILIKE '%'||$1||'%'
              OR i.display_name ILIKE '%'||$1||'%')
       GROUP BY i.id ORDER BY i.last_name, i.first_name`,
-    [search]
+    [search, scope]
   );
   res.json(rows);
 }));
 
 router.get('/insureds/:id', wrap(async (req, res) => {
-  const { rows } = await q('SELECT * FROM insureds WHERE id = $1', [req.params.id]);
+  const scope = scopeId(req);
+  const { rows } = await q(
+    `SELECT i.* FROM insureds i
+      WHERE i.id = $1
+        AND ($2::int IS NULL OR EXISTS (
+              SELECT 1 FROM policies p
+               WHERE p.insured_id = i.id AND ${ownedBy('p.id', 2)}))`,
+    [req.params.id, scope]
+  );
   if (!rows[0]) return res.status(404).json({ error: 'Insured not found' });
-  const pol = await q('SELECT * FROM policy_latest WHERE insured_id = $1', [req.params.id]);
+  const pol = await q(
+    `SELECT pl.* FROM policy_latest pl
+      WHERE pl.insured_id = $1 AND ${ownedBy('pl.id', 2)}`,
+    [req.params.id, scope]
+  );
   res.json({ ...rows[0], policies: pol.rows });
 }));
 
-router.post('/insureds', canEdit, wrap(async (req, res) => {
+router.post('/insureds', blockInvestors, canEdit, wrap(async (req, res) => {
   const { cols, vals } = buildSet(INSURED_FIELDS, req.body);
   if (!cols.length) return res.status(400).json({ error: 'No fields supplied' });
   const ph = cols.map((_, i) => `$${i + 1}`).join(',');
@@ -203,7 +257,7 @@ router.post('/insureds', canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.put('/insureds/:id', canEdit, wrap(async (req, res) => {
+router.put('/insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const { sets, vals, next } = buildSet(INSURED_FIELDS, req.body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(
@@ -223,23 +277,34 @@ router.get('/policies', wrap(async (req, res) => {
   const search = str(req.query.search);
   const status = str(req.query.status);
   const fund = str(req.query.fund);
+  const scope = scopeId(req);
   const { rows } = await q(
-    `SELECT * FROM policy_latest
-      WHERE ($1 = '' OR policy_number ILIKE '%'||$1||'%'
-             OR carrier_name ILIKE '%'||$1||'%'
-             OR insured_last ILIKE '%'||$1||'%'
-             OR insured_first ILIKE '%'||$1||'%'
-             OR display_name ILIKE '%'||$1||'%')
-        AND ($2 = '' OR status = $2)
-        AND ($3 = '' OR fund_code = $3)
-      ORDER BY insured_last, insured_first, policy_number`,
-    [search, status, fund]
+    `SELECT pl.*, ${shareOf('pl.id', 4)} AS my_pct
+       FROM policy_latest pl
+      WHERE ($1 = '' OR pl.policy_number ILIKE '%'||$1||'%'
+             OR pl.carrier_name ILIKE '%'||$1||'%'
+             OR pl.insured_last ILIKE '%'||$1||'%'
+             OR pl.insured_first ILIKE '%'||$1||'%'
+             OR pl.display_name ILIKE '%'||$1||'%')
+        AND ($2 = '' OR pl.status = $2)
+        AND ($3 = '' OR pl.fund_code = $3)
+        AND ${ownedBy('pl.id', 4)}
+      ORDER BY pl.insured_last, pl.insured_first, pl.policy_number`,
+    [search, status, fund, scope]
   );
   res.json(rows);
 }));
 
 router.get('/policies/:id', wrap(async (req, res) => {
-  const { rows } = await q('SELECT * FROM policy_latest WHERE id = $1', [req.params.id]);
+  const scope = scopeId(req);
+  const { rows } = await q(
+    `SELECT pl.*, ${shareOf('pl.id', 2)} AS my_pct
+       FROM policy_latest pl
+      WHERE pl.id = $1 AND ${ownedBy('pl.id', 2)}`,
+    [req.params.id, scope]
+  );
+  // A policy the investor doesn't hold is reported as missing, not forbidden —
+  // "forbidden" would confirm it exists.
   if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
   const [values, txns, extra] = await Promise.all([
     q('SELECT * FROM policy_values WHERE policy_id = $1 ORDER BY as_of_date DESC', [req.params.id]),
@@ -248,17 +313,28 @@ router.get('/policies/:id', wrap(async (req, res) => {
          FROM policy_insureds pi JOIN insureds i ON i.id = pi.insured_id
         WHERE pi.policy_id = $1 ORDER BY pi.id`, [req.params.id]),
   ]);
+  // Staff see the whole cap table; an investor sees only their own line.
+  const owners = await q(
+    `SELECT pi.id, pi.pct, pi.acquired_on, pi.notes,
+            i.id AS investor_id, i.name, i.investor_type
+       FROM policy_investors pi JOIN investors i ON i.id = pi.investor_id
+      WHERE pi.policy_id = $1 AND ($2::int IS NULL OR pi.investor_id = $2)
+      ORDER BY pi.pct DESC, i.name`,
+    [req.params.id, scope]
+  );
+
   res.json({
     ...rows[0],
     values: values.rows,
     transactions: txns.rows,
     additionalInsureds: extra.rows,
+    owners: owners.rows,
   });
 }));
 
 /* ---- additional lives on a policy (survivorship / joint) ---- */
 
-router.post('/policies/:id/insureds', canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/insureds', blockInvestors, canEdit, wrap(async (req, res) => {
   const insuredId = await resolveInsured(req.body);
   if (!insuredId) return res.status(400).json({ error: 'A last name is required' });
 
@@ -284,14 +360,14 @@ router.post('/policies/:id/insureds', canEdit, wrap(async (req, res) => {
   }
 }));
 
-router.delete('/policy-insureds/:id', canEdit, wrap(async (req, res) => {
+router.delete('/policy-insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const { rowCount } = await q('DELETE FROM policy_insureds WHERE id = $1', [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'Not found' });
   await audit(req.user.uid, 'policy_insured', req.params.id, 'delete', '');
   res.json({ ok: true });
 }));
 
-router.post('/policies', canEdit, wrap(async (req, res) => {
+router.post('/policies', blockInvestors, canEdit, wrap(async (req, res) => {
   const body = { ...req.body };
   body.insured_id = await resolveInsured(body);
   body.fund_id = await resolveFund(body);
@@ -306,7 +382,7 @@ router.post('/policies', canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.put('/policies/:id', canEdit, wrap(async (req, res) => {
+router.put('/policies/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const body = { ...req.body };
   if (body.insured_name || body.insured_last_name) body.insured_id = await resolveInsured(body);
   // Present-but-empty means "no owner", so test for the key rather than truthiness.
@@ -327,7 +403,7 @@ router.put('/policies/:id', canEdit, wrap(async (req, res) => {
  * links, so the audit entry captures what was destroyed before it goes — the
  * activity log is the only remaining record afterwards.
  */
-router.delete('/policies/:id', requireRole('admin'), wrap(async (req, res) => {
+router.delete('/policies/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT p.*, i.first_name, i.last_name,
             (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id) AS value_count,
@@ -358,7 +434,7 @@ router.delete('/policies/:id', requireRole('admin'), wrap(async (req, res) => {
  * value snapshots
  * ------------------------------------------------------------------ */
 
-router.post('/policies/:id/values', canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/values', blockInvestors, canEdit, wrap(async (req, res) => {
   const { cols, vals } = buildSet(VALUE_FIELDS, req.body);
   if (!cols.includes('as_of_date'))
     return res.status(400).json({ error: 'An "as of" date is required' });
@@ -375,7 +451,7 @@ router.post('/policies/:id/values', canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.delete('/values/:id', canEdit, wrap(async (req, res) => {
+router.delete('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   await q('DELETE FROM policy_values WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 }));
@@ -384,7 +460,7 @@ router.delete('/values/:id', canEdit, wrap(async (req, res) => {
  * transactions
  * ------------------------------------------------------------------ */
 
-router.post('/policies/:id/transactions', canEdit, wrap(async (req, res) => {
+router.post('/policies/:id/transactions', blockInvestors, canEdit, wrap(async (req, res) => {
   const { cols, vals } = buildSet(TXN_FIELDS, req.body);
   if (!cols.includes('txn_date') || !cols.includes('txn_type'))
     return res.status(400).json({ error: 'Date and type are required' });
@@ -398,7 +474,7 @@ router.post('/policies/:id/transactions', canEdit, wrap(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.delete('/transactions/:id', canEdit, wrap(async (req, res) => {
+router.delete('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   await q('DELETE FROM transactions WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 }));
@@ -408,31 +484,42 @@ router.delete('/transactions/:id', canEdit, wrap(async (req, res) => {
  * ------------------------------------------------------------------ */
 
 router.get('/analytics/summary', wrap(async (req, res) => {
+  const scope = scopeId(req);
+  // For an investor every money figure is multiplied by their percentage, so
+  // the dashboard reads as *their* portfolio rather than the whole book.
+  const w = `(${shareOf('pl.id', 1)} / 100.0)`;
+
   const [totals, byCarrier, invested, ages] = await Promise.all([
     q(`SELECT
-         COUNT(*)::int                                        AS policy_count,
-         COUNT(*) FILTER (WHERE status = 'Inforce')::int      AS inforce_count,
-         COALESCE(SUM(face_amount),0)                         AS total_face,
-         COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS total_death_benefit,
-         COALESCE(SUM(cash_surrender_value),0)                AS total_csv,
-         COALESCE(SUM(account_value),0)                       AS total_av,
-         COALESCE(SUM(total_invested),0)                      AS total_invested,
-         COALESCE(SUM(total_acquisition),0)                   AS total_acquisition,
-         COALESCE(SUM(total_premiums),0)                      AS total_premiums,
-         COALESCE(SUM(cost_of_insurance),0)                   AS monthly_coi
-       FROM policy_latest WHERE status NOT IN ('Lapsed','Sold','Matured')`),
-    q(`SELECT carrier_name, COUNT(*)::int AS n, COALESCE(SUM(face_amount),0) AS face
-         FROM policy_latest WHERE status NOT IN ('Lapsed','Sold','Matured')
-        GROUP BY carrier_name ORDER BY face DESC`),
-    q(`SELECT to_char(date_trunc('month', txn_date),'YYYY-MM') AS month,
-              SUM(amount) AS amount
-         FROM transactions
-        WHERE txn_type IN ('Acquisition Cost','Premium Payment','Fee','Servicing','Commission')
-        GROUP BY 1 ORDER BY 1`),
+         COUNT(*)::int                                            AS policy_count,
+         COUNT(*) FILTER (WHERE pl.status = 'Inforce')::int        AS inforce_count,
+         COALESCE(SUM(pl.face_amount * ${w}),0)                    AS total_face,
+         COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS total_death_benefit,
+         COALESCE(SUM(pl.cash_surrender_value * ${w}),0)           AS total_csv,
+         COALESCE(SUM(pl.account_value * ${w}),0)                  AS total_av,
+         COALESCE(SUM(pl.total_invested * ${w}),0)                 AS total_invested,
+         COALESCE(SUM(pl.total_acquisition * ${w}),0)              AS total_acquisition,
+         COALESCE(SUM(pl.total_premiums * ${w}),0)                 AS total_premiums,
+         COALESCE(SUM(pl.cost_of_insurance * ${w}),0)              AS monthly_coi
+       FROM policy_latest pl
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}`, [scope]),
+    q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
+              COALESCE(SUM(pl.face_amount * ${w}),0) AS face
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}
+        GROUP BY pl.carrier_name ORDER BY face DESC`, [scope]),
+    q(`SELECT to_char(date_trunc('month', t.txn_date),'YYYY-MM') AS month,
+              SUM(t.amount * (COALESCE((SELECT pix.pct FROM policy_investors pix
+                    WHERE pix.policy_id = t.policy_id AND pix.investor_id = $1), 100) / 100.0)) AS amount
+         FROM transactions t
+        WHERE t.txn_type IN ('Acquisition Cost','Premium Payment','Fee','Servicing','Commission')
+          AND ${ownedBy('t.policy_id', 1)}
+        GROUP BY 1 ORDER BY 1`, [scope]),
     q(`SELECT
-         COALESCE(AVG(EXTRACT(YEAR FROM age(insured_dob))),0) AS avg_age,
-         COUNT(*) FILTER (WHERE insured_dob IS NOT NULL)::int AS with_dob
-       FROM policy_latest WHERE status NOT IN ('Lapsed','Sold','Matured')`),
+         COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
+         COUNT(*) FILTER (WHERE pl.insured_dob IS NOT NULL)::int AS with_dob
+       FROM policy_latest pl
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}`, [scope]),
   ]);
 
   // Running total of capital deployed. Months with no activity are filled in
@@ -459,6 +546,7 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
+    scopedToInvestor: scope !== null,
   });
 }));
 
@@ -467,15 +555,21 @@ router.get('/analytics/summary', wrap(async (req, res) => {
  * ------------------------------------------------------------------ */
 
 router.get('/servicing', wrap(async (req, res) => {
+  const scope = scopeId(req);
   const { rows } = await q(
-    `SELECT id, policy_number, carrier_name, display_name, insured_first, insured_last,
-            status, premium_required, premium_mode, next_premium_due, grace_period_days,
-            face_amount, account_value, cash_surrender_value, cost_of_insurance,
-            value_as_of, date_of_last_withdrawal,
-            (next_premium_due - CURRENT_DATE) AS days_until_due
-       FROM policy_latest
-      WHERE status NOT IN ('Lapsed','Sold','Matured')
-      ORDER BY next_premium_due NULLS LAST`
+    `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
+            pl.insured_first, pl.insured_last,
+            pl.status, pl.premium_mode, pl.next_premium_due, pl.grace_period_days,
+            pl.face_amount, pl.account_value, pl.cash_surrender_value, pl.cost_of_insurance,
+            pl.value_as_of, pl.date_of_last_withdrawal,
+            ${shareOf('pl.id', 1)} AS my_pct,
+            pl.premium_required * (${shareOf('pl.id', 1)} / 100.0) AS premium_required,
+            pl.premium_required AS premium_required_full,
+            (pl.next_premium_due - CURRENT_DATE) AS days_until_due
+       FROM policy_latest pl
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${ownedBy('pl.id', 1)}
+      ORDER BY pl.next_premium_due NULLS LAST`,
+    [scope]
   );
 
   const alerts = [];
@@ -526,6 +620,166 @@ router.get('/servicing', wrap(async (req, res) => {
 }));
 
 /* ------------------------------------------------------------------ *
+ * investors and fractional ownership
+ * ------------------------------------------------------------------ */
+
+const INVESTOR_FIELDS = {
+  name: str, legal_name: str, investor_type: str, email: str,
+  phone: str, tax_id_last4: str, notes: str,
+};
+
+router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
+  const search = str(req.query.search);
+  const { rows } = await q(
+    `SELECT inv.*,
+            COUNT(pi.id)::int AS position_count,
+            COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * pi.pct / 100.0), 0) AS death_benefit,
+            COALESCE(SUM(pl.total_invested * pi.pct / 100.0), 0) AS invested,
+            COALESCE(SUM(pl.cash_surrender_value * pi.pct / 100.0), 0) AS csv
+       FROM investors inv
+       LEFT JOIN policy_investors pi ON pi.investor_id = inv.id
+       LEFT JOIN policy_latest pl ON pl.id = pi.policy_id
+                                 AND pl.status NOT IN ('Lapsed','Sold','Matured')
+      WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
+             OR inv.email ILIKE '%'||$1||'%')
+      GROUP BY inv.id ORDER BY inv.name`,
+    [search]
+  );
+  res.json(rows);
+}));
+
+router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) => {
+  const { rows } = await q('SELECT * FROM investors WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+  const positions = await q(
+    `SELECT pi.id AS link_id, pi.pct, pi.acquired_on, pi.notes AS link_notes,
+            pl.id, pl.policy_number, pl.carrier_name, pl.product_type, pl.status,
+            pl.insured_first, pl.insured_last, pl.display_name, pl.fund_code,
+            pl.face_amount, pl.death_benefit, pl.cash_surrender_value,
+            pl.account_value, pl.cost_of_insurance, pl.premium_required,
+            pl.total_invested
+       FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
+      WHERE pi.investor_id = $1
+      ORDER BY pl.insured_last, pl.policy_number`,
+    [req.params.id]
+  );
+  const logins = await q(
+    'SELECT id, email, full_name, is_active, last_login_at FROM users WHERE investor_id = $1',
+    [req.params.id]
+  );
+  res.json({ ...rows[0], positions: positions.rows, logins: logins.rows });
+}));
+
+router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
+  if (!str(req.body.name)) return res.status(400).json({ error: 'A name is required' });
+  const { cols, vals } = buildSet(INVESTOR_FIELDS, req.body);
+  const ph = cols.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await q(
+    `INSERT INTO investors (${cols.join(',')}) VALUES (${ph}) RETURNING *`, vals
+  );
+  await audit(req.user.uid, 'investor', rows[0].id, 'create', rows[0].name);
+  res.status(201).json(rows[0]);
+}));
+
+router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { sets, vals, next } = buildSet(INVESTOR_FIELDS, req.body);
+  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+  const { rows } = await q(
+    `UPDATE investors SET ${sets.join(',')}, updated_at = now() WHERE id = $${next} RETURNING *`,
+    [...vals, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+  await audit(req.user.uid, 'investor', rows[0].id, 'update', rows[0].name);
+  res.json(rows[0]);
+}));
+
+router.delete('/investors/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const [{ rows: pos }, { rows: usr }] = await Promise.all([
+    q('SELECT COUNT(*)::int AS n FROM policy_investors WHERE investor_id = $1', [req.params.id]),
+    q('SELECT COUNT(*)::int AS n FROM users WHERE investor_id = $1', [req.params.id]),
+  ]);
+  if (pos[0].n > 0)
+    return res.status(409).json({
+      error: `This investor holds ${pos[0].n} position${pos[0].n === 1 ? '' : 's'}. Remove them first.` });
+  if (usr[0].n > 0)
+    return res.status(409).json({
+      error: 'A login is still attached to this investor. Remove the login first.' });
+  const { rows } = await q('DELETE FROM investors WHERE id = $1 RETURNING name', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+  await audit(req.user.uid, 'investor', Number(req.params.id), 'delete', rows[0].name);
+  res.json({ ok: true });
+}));
+
+/* ---- allocations on a policy ---- */
+
+/** Total already allocated on a policy, optionally ignoring one row. */
+async function allocatedPct(policyId, excludeLinkId = null) {
+  const { rows } = await q(
+    `SELECT COALESCE(SUM(pct),0) AS total FROM policy_investors
+      WHERE policy_id = $1 AND ($2::int IS NULL OR id <> $2)`,
+    [policyId, excludeLinkId]
+  );
+  return Number(rows[0].total) || 0;
+}
+
+router.post('/policies/:id/investors', blockInvestors, canEdit, wrap(async (req, res) => {
+  const investorId = int(req.body.investor_id);
+  const pct = num(req.body.pct);
+  if (!investorId) return res.status(400).json({ error: 'Choose an investor' });
+  if (pct === null || pct <= 0 || pct > 100)
+    return res.status(400).json({ error: 'Percentage must be between 0 and 100' });
+
+  const already = await allocatedPct(req.params.id);
+  if (already + pct > 100.000001)
+    return res.status(400).json({
+      error: `That would allocate ${(already + pct).toFixed(4)}%. Only ${(100 - already).toFixed(4)}% is unallocated.` });
+
+  try {
+    const { rows } = await q(
+      `INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [req.params.id, investorId, pct, date(req.body.acquired_on), str(req.body.notes)]
+    );
+    await audit(req.user.uid, 'policy_investor', rows[0].id, 'create',
+      `policy ${req.params.id} · investor ${investorId} · ${pct}%`);
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505')
+      return res.status(409).json({ error: 'That investor already holds a piece of this policy' });
+    throw e;
+  }
+}));
+
+router.put('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (req, res) => {
+  const pct = num(req.body.pct);
+  if (pct === null || pct <= 0 || pct > 100)
+    return res.status(400).json({ error: 'Percentage must be between 0 and 100' });
+  const { rows: cur } = await q('SELECT * FROM policy_investors WHERE id = $1', [req.params.linkId]);
+  if (!cur[0]) return res.status(404).json({ error: 'Allocation not found' });
+
+  const others = await allocatedPct(cur[0].policy_id, cur[0].id);
+  if (others + pct > 100.000001)
+    return res.status(400).json({
+      error: `That would allocate ${(others + pct).toFixed(4)}%. Only ${(100 - others).toFixed(4)}% is available.` });
+
+  const { rows } = await q(
+    `UPDATE policy_investors SET pct = $1, acquired_on = $2, notes = $3
+      WHERE id = $4 RETURNING *`,
+    [pct, date(req.body.acquired_on), str(req.body.notes), req.params.linkId]
+  );
+  await audit(req.user.uid, 'policy_investor', rows[0].id, 'update', `${pct}%`);
+  res.json(rows[0]);
+}));
+
+router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows } = await q('DELETE FROM policy_investors WHERE id = $1 RETURNING *', [req.params.linkId]);
+  if (!rows[0]) return res.status(404).json({ error: 'Allocation not found' });
+  await audit(req.user.uid, 'policy_investor', Number(req.params.linkId), 'delete',
+    `policy ${rows[0].policy_id} · investor ${rows[0].investor_id}`);
+  res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ *
  * reports
  * ------------------------------------------------------------------ */
 
@@ -540,15 +794,20 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   const months = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
   const fund = str(req.query.fund);
 
+  const scope = scopeId(req);
   const { rows } = await q(
-    `SELECT id, policy_number, carrier_name, display_name, insured_first, insured_last,
-            fund_code, premium_required, premium_mode, next_premium_due, status,
-            face_amount, cost_of_insurance, account_value
-       FROM policy_latest
-      WHERE status NOT IN ('Lapsed','Sold','Matured')
-        AND ($1 = '' OR fund_code = $1)
-      ORDER BY insured_last, insured_first`,
-    [fund]
+    `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
+            pl.insured_first, pl.insured_last,
+            pl.fund_code, pl.premium_mode, pl.next_premium_due, pl.status,
+            pl.face_amount, pl.cost_of_insurance, pl.account_value,
+            ${shareOf('pl.id', 2)} AS my_pct,
+            pl.premium_required * (${shareOf('pl.id', 2)} / 100.0) AS premium_required
+       FROM policy_latest pl
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND ($1 = '' OR pl.fund_code = $1)
+        AND ${ownedBy('pl.id', 2)}
+      ORDER BY pl.insured_last, pl.insured_first`,
+    [fund, scope]
   );
 
   const now = new Date();
@@ -617,42 +876,48 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
 /** Everything a portfolio summary needs that /analytics/summary doesn't cover. */
 router.get('/reports/portfolio', wrap(async (req, res) => {
   const fund = str(req.query.fund);
+  const scope = scopeId(req);
+  const w = `(${shareOf('pl.id', 2)} / 100.0)`;
   const [totals, byCarrier, byProduct, byFund, ages] = await Promise.all([
     q(`SELECT COUNT(*)::int AS policy_count,
-              COALESCE(SUM(face_amount),0) AS total_face,
-              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS total_death_benefit,
-              COALESCE(SUM(cash_surrender_value),0) AS total_csv,
-              COALESCE(SUM(account_value),0) AS total_av,
-              COALESCE(SUM(total_invested),0) AS total_invested,
-              COALESCE(SUM(total_acquisition),0) AS total_acquisition,
-              COALESCE(SUM(total_premiums),0) AS total_premiums,
-              COALESCE(SUM(cost_of_insurance),0) AS monthly_coi,
-              COALESCE(SUM(premium_required),0) AS annual_premium
-         FROM policy_latest
-        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)`, [fund]),
-    q(`SELECT carrier_name, COUNT(*)::int AS n,
-              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face
-         FROM policy_latest
-        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
-        GROUP BY carrier_name ORDER BY face DESC`, [fund]),
-    q(`SELECT COALESCE(NULLIF(product_type,''),'Unclassified') AS product_type,
+              COALESCE(SUM(pl.face_amount * ${w}),0) AS total_face,
+              COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS total_death_benefit,
+              COALESCE(SUM(pl.cash_surrender_value * ${w}),0) AS total_csv,
+              COALESCE(SUM(pl.account_value * ${w}),0) AS total_av,
+              COALESCE(SUM(pl.total_invested * ${w}),0) AS total_invested,
+              COALESCE(SUM(pl.total_acquisition * ${w}),0) AS total_acquisition,
+              COALESCE(SUM(pl.total_premiums * ${w}),0) AS total_premiums,
+              COALESCE(SUM(pl.cost_of_insurance * ${w}),0) AS monthly_coi,
+              COALESCE(SUM(pl.premium_required * ${w}),0) AS annual_premium
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}`, [fund, scope]),
+    q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
+              COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
+        GROUP BY pl.carrier_name ORDER BY face DESC`, [fund, scope]),
+    q(`SELECT COALESCE(NULLIF(pl.product_type,''),'Unclassified') AS product_type,
               COUNT(*)::int AS n,
-              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face
-         FROM policy_latest
-        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
-        GROUP BY 1 ORDER BY face DESC`, [fund]),
-    q(`SELECT COALESCE(fund_code,'Unassigned') AS fund_code, COUNT(*)::int AS n,
-              COALESCE(SUM(COALESCE(death_benefit, face_amount)),0) AS face,
-              COALESCE(SUM(total_invested),0) AS invested
-         FROM policy_latest
-        WHERE status NOT IN ('Lapsed','Sold','Matured') AND ($1 = '' OR fund_code = $1)
-        GROUP BY 1 ORDER BY face DESC`, [fund]),
-    q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(insured_dob))),0) AS avg_age,
-              COALESCE(MIN(EXTRACT(YEAR FROM age(insured_dob))),0) AS min_age,
-              COALESCE(MAX(EXTRACT(YEAR FROM age(insured_dob))),0) AS max_age
-         FROM policy_latest
-        WHERE status NOT IN ('Lapsed','Sold','Matured') AND insured_dob IS NOT NULL
-          AND ($1 = '' OR fund_code = $1)`, [fund]),
+              COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
+        GROUP BY 1 ORDER BY face DESC`, [fund, scope]),
+    q(`SELECT COALESCE(pl.fund_code,'Unassigned') AS fund_code, COUNT(*)::int AS n,
+              COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face,
+              COALESCE(SUM(pl.total_invested * ${w}),0) AS invested
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}
+        GROUP BY 1 ORDER BY face DESC`, [fund, scope]),
+    q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
+              COALESCE(MIN(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS min_age,
+              COALESCE(MAX(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS max_age
+         FROM policy_latest pl
+        WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND pl.insured_dob IS NOT NULL
+          AND ($1 = '' OR pl.fund_code = $1) AND ${ownedBy('pl.id', 2)}`, [fund, scope]),
   ]);
 
   res.json({
@@ -662,6 +927,7 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
     byProduct: byProduct.rows,
     byFund: byFund.rows,
     ages: ages.rows[0],
+    scopedToInvestor: scope !== null,
   });
 }));
 
@@ -724,7 +990,7 @@ export async function resolveInsured(body) {
  * audit trail
  * ------------------------------------------------------------------ */
 
-router.get('/audit', requireRole('admin'), wrap(async (req, res) => {
+router.get('/audit', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT a.*, u.email FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
       ORDER BY a.created_at DESC LIMIT 300`

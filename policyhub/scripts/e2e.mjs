@@ -130,10 +130,13 @@ await page.click('.tabs button[data-tab="overview"]');
 await page.waitForTimeout(500);
 // Remove any second life left by a previous run, so the test is repeatable
 // (and so the remove path gets exercised too).
+const livesRows = () =>
+  page.locator('.card').filter({ hasText: 'Lives insured' }).locator('table.data tbody tr');
+
 if (await page.locator('[data-remove-life]').count()) {
   await page.click('[data-remove-life]');
   await page.waitForTimeout(1000);
-  const afterRemove = await page.locator('table.data tbody tr').count();
+  const afterRemove = await livesRows().count();
   check('removing a life from a policy works', afterRemove === 1, `${afterRemove} lives`);
 }
 
@@ -145,9 +148,9 @@ await page.fill('dialog input[name="dob"]', '1939-02-11');
 await page.selectOption('dialog select[name="role"]', 'Survivorship');
 await page.click('dialog button[type=submit]');
 await page.waitForTimeout(1100);
-const lives = await page.locator('table.data tbody tr').count();
+const lives = await livesRows().count();
 check('second life added to policy', lives === 2, `${lives} lives listed`);
-const livesText = await page.locator('table.data').first().textContent();
+const livesText = await page.locator('.card').filter({ hasText: 'Lives insured' }).textContent();
 check('second life shows its role', livesText.includes('Survivorship') && livesText.includes('Marie'));
 await page.screenshot({ path: `${SHOTS}/16-policy-lives.png`, fullPage: true });
 

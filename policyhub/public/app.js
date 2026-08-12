@@ -2,7 +2,7 @@
    PolicyHub — front end
    ===================================================================== */
 
-import { lineChart, barChart, fmtMoney, fmtCompact, seriesColor, hideTip } from './charts.js';
+import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
 import { reportsView } from './reports.js';
 
 /* ------------------------------- api --------------------------------- */
@@ -34,6 +34,9 @@ const state = {
   policies: [],
   filters: { search: '', status: '', fund: '' },
   insuredSearch: '',
+  shareMode: 'mine',   // investors: 'mine' | 'full'
+  investorSearch: '',
+  investors: [],
   sort: { key: 'insured_last', dir: 1 },
   funds: [],
 };
@@ -70,6 +73,26 @@ const insuredName = (p) =>
 
 const statusBadge = (s) =>
   `<span class="badge ${esc(String(s || '').toLowerCase())}"><span class="dot"></span>${esc(s || 'Unknown')}</span>`;
+
+/** Segmented control shown only to investors. */
+function shareToggle(pct) {
+  if (!isInvestorUser()) return '';
+  const mine = state.shareMode === 'mine';
+  return `
+    <div class="share-toggle" role="group" aria-label="Value basis">
+      <button data-share="mine" class="${mine ? 'on' : ''}">
+        My share${pct != null ? ` · ${Number(pct).toFixed(Number(pct) % 1 ? 4 : 0)}%` : ''}</button>
+      <button data-share="full" class="${mine ? '' : 'on'}">Full policy</button>
+    </div>`;
+}
+function wireShareToggle() {
+  document.querySelectorAll('[data-share]').forEach((b) =>
+    b.addEventListener('click', () => {
+      if (state.shareMode === b.dataset.share) return;
+      state.shareMode = b.dataset.share;
+      render();
+    }));
+}
 
 function toast(msg) {
   const t = document.createElement('div');
@@ -134,30 +157,57 @@ const PRODUCT_LABELS = {
   Term: 'Term', WL: 'Whole Life', Other: 'Other',
 };
 
-const NAV = [
+const STAFF_NAV = [
   ['dashboard', 'Dashboard'],
   ['policies', 'Policies'],
   ['servicing', 'Servicing'],
   ['insureds', 'Insureds'],
+  ['investors', 'Investors'],
   ['reports', 'Reports'],
   ['import', 'Import'],
   ['settings', 'Settings'],
 ];
 
+// An investor sees only their own holdings; the staff-only sections are absent
+// from the menu and refused by the server regardless.
+const INVESTOR_NAV = [
+  ['dashboard', 'Portfolio'],
+  ['policies', 'My policies'],
+  ['servicing', 'Premiums'],
+  ['reports', 'Statements'],
+  ['settings', 'Account'],
+];
+
+const isInvestorUser = () => state.user?.role === 'investor';
+const navItems = () => (isInvestorUser() ? INVESTOR_NAV : STAFF_NAV);
+
+/* Display multiplier: an investor viewing "my share" sees every figure scaled
+   by their percentage of that policy. Staff always see the whole policy. */
+const shareFactor = (p) =>
+  isInvestorUser() && state.shareMode === 'mine' && p?.my_pct != null
+    ? Number(p.my_pct) / 100
+    : 1;
+const scaled = (v, p) =>
+  v === null || v === undefined || v === '' ? null : Number(v) * shareFactor(p);
+
 function shell(inner) {
-  const active = ['policy'].includes(state.route) ? 'policies' : state.route;
+  const active = state.route === 'policy' ? 'policies'
+    : state.route === 'investor' ? 'investors' : state.route;
   return `
     <div class="topbar">
       <div class="brand"><span class="brand-mark"></span>Poel Capital</div>
       <div class="brand-divider"></div>
       <div class="brand-sub">Policy Portfolio</div>
       <nav class="nav">
-        ${NAV.map(([r, label]) =>
+        ${navItems().map(([r, label]) =>
           `<a href="#/${r}" class="${active === r ? 'active' : ''}">${label}</a>`).join('')}
       </nav>
       <div class="topbar-right">
         <button class="btn-sm btn-icon" id="themeBtn" title="Toggle light / dark">◐</button>
-        <span class="muted" style="font-size:13px">${esc(state.user?.name || state.user?.email || '')}</span>
+        <span class="muted" style="font-size:13px">${esc(
+          isInvestorUser() && state.user.investor
+            ? state.user.investor.name
+            : state.user?.name || state.user?.email || '')}</span>
         <button class="btn-sm" id="logoutBtn">Sign out</button>
       </div>
     </div>
@@ -223,35 +273,36 @@ async function dashboardView() {
   const html = `
     <div class="page-head">
       <div>
-        <h1>Portfolio dashboard</h1>
-        <div class="sub">${t.policy_count} active ${t.policy_count === 1 ? 'policy' : 'policies'}
-          · average insured age ${sum.avgInsuredAge ? Math.round(sum.avgInsuredAge) : '—'}</div>
+        <h1>${isInvestorUser() ? 'Your portfolio' : 'Portfolio dashboard'}</h1>
+        <div class="sub">${t.policy_count} ${t.policy_count === 1 ? 'position' : isInvestorUser() ? 'positions' : 'active policies'}
+          · average insured age ${sum.avgInsuredAge ? Math.round(sum.avgInsuredAge) : '—'}${
+          isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
-      <a class="btn" href="#/import">Import data</a>
-      <a class="btn btn-primary" href="#/policies">View policies</a>
+      ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
+      <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
     </div>
 
     <div class="kpi-row">
       <div class="stat">
         <div class="label">Total death benefit</div>
-        <div class="value hero">${fmtCompact(t.total_death_benefit)}</div>
-        <div class="note">Face at issue ${fmtCompact(t.total_face)}</div>
+        <div class="value hero">${fmtExact(t.total_death_benefit)}</div>
+        <div class="note">Face at issue ${fmtExact(t.total_face)}</div>
       </div>
       <div class="stat">
         <div class="label">Capital invested</div>
-        <div class="value">${fmtCompact(t.total_invested)}</div>
-        <div class="note">${fmtCompact(t.total_acquisition)} acquisition · ${fmtCompact(t.total_premiums)} premiums</div>
+        <div class="value">${fmtExact(t.total_invested)}</div>
+        <div class="note">${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premiums</div>
       </div>
       <div class="stat">
         <div class="label">Cash surrender value</div>
-        <div class="value">${fmtCompact(t.total_csv)}</div>
-        <div class="note">Account value ${fmtCompact(t.total_av)}</div>
+        <div class="value">${fmtExact(t.total_csv)}</div>
+        <div class="note">Account value ${fmtExact(t.total_av)}</div>
       </div>
       <div class="stat">
         <div class="label">Cost of insurance</div>
-        <div class="value">${fmtCompact(t.monthly_coi)}<span style="font-size:15px;color:var(--text-muted)">/mo</span></div>
-        <div class="note">≈ ${fmtCompact(annualPremium)} per year</div>
+        <div class="value">${fmtExact(t.monthly_coi)}<span style="font-size:15px;color:var(--text-muted)">/mo</span></div>
+        <div class="note">≈ ${fmtExact(annualPremium)} per year</div>
       </div>
       <div class="stat">
         <div class="label">Needs attention</div>
@@ -322,7 +373,7 @@ function alertRow(a) {
       </div>
       <div class="spacer"></div>
       <div style="text-align:right">
-        <div style="font-variant-numeric:tabular-nums;font-weight:600">${a.premium_required ? fmtMoney(a.premium_required) : ''}</div>
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${a.premium_required ? fmtExact(a.premium_required) : ''}</div>
         <div class="meta">${a.next_premium_due ? fmtDate(a.next_premium_due) : ''}</div>
       </div>
     </div>`;
@@ -340,22 +391,33 @@ const POLICY_COLUMNS = [
   { key: 'product_type', header: 'Type', cell: (p) =>
       p.product_type ? `<span title="${esc(PRODUCT_LABELS[p.product_type] || p.product_type)}">${esc(p.product_type)}</span>` : '<span class="muted">—</span>' },
   { key: 'issue_date', header: 'Issued', cell: (p) => fmtDate(p.issue_date) },
-  { key: 'face_amount', header: 'Face', cls: 'num', cell: (p) => money(p.face_amount) },
-  { key: 'death_benefit', header: 'Death benefit', cls: 'num', cell: (p) => money(p.death_benefit ?? p.face_amount) },
+  { key: 'face_amount', header: 'Face', cls: 'num', cell: (p) => money(scaled(p.face_amount, p), 2) },
+  { key: 'death_benefit', header: 'Death benefit', cls: 'num',
+    cell: (p) => money(scaled(p.death_benefit ?? p.face_amount, p), 2) },
   { key: 'fund_code', header: 'Owner', cell: (p) => esc(p.fund_code || p.owner_account || '—') },
-  { key: 'premium_required', header: 'Premium', cls: 'num', cell: (p) => money(p.premium_required) },
-  { key: 'account_value', header: 'AV', cls: 'num', cell: (p) => money(p.account_value, 2) },
-  { key: 'cash_surrender_value', header: 'CSV', cls: 'num', cell: (p) => money(p.cash_surrender_value, 2) },
-  { key: 'cost_of_insurance', header: 'COI', cls: 'num', cell: (p) => money(p.cost_of_insurance, 2) },
-  { key: 'total_invested', header: 'Invested', cls: 'num', cell: (p) => money(p.total_invested) },
+  { key: 'premium_required', header: 'Premium', cls: 'num', cell: (p) => money(scaled(p.premium_required, p), 2) },
+  { key: 'account_value', header: 'AV', cls: 'num', cell: (p) => money(scaled(p.account_value, p), 2) },
+  { key: 'cash_surrender_value', header: 'CSV', cls: 'num', cell: (p) => money(scaled(p.cash_surrender_value, p), 2) },
+  { key: 'cost_of_insurance', header: 'COI', cls: 'num', cell: (p) => money(scaled(p.cost_of_insurance, p), 2) },
+  { key: 'total_invested', header: 'Invested', cls: 'num', cell: (p) => money(scaled(p.total_invested, p), 2) },
   { key: 'date_of_last_withdrawal', header: 'Last w/d', cell: (p) => fmtDate(p.date_of_last_withdrawal) },
   { key: 'value_as_of', header: 'Values as of', cell: (p) => fmtDate(p.value_as_of) },
   { key: 'status', header: 'Status', cell: (p) => statusBadge(p.status) },
 ];
 
+/** Investors get an extra column showing what proportion of each policy is theirs. */
+const MY_SHARE_COLUMN = {
+  key: 'my_pct', header: 'My share', cls: 'num',
+  value: (p) => Number(p.my_pct),
+  cell: (p) => `<span class="strong">${Number(p.my_pct).toFixed(Number(p.my_pct) % 1 ? 4 : 0)}%</span>`,
+};
+const policyColumns = () =>
+  isInvestorUser() ? [...POLICY_COLUMNS.slice(0, 1), MY_SHARE_COLUMN, ...POLICY_COLUMNS.slice(1)]
+                   : POLICY_COLUMNS;
+
 function sortPolicies(rows) {
   const { key, dir } = state.sort;
-  const col = POLICY_COLUMNS.find((c) => c.key === key);
+  const col = policyColumns().find((c) => c.key === key);
   const val = (r) => (col?.value ? col.value(r) : r[key]);
   return [...rows].sort((a, b) => {
     const av = val(a), bv = val(b);
@@ -369,29 +431,34 @@ function sortPolicies(rows) {
 async function policiesView() {
   const [policies, funds] = await Promise.all([
     api(`/policies?search=${encodeURIComponent(state.filters.search)}&status=${encodeURIComponent(state.filters.status)}&fund=${encodeURIComponent(state.filters.fund)}`),
-    state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
+    isInvestorUser() ? Promise.resolve([])
+      : state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
   ]);
   state.policies = policies;
   state.funds = funds;
   const rows = sortPolicies(policies);
 
   const totals = rows.reduce((acc, p) => {
-    acc.face += Number(p.face_amount) || 0;
-    acc.db += Number(p.death_benefit ?? p.face_amount) || 0;
-    acc.av += Number(p.account_value) || 0;
-    acc.csv += Number(p.cash_surrender_value) || 0;
-    acc.coi += Number(p.cost_of_insurance) || 0;
-    acc.prem += Number(p.premium_required) || 0;
-    acc.inv += Number(p.total_invested) || 0;
+    const f = shareFactor(p);
+    acc.face += (Number(p.face_amount) || 0) * f;
+    acc.db += (Number(p.death_benefit ?? p.face_amount) || 0) * f;
+    acc.av += (Number(p.account_value) || 0) * f;
+    acc.csv += (Number(p.cash_surrender_value) || 0) * f;
+    acc.coi += (Number(p.cost_of_insurance) || 0) * f;
+    acc.prem += (Number(p.premium_required) || 0) * f;
+    acc.inv += (Number(p.total_invested) || 0) * f;
     return acc;
   }, { face: 0, db: 0, av: 0, csv: 0, coi: 0, prem: 0, inv: 0 });
 
   const html = `
     <div class="page-head">
-      <div><h1>Policies</h1><div class="sub">${rows.length} of ${policies.length ? policies.length : 0} shown</div></div>
+      <div><h1>${isInvestorUser() ? 'My policies' : 'Policies'}</h1>
+        <div class="sub">${rows.length} of ${policies.length ? policies.length : 0} shown${
+          isInvestorUser() ? ` · showing ${state.shareMode === 'mine' ? 'your share' : 'full policy values'}` : ''}</div></div>
       <div class="spacer"></div>
+      ${shareToggle()}
       <button id="exportBtn">Export CSV</button>
-      <button class="primary" id="newPolicyBtn">New policy</button>
+      ${isInvestorUser() ? '' : '<button class="primary" id="newPolicyBtn">New policy</button>'}
     </div>
 
     <div class="toolbar">
@@ -401,7 +468,7 @@ async function policiesView() {
         ${['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending']
           .map((s) => `<option ${state.filters.status === s ? 'selected' : ''}>${s}</option>`).join('')}
       </select>
-      <select id="fundFilter">
+      <select id="fundFilter" style="${isInvestorUser() ? 'display:none' : ''}">
         <option value="">All owners</option>
         ${funds.map((f) => `<option ${state.filters.fund === f.code ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
       </select>
@@ -410,27 +477,27 @@ async function policiesView() {
     <div class="card">
       <div class="table-wrap sticky-head">
         <table class="data">
-          <thead><tr>${POLICY_COLUMNS.map((c) =>
+          <thead><tr>${policyColumns().map((c) =>
             `<th class="sortable ${c.cls || ''}" data-key="${c.key}">${c.header}${
               state.sort.key === c.key ? `<span class="arrow">${state.sort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`
           ).join('')}</tr></thead>
           <tbody>
             ${rows.length === 0
-              ? `<tr><td colspan="${POLICY_COLUMNS.length}"><div class="empty">No policies yet. Import a CSV or add one manually.</div></td></tr>`
+              ? `<tr><td colspan="${policyColumns().length}"><div class="empty">No policies yet. Import a CSV or add one manually.</div></td></tr>`
               : rows.map((p) => `<tr class="clickable" data-id="${p.id}">${
-                  POLICY_COLUMNS.map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
+                  policyColumns().map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
                 }</tr>`).join('')}
           </tbody>
           ${rows.length ? `<tfoot><tr>
-            <td colspan="8">Totals — ${rows.length} policies</td>
-            <td class="num">${fmtCompact(totals.face)}</td>
-            <td class="num">${fmtCompact(totals.db)}</td>
+            <td colspan="${isInvestorUser() ? 9 : 8}">Totals — ${rows.length} policies</td>
+            <td class="num">${fmtExact(totals.face)}</td>
+            <td class="num">${fmtExact(totals.db)}</td>
             <td></td>
-            <td class="num">${fmtCompact(totals.prem)}</td>
-            <td class="num">${fmtCompact(totals.av)}</td>
-            <td class="num">${fmtCompact(totals.csv)}</td>
-            <td class="num">${fmtCompact(totals.coi)}</td>
-            <td class="num">${fmtCompact(totals.inv)}</td>
+            <td class="num">${fmtExact(totals.prem)}</td>
+            <td class="num">${fmtExact(totals.av)}</td>
+            <td class="num">${fmtExact(totals.csv)}</td>
+            <td class="num">${fmtExact(totals.coi)}</td>
+            <td class="num">${fmtExact(totals.inv)}</td>
             <td colspan="3"></td>
           </tr></tfoot>` : ''}
         </table>
@@ -446,7 +513,7 @@ async function policiesView() {
         timer = setTimeout(() => { state.filters.search = e.target.value; render(); }, 250);
       });
       $('#statusFilter').addEventListener('change', (e) => { state.filters.status = e.target.value; render(); });
-      $('#fundFilter').addEventListener('change', (e) => { state.filters.fund = e.target.value; render(); });
+      $('#fundFilter')?.addEventListener('change', (e) => { state.filters.fund = e.target.value; render(); });
       document.querySelectorAll('th.sortable').forEach((th) =>
         th.addEventListener('click', () => {
           const key = th.dataset.key;
@@ -478,7 +545,8 @@ async function policiesView() {
           { header: 'Date Of Last Withdrawal', key: 'date_of_last_withdrawal' },
           { header: 'Status', key: 'status' },
         ]));
-      $('#newPolicyBtn').addEventListener('click', () => openPolicyDialog());
+      $('#newPolicyBtn')?.addEventListener('click', () => openPolicyDialog());
+      wireShareToggle();
     },
   };
 }
@@ -507,21 +575,22 @@ async function policyView() {
           ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}</div>
       </div>
       <div class="spacer"></div>
+      ${shareToggle(p.my_pct)}
       ${state.user.role === 'admin' ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
-      ${p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
-      <button class="primary" id="editBtn">Edit policy</button>
+      ${!isInvestorUser() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
+      ${isInvestorUser() ? '' : '<button class="primary" id="editBtn">Edit policy</button>'}
     </div>
 
     <div class="kpi-row">
       <div class="stat"><div class="label">Death benefit</div>
-        <div class="value">${fmtCompact(p.death_benefit ?? p.face_amount)}</div>
-        <div class="note">Face at issue ${fmtCompact(p.face_amount)}</div></div>
+        <div class="value">${fmtExact(scaled(p.death_benefit ?? p.face_amount, p))}</div>
+        <div class="note">Face at issue ${fmtExact(scaled(p.face_amount, p))}</div></div>
       <div class="stat"><div class="label">Invested to date</div>
-        <div class="value">${fmtCompact(p.total_invested)}</div>
-        <div class="note">${fmtCompact(p.total_acquisition)} acquisition · ${fmtCompact(p.total_premiums)} premium</div></div>
+        <div class="value">${fmtExact(scaled(p.total_invested, p))}</div>
+        <div class="note">${fmtExact(scaled(p.total_acquisition, p))} acquisition · ${fmtExact(scaled(p.total_premiums, p))} premium</div></div>
       <div class="stat"><div class="label">Cash surrender value</div>
-        <div class="value">${fmtCompact(p.cash_surrender_value)}</div>
-        <div class="note">AV ${fmtCompact(p.account_value)} · as of ${p.value_as_of ? fmtDate(p.value_as_of) : '—'}</div></div>
+        <div class="value">${fmtExact(scaled(p.cash_surrender_value, p))}</div>
+        <div class="note">AV ${fmtExact(scaled(p.account_value, p))} · as of ${p.value_as_of ? fmtDate(p.value_as_of) : '—'}</div></div>
       <div class="stat"><div class="label">Insured age</div>
         <div class="value">${age ?? '—'}</div>
         <div class="note">${p.insured_dob ? `Born ${fmtDate(p.insured_dob)}` : 'No date of birth on file'}</div></div>
@@ -542,7 +611,8 @@ async function policyView() {
     after: () => {
       document.querySelectorAll('.tabs button').forEach((b) =>
         b.addEventListener('click', () => { detailTab = b.dataset.tab; render(); }));
-      $('#editBtn').addEventListener('click', () => openPolicyDialog(p));
+      wireShareToggle();
+      $('#editBtn')?.addEventListener('click', () => openPolicyDialog(p));
       $('#deletePolicyBtn')?.addEventListener('click', () => openDeletePolicyDialog(p));
       $('#editInsuredBtn')?.addEventListener('click', async () => {
         const ins = await api(`/insureds/${p.insured_id}`);
@@ -576,16 +646,64 @@ function overviewTab(p) {
       <td class="num">${ageFrom(i.dob) ?? '—'}</td>
       <td class="num">${i.le_months ?? '—'}</td>
       <td>${i.date_of_death ? fmtDate(i.date_of_death) : dash}</td>
-      <td>
+      <td>${isInvestorUser() ? '' : `
         <button class="btn-sm" data-edit-life="${i.id}">Edit</button>
-        ${isPrimary ? '' : `<button class="btn-sm btn-danger" data-remove-life="${linkId}">Remove</button>`}
+        ${isPrimary ? '' : `<button class="btn-sm btn-danger" data-remove-life="${linkId}">Remove</button>`}`}
       </td>
     </tr>`;
 
+  const owners = p.owners || [];
+  const allocated = owners.reduce((sum, o) => sum + Number(o.pct), 0);
+  const unallocated = Math.max(0, 100 - allocated);
+  const dbFull = Number(p.death_benefit ?? p.face_amount) || 0;
+  const invFull = Number(p.total_invested) || 0;
+
+  const ownershipCard = `
+  <div class="card">
+    <div class="card-head"><h2>${isInvestorUser() ? 'Your position' : 'Ownership'}</h2>
+      <div class="spacer"></div>
+      ${isInvestorUser() ? '' : `<span class="muted" style="font-size:12px">
+        ${allocated.toFixed(allocated % 1 ? 4 : 0)}% allocated${
+          unallocated > 0.000001 ? ` · ${unallocated.toFixed(unallocated % 1 ? 4 : 0)}% unallocated` : ''}</span>
+      <button class="btn-sm primary" id="addOwnerBtn" ${unallocated <= 0.000001 ? 'disabled title="Fully allocated"' : ''}>Add investor</button>`}
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Investor</th><th>Type</th><th class="num">Share</th>
+          <th class="num">Death benefit</th><th class="num">Invested</th>
+          <th>Acquired</th>${isInvestorUser() ? '' : '<th></th>'}</tr></thead>
+        <tbody>
+          ${owners.length === 0
+            ? `<tr><td colspan="${isInvestorUser() ? 6 : 7}"><div class="empty">No investors allocated yet.</div></td></tr>`
+            : owners.map((o) => `<tr>
+                <td class="strong">${esc(o.name)}</td>
+                <td class="secondary">${esc(o.investor_type || '')}</td>
+                <td class="num strong">${Number(o.pct).toFixed(Number(o.pct) % 1 ? 4 : 0)}%</td>
+                <td class="num">${money(dbFull * Number(o.pct) / 100, 2)}</td>
+                <td class="num">${money(invFull * Number(o.pct) / 100, 2)}</td>
+                <td>${o.acquired_on ? fmtDate(o.acquired_on) : '<span class="muted">—</span>'}</td>
+                ${isInvestorUser() ? '' : `<td>
+                  <button class="btn-sm" data-edit-owner="${o.id}" data-pct="${o.pct}"
+                    data-name="${esc(o.name)}" data-acq="${o.acquired_on || ''}">Edit</button>
+                  <button class="btn-sm btn-danger" data-del-owner="${o.id}" data-name="${esc(o.name)}">Remove</button>
+                </td>`}
+              </tr>`).join('')}
+          ${!isInvestorUser() && unallocated > 0.000001 ? `<tr class="muted">
+            <td>Unallocated</td><td></td>
+            <td class="num">${unallocated.toFixed(unallocated % 1 ? 4 : 0)}%</td>
+            <td class="num">${money(dbFull * unallocated / 100, 2)}</td>
+            <td class="num">${money(invFull * unallocated / 100, 2)}</td>
+            <td colspan="2"></td></tr>` : ''}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+
   return `
+  ${ownershipCard}
   <div class="card">
     <div class="card-head"><h2>Lives insured</h2><div class="spacer"></div>
-      <button class="btn-sm primary" id="addLifeBtn">Add insured</button></div>
+      ${isInvestorUser() ? '' : '<button class="btn-sm primary" id="addLifeBtn">Add insured</button>'}</div>
     <div class="table-wrap">
       <table class="data">
         <thead><tr>
@@ -643,6 +761,36 @@ function overviewTab(p) {
       </div>
     </div>
   </div>`;
+}
+
+function openOwnerDialog(p, existing) {
+  const owners = p.owners || [];
+  const taken = owners.reduce((sum, o) => sum + Number(o.pct), 0)
+    - (existing ? Number(existing.pct) : 0);
+  const available = Math.max(0, 100 - taken);
+
+  const body = `
+    ${existing ? `<div class="field"><label>Investor</label>
+      <div class="strong">${esc(existing.name)}</div></div>`
+      : `<div class="field"><label>Investor *</label>
+      <select name="investor_id" required>
+        <option value="">Choose an investor…</option>
+        ${state.investors
+          .filter((i) => !owners.some((o) => o.investor_id === i.id))
+          .map((i) => `<option value="${i.id}">${esc(i.name)}${i.investor_type ? ` — ${esc(i.investor_type)}` : ''}</option>`).join('')}
+      </select></div>`}
+    <div class="field-row">
+      ${inputField(`Percentage * <span class="muted">(${available.toFixed(4)}% available)</span>`,
+        'pct', existing ? existing.pct : '', 'number', `step=0.0001 min=0.0001 max=${available} required`)}
+      ${inputField('Acquired on', 'acquired_on', existing?.acquired_on || '', 'date')}
+    </div>
+    ${inputField('Notes', 'notes', existing?.notes || '')}`;
+
+  openDialog(existing ? 'Edit allocation' : 'Allocate to an investor', body, async (v) => {
+    if (existing) await api(`/policy-investors/${existing.id}`, { method: 'PUT', body: v });
+    else await api(`/policies/${p.id}/investors`, { method: 'POST', body: v });
+    toast(existing ? 'Allocation updated' : 'Investor allocated');
+  }, existing ? 'Save' : 'Allocate');
 }
 
 function openAddLifeDialog(p) {
@@ -731,9 +879,9 @@ function transactionsTab(p) {
         ${Object.keys(byType).length === 0 ? '<div class="empty">No transactions yet</div>' : `
         <table class="data">
           <tbody>${Object.entries(byType).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
-            `<tr><td>${esc(k)}</td><td class="num strong">${fmtMoney(v)}</td></tr>`).join('')}
+            `<tr><td>${esc(k)}</td><td class="num strong">${fmtExact(v)}</td></tr>`).join('')}
           </tbody>
-          <tfoot><tr><td>Total invested</td><td class="num">${fmtMoney(total)}</td></tr></tfoot>
+          <tfoot><tr><td>Total invested</td><td class="num">${fmtExact(total)}</td></tr></tfoot>
         </table>`}
       </div>
     </div>
@@ -815,6 +963,26 @@ function servicingTab(p, monthsCovered) {
 
 function wireDetailTab(p, values) {
   if (detailTab === 'overview') {
+    $('#addOwnerBtn')?.addEventListener('click', async () => {
+      if (!state.investors.length) state.investors = await api('/investors');
+      if (!state.investors.length) {
+        alert('Add an investor first, under Investors.');
+        return;
+      }
+      openOwnerDialog(p, null);
+    });
+    document.querySelectorAll('[data-edit-owner]').forEach((b) =>
+      b.addEventListener('click', () => openOwnerDialog(p, {
+        id: Number(b.dataset.editOwner), pct: b.dataset.pct,
+        name: b.dataset.name, acquired_on: b.dataset.acq,
+      })));
+    document.querySelectorAll('[data-del-owner]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (!confirm(`Remove ${b.dataset.name} from this policy?`)) return;
+        await api(`/policy-investors/${b.dataset.delOwner}`, { method: 'DELETE' });
+        toast('Allocation removed');
+        render();
+      }));
     $('#addLifeBtn')?.addEventListener('click', () => openAddLifeDialog(p));
     document.querySelectorAll('[data-edit-life]').forEach((b) =>
       b.addEventListener('click', async () => {
@@ -1189,7 +1357,7 @@ async function servicingView() {
             <div style="padding:11px 16px;border-bottom:1px solid var(--grid);background:var(--page)">
               <strong>${new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong>
               <span class="muted"> · ${rows.length} due ·
-                ${fmtMoney(rows.reduce((s, r) => s + (Number(r.premium_required) || 0), 0))}</span>
+                ${fmtExact(rows.reduce((s, r) => s + (Number(r.premium_required) || 0), 0))}</span>
             </div>
             <div class="table-wrap"><table class="data"><tbody>
               ${rows.map((r) => `<tr class="clickable" data-id="${r.id}">
@@ -1284,6 +1452,195 @@ async function insuredsView() {
         ]));
     },
   };
+}
+
+/* ----------------------------- investors ----------------------------- */
+
+const INVESTOR_TYPES = ['Individual', 'Entity', 'Trust', 'IRA', 'Other'];
+
+async function investorsView() {
+  const rows = await api(`/investors?search=${encodeURIComponent(state.investorSearch)}`);
+  state.investors = rows;
+  const canEditNow = ['admin', 'editor'].includes(state.user.role);
+
+  const totals = rows.reduce((a, r) => ({
+    db: a.db + Number(r.death_benefit || 0),
+    inv: a.inv + Number(r.invested || 0),
+    pos: a.pos + Number(r.position_count || 0),
+  }), { db: 0, inv: 0, pos: 0 });
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Investors</h1>
+        <div class="sub">${rows.length} ${rows.length === 1 ? 'investor' : 'investors'} · ${totals.pos} positions</div></div>
+      <div class="spacer"></div>
+      ${canEditNow ? '<button class="primary" id="newInvestorBtn">New investor</button>' : ''}
+    </div>
+
+    <div class="toolbar">
+      <input class="grow" id="investorSearch" placeholder="Search by name or email…" value="${esc(state.investorSearch)}">
+    </div>
+
+    <div class="card"><div class="table-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>Name</th><th>Type</th><th>Legal name</th><th>Email</th>
+          <th class="num">Positions</th><th class="num">Death benefit</th>
+          <th class="num">Invested</th><th class="num">Cash value</th><th></th>
+        </tr></thead>
+        <tbody>${rows.length === 0
+          ? '<tr><td colspan="9"><div class="empty">No investors yet.</div></td></tr>'
+          : rows.map((r) => `<tr class="clickable" data-investor="${r.id}">
+              <td class="strong">${esc(r.name)}</td>
+              <td>${esc(r.investor_type || '')}</td>
+              <td class="secondary">${esc(r.legal_name || '')}</td>
+              <td class="secondary">${esc(r.email || '')}</td>
+              <td class="num">${r.position_count}</td>
+              <td class="num">${money(r.death_benefit, 2)}</td>
+              <td class="num">${money(r.invested, 2)}</td>
+              <td class="num">${money(r.csv, 2)}</td>
+              <td>${canEditNow ? `<button class="btn-sm" data-edit-investor="${r.id}">Edit</button>` : ''}</td>
+            </tr>`).join('')}
+        </tbody>
+        ${rows.length ? `<tfoot><tr>
+          <td colspan="4">Totals</td>
+          <td class="num">${totals.pos}</td>
+          <td class="num">${fmtExact(totals.db)}</td>
+          <td class="num">${fmtExact(totals.inv)}</td>
+          <td colspan="2"></td>
+        </tr></tfoot>` : ''}
+      </table>
+    </div></div>`;
+
+  return {
+    html,
+    after: () => {
+      let timer;
+      $('#investorSearch').addEventListener('input', (e) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { state.investorSearch = e.target.value; render(); }, 250);
+      });
+      $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
+      document.querySelectorAll('[data-edit-investor]').forEach((b) =>
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openInvestorDialog(rows.find((r) => r.id === Number(b.dataset.editInvestor)));
+        }));
+      document.querySelectorAll('[data-investor]').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/investor/${tr.dataset.investor}`)));
+    },
+  };
+}
+
+async function investorView() {
+  const inv = await api(`/investors/${state.params.id}`);
+  const pos = inv.positions || [];
+  const t = pos.reduce((a, p) => {
+    const f = Number(p.pct) / 100;
+    a.db += (Number(p.death_benefit ?? p.face_amount) || 0) * f;
+    a.inv += (Number(p.total_invested) || 0) * f;
+    a.csv += (Number(p.cash_surrender_value) || 0) * f;
+    a.prem += (Number(p.premium_required) || 0) * f;
+    return a;
+  }, { db: 0, inv: 0, csv: 0, prem: 0 });
+
+  const html = `
+    <div class="page-head">
+      <div>
+        <div class="sub"><a href="#/investors">← All investors</a></div>
+        <h1>${esc(inv.name)}</h1>
+        <div class="sub">${esc(inv.investor_type || '')}${inv.legal_name ? ` · ${esc(inv.legal_name)}` : ''}${inv.email ? ` · ${esc(inv.email)}` : ''}</div>
+      </div>
+      <div class="spacer"></div>
+      <button id="editInvestorBtn">Edit investor</button>
+    </div>
+
+    <div class="kpi-row">
+      <div class="stat"><div class="label">Positions</div><div class="value">${pos.length}</div>
+        <div class="note">${inv.logins.length} login${inv.logins.length === 1 ? '' : 's'}</div></div>
+      <div class="stat"><div class="label">Death benefit</div><div class="value">${fmtExact(t.db)}</div>
+        <div class="note">Their share</div></div>
+      <div class="stat"><div class="label">Capital invested</div><div class="value">${fmtExact(t.inv)}</div>
+        <div class="note">Their share</div></div>
+      <div class="stat"><div class="label">Cash value</div><div class="value">${fmtExact(t.csv)}</div>
+        <div class="note">Their share</div></div>
+      <div class="stat"><div class="label">Annual premium</div><div class="value">${fmtExact(t.prem)}</div>
+        <div class="note">Their share</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Positions</h2></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Policy</th><th>Insured</th><th>Carrier</th><th class="num">Share</th>
+          <th class="num">Death benefit</th><th class="num">Invested</th>
+          <th class="num">Cash value</th><th>Acquired</th><th>Status</th></tr></thead>
+        <tbody>${pos.length === 0
+          ? '<tr><td colspan="9"><div class="empty">No positions yet.</div></td></tr>'
+          : pos.map((p) => { const f = Number(p.pct) / 100; return `<tr class="clickable" data-id="${p.id}">
+              <td class="strong">${esc(p.policy_number)}</td>
+              <td>${esc(p.display_name || `${p.insured_last || ''}${p.insured_first ? ', ' + p.insured_first : ''}`)}</td>
+              <td>${esc(p.carrier_name)}</td>
+              <td class="num strong">${Number(p.pct).toFixed(Number(p.pct) % 1 ? 4 : 0)}%</td>
+              <td class="num">${money((Number(p.death_benefit ?? p.face_amount) || 0) * f, 2)}</td>
+              <td class="num">${money((Number(p.total_invested) || 0) * f, 2)}</td>
+              <td class="num">${money((Number(p.cash_surrender_value) || 0) * f, 2)}</td>
+              <td>${p.acquired_on ? fmtDate(p.acquired_on) : '<span class="muted">—</span>'}</td>
+              <td>${statusBadge(p.status)}</td>
+            </tr>`; }).join('')}
+        </tbody>
+        ${pos.length ? `<tfoot><tr><td colspan="4">Totals</td>
+          <td class="num">${fmtExact(t.db)}</td><td class="num">${fmtExact(t.inv)}</td>
+          <td class="num">${fmtExact(t.csv)}</td><td colspan="2"></td></tr></tfoot>` : ''}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Portal logins</h2></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Email</th><th>Name</th><th>Active</th><th>Last sign-in</th></tr></thead>
+        <tbody>${inv.logins.length === 0
+          ? '<tr><td colspan="4"><div class="empty">No login yet. Create one under Settings → Users with the role “investor”.</div></td></tr>'
+          : inv.logins.map((u) => `<tr>
+              <td class="strong">${esc(u.email)}</td><td>${esc(u.full_name || '')}</td>
+              <td>${u.is_active ? 'Yes' : 'No'}</td>
+              <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-US') : 'never'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>`;
+
+  return {
+    html,
+    after: () => {
+      $('#editInvestorBtn').addEventListener('click', () => openInvestorDialog(inv));
+      document.querySelectorAll('tr.clickable[data-id]').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
+    },
+  };
+}
+
+function openInvestorDialog(inv) {
+  const isNew = !inv?.id;
+  const body = `
+    <div class="field-row">
+      ${inputField('Name *', 'name', inv?.name, 'text', 'required')}
+      ${selectField('Type', 'investor_type', inv?.investor_type || 'Individual', INVESTOR_TYPES)}
+    </div>
+    ${inputField('Full legal name', 'legal_name', inv?.legal_name, 'text',
+      'placeholder="As it appears on the purchase agreement"')}
+    <div class="field-row">
+      ${inputField('Email', 'email', inv?.email, 'email')}
+      ${inputField('Phone', 'phone', inv?.phone)}
+      ${inputField('Tax ID (last 4)', 'tax_id_last4', inv?.tax_id_last4, 'text', 'maxlength=4')}
+    </div>
+    <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(inv?.notes || '')}</textarea></div>`;
+
+  openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
+    if (isNew) await api('/investors', { method: 'POST', body: v });
+    else await api(`/investors/${inv.id}`, { method: 'PUT', body: v });
+    state.investors = await api('/investors');
+    toast(isNew ? 'Investor created' : 'Investor updated');
+  }, isNew ? 'Create investor' : 'Save');
 }
 
 /* ------------------------------ import ------------------------------- */
@@ -1442,16 +1799,18 @@ async function handleFile(file) {
 async function settingsView() {
   const isAdmin = state.user.role === 'admin';
   const canEdit = ['admin', 'editor'].includes(state.user.role);
+  const investorUser = isInvestorUser();
   const [users, audit, funds] = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
-    api('/funds'),
+    investorUser ? Promise.resolve([]) : api('/funds'),
   ]);
   state.funds = funds;
 
   const html = `
-    <div class="page-head"><div><h1>Settings</h1>
-      <div class="sub">Signed in as ${esc(state.user.email)} (${esc(state.user.role)})</div></div></div>
+    <div class="page-head"><div><h1>${investorUser ? 'Account' : 'Settings'}</h1>
+      <div class="sub">Signed in as ${esc(state.user.email)}${
+        investorUser && state.user.investor ? ` · ${esc(state.user.investor.name)}` : ` (${esc(state.user.role)})`}</div></div></div>
 
     <div class="grid-2">
       <div class="card">
@@ -1471,16 +1830,18 @@ async function settingsView() {
         <div class="card-head"><h2>Users</h2><div class="spacer"></div>
           <button class="btn-sm primary" id="addUserBtn">Add user</button></div>
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Last sign-in</th></tr></thead>
+          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Investor</th><th>Last sign-in</th></tr></thead>
           <tbody>${users.map((u) => `<tr>
             <td class="strong">${esc(u.email)}</td><td>${esc(u.full_name)}</td>
             <td>${esc(u.role)}</td>
+            <td class="secondary">${esc(u.investor_name || '')}</td>
             <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-US') : 'never'}</td>
           </tr>`).join('')}</tbody>
         </table></div>
       </div>` : ''}
     </div>
 
+    ${investorUser ? '' : `
     <div class="card">
       <div class="card-head"><h2>Owner entities</h2><div class="spacer"></div>
         ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
@@ -1493,8 +1854,8 @@ async function settingsView() {
               <td class="strong">${esc(f.code)}</td>
               <td>${esc(f.name && f.name !== f.code ? f.name : '')}</td>
               <td class="num">${f.policy_count}</td>
-              <td class="num">${fmtCompact(f.total_death_benefit)}</td>
-              <td class="num">${fmtCompact(f.total_invested)}</td>
+              <td class="num">${fmtExact(f.total_death_benefit)}</td>
+              <td class="num">${fmtExact(f.total_invested)}</td>
               <td class="secondary">${esc(f.notes || '')}</td>
               <td>${canEdit ? `<button class="btn-sm" data-edit-entity="${f.id}">Edit</button>
                    <button class="btn-sm btn-danger" data-del-entity="${f.id}" data-code="${esc(f.code)}"
@@ -1502,7 +1863,7 @@ async function settingsView() {
             </tr>`).join('')}
         </tbody>
       </table></div>
-    </div>
+    </div>`}
 
     ${isAdmin ? `
     <div class="card">
@@ -1548,16 +1909,35 @@ async function settingsView() {
           } catch (err) { alert(err.message); }
         }));
 
-      $('#addUserBtn')?.addEventListener('click', () => {
-        openDialog('Add user', `
+      $('#addUserBtn')?.addEventListener('click', async () => {
+        if (!state.investors.length) {
+          try { state.investors = await api('/investors'); } catch { /* viewer */ }
+        }
+        const dlg = openDialog('Add user', `
           ${inputField('Email *', 'email', '', 'email', 'required')}
           ${inputField('Full name', 'full_name')}
           ${inputField('Password (10+ characters) *', 'password', '', 'password', 'required minlength=10')}
-          ${selectField('Role', 'role', 'editor', ['admin', 'editor', 'viewer'])}
+          ${selectField('Role', 'role', 'editor', ['admin', 'editor', 'viewer', 'investor'])}
+          <div class="field" id="investorPick" style="display:none">
+            <label>Investor *</label>
+            <select name="investor_id">
+              <option value="">Choose an investor…</option>
+              ${state.investors.map((i) => `<option value="${i.id}">${esc(i.name)}</option>`).join('')}
+            </select>
+            <span class="muted" style="font-size:12px">
+              This login will see only the policies this investor holds a share of.</span>
+          </div>
         `, async (v) => {
           await api('/users', { method: 'POST', body: v });
           toast('User created');
         }, 'Create user');
+
+        const roleSel = $('select[name=role]', dlg);
+        const sync = () => {
+          $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
+        };
+        roleSel.addEventListener('change', sync);
+        sync();
       });
     },
   };
@@ -1571,6 +1951,8 @@ const VIEWS = {
   policy: policyView,
   servicing: servicingView,
   insureds: insuredsView,
+  investors: investorsView,
+  investor: investorView,
   reports: () => reportsView(api, state),
   import: importView,
   settings: settingsView,
