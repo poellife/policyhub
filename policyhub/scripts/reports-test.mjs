@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
+import { BASE, ADMIN } from './test-config.mjs';
 const SHOTS='/home/claude/shots';
 const fails=[]; const errs=[];
 const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
@@ -9,8 +10,8 @@ const p=await b.newPage({viewport:{width:1500,height:1000}});
 p.on('pageerror',e=>errs.push(e.message));
 p.on('console',m=>m.type()==='error'&&!/401/.test(m.text())&&errs.push(m.text()));
 
-await p.goto('http://localhost:3000');
-await p.fill('#email','JP@poelcapital.com'); await p.fill('#password','poelcapital2026');
+await p.goto(BASE);
+await p.fill('#email',ADMIN.email); await p.fill('#password',ADMIN.password);
 await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeout:10000});
 
 await p.click('a[href="#/reports"]');
@@ -52,8 +53,8 @@ check('current values still shown', noBasis.includes('Cash surrender value'));
 
 console.log('\nPOLICY SCHEDULE');
 const s2 = await run('schedule','policy schedule');
-check('schedule lists every policy', (s2.match(/MassMutual|John Hancock|Genworth/g)||[]).length>=3);
-check('schedule has totals row', s2.includes('Totals — 12 policies'));
+check('schedule lists every policy', (s2.match(/Totals — (\d+) policies/)||[])[1] > 0, (s2.match(/Totals — \d+ policies/)||['none'])[0]);
+check('schedule has totals row', /Totals — \d+ policies/.test(s2));
 
 console.log('\nPREMIUM FORECAST');
 const s3 = await run('forecast','premium forecast');

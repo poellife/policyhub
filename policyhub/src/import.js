@@ -69,6 +69,9 @@ function mapRow(raw) {
   return out;
 }
 
+/** Well beyond any real file, and low enough to bound one request's memory. */
+export const MAX_ROWS = 25000;
+
 export function parseCsv(buffer) {
   const text = buffer.toString('utf8').replace(/^﻿/, '');
   const records = parse(text, {
@@ -77,7 +80,15 @@ export function parseCsv(buffer) {
     trim: true,
     relax_column_count: true,
     bom: true,
+    to: MAX_ROWS + 1,          // stop the parser rather than discovering the size after
   });
+  if (records.length > MAX_ROWS) {
+    const e = new Error(
+      `That file has more than ${MAX_ROWS.toLocaleString('en-US')} rows. Split it and import in parts.`
+    );
+    e.status = 400;
+    throw e;
+  }
   return records.map(mapRow);
 }
 

@@ -5,7 +5,7 @@
    access at all outside them, nor to the Settings surface. As with the
    investor tests, these hit the API directly rather than the interface.
    ===================================================================== */
-const BASE = process.env.BASE || 'http://localhost:3400';
+import { BASE, ADMIN, MANAGER1, MANAGER2, INVESTOR1 } from './test-config.mjs';
 const fails = [];
 const check = (name, ok, extra = '') => {
   console.log(`${ok ? '  PASS' : '  FAIL'}  ${name}${extra ? ` — ${extra}` : ''}`);
@@ -27,9 +27,9 @@ const api = (cookie, path, opts = {}) =>
   });
 const json = async (r) => { try { return await r.json(); } catch { return null; } };
 
-const staff = await login('t@x.com', 'testtesttest');
-const pm1   = await login('pm1@example.com', 'managerpass1');   // LCG1 only
-const pm2   = await login('pm2@example.com', 'managerpass2');   // LCG1 + LCG2
+const staff = await login(ADMIN.email, ADMIN.password);
+const pm1   = await login(MANAGER1.email, MANAGER1.password);   // LCG1 only
+const pm2   = await login(MANAGER2.email, MANAGER2.password);   // LCG1 + LCG2
 
 const all  = await json(await api(staff, '/policies'));
 const p1   = await json(await api(pm1, '/policies'));
@@ -177,7 +177,7 @@ check('import into their own entity succeeds',
   (imp2.created + imp2.updated) === 1 && imp2.errors.length === 0, JSON.stringify(imp2));
 
 console.log('\nINVESTORS ARE STILL LOCKED OUT OF MANAGER ROUTES');
-const harrison = await login('harrison@example.com', 'investorpass1');
+const harrison = await login(INVESTOR1.email, INVESTOR1.password);
 for (const path of ['/funds', '/investors', '/users']) {
   const r = await api(harrison, path);
   check(`investor GET ${path} rejected`, r.status === 403, `status ${r.status}`);

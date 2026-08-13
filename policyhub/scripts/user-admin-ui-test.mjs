@@ -8,7 +8,8 @@
    one and saving takes it away, and that a suspended row reads as such.
    ===================================================================== */
 import { chromium } from 'playwright';
-const B = 'http://localhost:3400', S = '/home/claude/shots';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, scratchPassword } from './test-config.mjs';
+const S = '/home/claude/shots';
 const TEMP = 'ui-temp-user@example.com';
 const fails = [], errs = [];
 const check = (n, ok, x = '') => {
@@ -23,14 +24,14 @@ p.on('pageerror', (e) => errs.push(e.message));
 p.on('console', (m) => m.type() === 'error' && !/40[0134]/.test(m.text()) && errs.push(m.text()));
 p.on('dialog', (d) => d.accept());          // confirm() prompts
 
-await p.goto(B);
-await p.fill('#email', 't@x.com'); await p.fill('#password', 'testtesttest');
+await p.goto(BASE);
+await p.fill('#email', ADMIN.email); await p.fill('#password', ADMIN.password);
 await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row', { timeout: 12000 });
 
 const usersCard = () => p.locator('.card', { has: p.locator('h2', { hasText: 'Users' }) });
 const rowFor = (email) => usersCard().locator('tbody tr', { hasText: email });
 const gotoSettings = async () => {
-  await p.goto(`${B}/#/settings`);
+  await p.goto(`${BASE}/#/settings`);
   await usersCard().locator('tbody tr').first().waitFor();
   await p.waitForTimeout(300);
 };
@@ -46,20 +47,20 @@ console.log('THE USERS CARD');
 check('every row shows a status badge',
   (await usersCard().locator('tbody tr .badge').count()) ===
   (await usersCard().locator('tbody tr').count()));
-const self = rowFor('t@x.com');
+const self = rowFor(ADMIN.email);
 check('your own row offers Edit', (await self.locator('[data-edit-user]').count()) === 1);
 check('your own row has no Suspend button', (await self.locator('[data-toggle-user]').count()) === 0);
 check('your own row has no Delete button', (await self.locator('[data-del-user]').count()) === 0);
 check('other rows have all three',
-  (await rowFor('pm1@example.com').locator('button').count()) === 3);
+  (await rowFor(MANAGER1.email).locator('button').count()) === 3);
 await p.screenshot({ path: `${S}/u1-users-card.png`, fullPage: true });
 
 console.log('\nEDITING A MANAGER\'S ENTITIES');
-await rowFor('pm1@example.com').locator('[data-edit-user]').click();
+await rowFor(MANAGER1.email).locator('[data-edit-user]').click();
 await p.waitForSelector('dialog[open]');
 await p.waitForTimeout(400);
 check('the dialog names the account',
-  (await p.locator('.dialog-head').textContent()).includes('pm1@example.com'));
+  (await p.locator('.dialog-head').textContent()).includes(MANAGER1.email));
 check('the entity picker is shown for a manager',
   await p.locator('#fundPick').isVisible());
 check('the investor picker is hidden', !(await p.locator('#investorPick').isVisible()));
@@ -75,23 +76,23 @@ await p.click('dialog[open] button[type=submit]');
 await p.waitForTimeout(1200);
 await gotoSettings();
 check('the table shows both entities',
-  (await rowFor('pm1@example.com').textContent()).includes('LCG1, LCG2'),
-  (await rowFor('pm1@example.com').textContent()).trim().replace(/\s+/g, ' '));
+  (await rowFor(MANAGER1.email).textContent()).includes('LCG1, LCG2'),
+  (await rowFor(MANAGER1.email).textContent()).trim().replace(/\s+/g, ' '));
 
 // Take LCG2 back off.
-await rowFor('pm1@example.com').locator('[data-edit-user]').click();
+await rowFor(MANAGER1.email).locator('[data-edit-user]').click();
 await p.waitForSelector('dialog[open]'); await p.waitForTimeout(400);
 const lcg1Value = await p.$eval('select[name=fund_ids] option:nth-child(1)', (o) => o.value);
 await p.selectOption('select[name=fund_ids]', [lcg1Value]);
 await p.click('dialog[open] button[type=submit]');
 await p.waitForTimeout(1200);
 await gotoSettings();
-const back = (await rowFor('pm1@example.com').textContent());
+const back = (await rowFor(MANAGER1.email).textContent());
 check('deselecting removes the entity', back.includes('LCG1') && !back.includes('LCG2'),
   back.trim().replace(/\s+/g, ' '));
 
 console.log('\nROLE SWITCHING INSIDE THE DIALOG');
-await rowFor('harrison@example.com').locator('[data-edit-user]').click();
+await rowFor(INVESTOR1.email).locator('[data-edit-user]').click();
 await p.waitForSelector('dialog[open]'); await p.waitForTimeout(400);
 check('an investor account shows the investor picker', await p.locator('#investorPick').isVisible());
 const chosen = await p.$eval('select[name=investor_id]', (s) => s.selectedOptions[0].textContent.trim());
@@ -104,7 +105,7 @@ check('switching back restores it', await p.locator('#investorPick').isVisible()
 await p.locator('#dlgCancel').click();
 await p.waitForTimeout(400);
 check('cancelling changed nothing',
-  (await rowFor('harrison@example.com').textContent()).includes('investor'));
+  (await rowFor(INVESTOR1.email).textContent()).includes('investor'));
 
 console.log('\nYOUR OWN ROW IS LOCKED DOWN');
 await self.locator('[data-edit-user]').click();
@@ -120,7 +121,7 @@ await usersCard().locator('.card-head button').click();      // Add user
 await p.waitForSelector('dialog[open]'); await p.waitForTimeout(300);
 await p.fill('input[name=email]', TEMP);
 await p.fill('input[name=full_name]', 'UI Temp');
-await p.fill('input[name=password]', 'uitemppassword1');
+await p.fill('input[name=password]', scratchPassword('ui-probe'));
 await p.selectOption('select[name=role]', 'viewer');
 await p.click('dialog[open] button[type=submit]');
 await p.waitForTimeout(1200); await gotoSettings();

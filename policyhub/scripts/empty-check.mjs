@@ -1,13 +1,14 @@
 import { chromium } from 'playwright';
-const B='http://localhost:3100', S='/home/claude/shots';
+import { BASE, ADMIN } from './test-config.mjs';
+const S='/home/claude/shots';
 const errs=[]; const fails=[];
 const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
 const br=await chromium.launch({executablePath:'/opt/pw-browsers/chromium'});
 const p=await br.newPage({viewport:{width:1400,height:950}});
 p.on('pageerror',e=>errs.push(e.message));
 p.on('console',m=>m.type()==='error'&&!/401/.test(m.text())&&errs.push(m.text()));
-await p.goto(B); await p.waitForSelector('#loginForm');
-await p.fill('#email','test@x.com'); await p.fill('#password','testtesttest');
+await p.goto(BASE); await p.waitForSelector('#loginForm');
+await p.fill('#email',ADMIN.email); await p.fill('#password',ADMIN.password);
 await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeout:10000});
 await p.waitForTimeout(600);
 check('empty dashboard renders', await p.isVisible('.kpi-row'));

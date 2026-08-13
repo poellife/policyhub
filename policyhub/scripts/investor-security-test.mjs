@@ -5,7 +5,7 @@
    an investor session, because that is what an attacker would do. A UI
    that merely hides a button is not a security boundary.
    ===================================================================== */
-const BASE = process.env.BASE || 'http://localhost:3400';
+import { BASE, ADMIN, INVESTOR1, INVESTOR2 } from './test-config.mjs';
 const fails = [];
 const check = (name, ok, extra = '') => {
   console.log(`${ok ? '  PASS' : '  FAIL'}  ${name}${extra ? ` — ${extra}` : ''}`);
@@ -27,9 +27,9 @@ const api = (cookie, path, opts = {}) =>
   });
 const json = async (r) => { try { return await r.json(); } catch { return null; } };
 
-const staff    = await login('t@x.com', 'testtesttest');
-const harrison = await login('harrison@example.com', 'investorpass1');
-const okonkwo  = await login('okonkwo@example.com', 'investorpass2');
+const staff    = await login(ADMIN.email, ADMIN.password);
+const harrison = await login(INVESTOR1.email, INVESTOR1.password);
+const okonkwo  = await login(INVESTOR2.email, INVESTOR2.password);
 
 const allPolicies = await json(await api(staff, '/policies'));
 const harrisonIds = (await json(await api(harrison, '/policies'))).map((p) => p.id);

@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
+import { BASE, ADMIN } from './test-config.mjs';
 const fails=[]; const errs=[];
 const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
-const B='http://localhost:3000';
 
 const b=await chromium.launch({executablePath:'/opt/pw-browsers/chromium'});
 const p=await b.newPage({viewport:{width:1500,height:1000}});
@@ -9,12 +9,12 @@ p.on('pageerror',e=>errs.push(e.message));
 p.on('console',m=>m.type()==='error'&&!/401|400 \(Bad/.test(m.text())&&errs.push(m.text()));
 p.on('dialog',d=>d.accept());
 
-await p.goto(B);
-await p.fill('#email','JP@poelcapital.com'); await p.fill('#password','poelcapital2026');
+await p.goto(BASE);
+await p.fill('#email',ADMIN.email); await p.fill('#password',ADMIN.password);
 await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeout:10000});
 
 // Create a throwaway policy so the test is repeatable and destroys nothing real.
-await p.goto(`${B}/#/policies`); await p.waitForSelector('#newPolicyBtn');
+await p.goto(`${BASE}/#/policies`); await p.waitForSelector('#newPolicyBtn');
 await p.click('#newPolicyBtn'); await p.waitForSelector('dialog[open]');
 await p.fill('dialog input[name="policy_number"]','DEL-TEST-1');
 await p.fill('dialog input[name="carrier_name"]','Test Carrier Co');
@@ -52,26 +52,26 @@ console.log('\nWRONG CONFIRMATION');
 await p.fill('dialog input[name="confirm"]','wrong-text');
 await p.click('dialog button[type=submit]'); await p.waitForTimeout(700);
 check('wrong confirmation is rejected', await p.isVisible('dialog .error-box'));
-const stillThere = await p.request.get(`${B}/api/policies?search=DEL-TEST-1`);
+const stillThere = await p.request.get(`${BASE}/api/policies?search=DEL-TEST-1`);
 check('policy survives a failed confirmation', (await stillThere.json()).length===1);
 
 console.log('\nSERVER-SIDE GUARD');
-const bad = await p.request.fetch(`${B}/api/policies/${(await stillThere.json())[0].id}`,
+const bad = await p.request.fetch(`${BASE}/api/policies/${(await stillThere.json())[0].id}`,
   {method:'DELETE', data:{confirm:'nope'}});
 check('API rejects a mismatched confirmation', bad.status()===400, `status ${bad.status()}`);
-const noBody = await p.request.fetch(`${B}/api/policies/${(await stillThere.json())[0].id}`, {method:'DELETE'});
+const noBody = await p.request.fetch(`${BASE}/api/policies/${(await stillThere.json())[0].id}`, {method:'DELETE'});
 check('API rejects a missing confirmation', noBody.status()===400, `status ${noBody.status()}`);
 
 console.log('\nCORRECT CONFIRMATION');
 await p.fill('dialog input[name="confirm"]','DEL-TEST-1');
 await p.click('dialog button[type=submit]');
 await p.waitForTimeout(1600);
-const after = await p.request.get(`${B}/api/policies?search=DEL-TEST-1`);
+const after = await p.request.get(`${BASE}/api/policies?search=DEL-TEST-1`);
 check('policy is gone', (await after.json()).length===0);
 check('redirected to the policy list', p.url().includes('#/policies'));
 
 console.log('\nAUDIT TRAIL');
-await p.goto(`${B}/#/settings`); await p.waitForSelector('#pwForm'); await p.waitForTimeout(800);
+await p.goto(`${BASE}/#/settings`); await p.waitForSelector('#pwForm'); await p.waitForTimeout(800);
 const audit = await p.locator('.card').filter({hasText:'Activity log'}).textContent();
 check('deletion recorded in activity log', audit.includes('DEL-TEST-1') && audit.includes('delete'));
 check('audit captures cascade counts', /value snapshots/.test(audit) && /transactions/.test(audit));

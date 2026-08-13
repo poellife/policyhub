@@ -35,6 +35,15 @@ export const fmtCompact = (v) => {
   return `$${Math.round(n)}`;
 };
 
+/**
+ * Everything interpolated into tooltip markup goes through this. Labels are
+ * carrier names, insured names and note fields — all of which came from a CSV
+ * somebody else produced, so none of them are trusted markup.
+ */
+export const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 const el = (tag, attrs = {}, text) => {
   const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -206,13 +215,13 @@ export function lineChart(container, { points, series, height = 210, valueFmt = 
     cross.setAttribute('opacity', 1);
     const rows = series.map((s, i) => {
       const v = p.values[s.key];
-      return `<div class="t-row"><span class="swatch" style="background:${seriesColor(i)}"></span>
-              <span>${s.name}</span><span class="v">${v === null || v === undefined ? '—' : valueFmt(v)}</span></div>`;
+      return `<div class="t-row"><span class="swatch" style="background:${esc(seriesColor(i))}"></span>
+              <span>${esc(s.name)}</span><span class="v">${v === null || v === undefined ? '—' : esc(valueFmt(v))}</span></div>`;
     }).join('') + (p.extra || []).map((e) =>
-      `<div class="t-row muted"><span style="width:9px"></span><span>${e.name}</span>
-       <span class="v">${e.value === null || e.value === undefined ? '—' : valueFmt(e.value)}</span></div>`
+      `<div class="t-row muted"><span style="width:9px"></span><span>${esc(e.name)}</span>
+       <span class="v">${e.value === null || e.value === undefined ? '—' : esc(valueFmt(e.value))}</span></div>`
     ).join('');
-    showTip(`<div class="t-title">${p.tooltipTitle || p.label || shortDate(p.x)}</div>${rows}`,
+    showTip(`<div class="t-title">${esc(p.tooltipTitle || p.label || shortDate(p.x))}</div>${rows}`,
       ev.clientX, ev.clientY);
   };
   hit.addEventListener('mousemove', move);
@@ -267,10 +276,10 @@ export function barChart(container, { rows, height, valueFmt = fmtCompact, max }
 
     const hit = el('rect', { class: 'hit', x: 0, y, width: W, height: rowH });
     hit.addEventListener('mousemove', (ev) =>
-      showTip(`<div class="t-title">${r.label || '—'}</div>
-        <div class="t-row"><span class="swatch" style="background:${color}"></span>
-        <span>${r.seriesName || 'Total'}</span><span class="v">${valueFmt(v)}</span></div>
-        ${r.note ? `<div class="t-row muted"><span>${r.note}</span></div>` : ''}`,
+      showTip(`<div class="t-title">${esc(r.label || '—')}</div>
+        <div class="t-row"><span class="swatch" style="background:${esc(color)}"></span>
+        <span>${esc(r.seriesName || 'Total')}</span><span class="v">${esc(valueFmt(v))}</span></div>
+        ${r.note ? `<div class="t-row muted"><span>${esc(r.note)}</span></div>` : ''}`,
         ev.clientX, ev.clientY));
     hit.addEventListener('mouseleave', hideTip);
     svg.appendChild(hit);

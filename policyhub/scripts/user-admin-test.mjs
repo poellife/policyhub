@@ -10,10 +10,10 @@
 
    Idempotent: the throwaway account is removed at the start of each run.
    ===================================================================== */
-const BASE = process.env.BASE || 'http://localhost:3400';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, scratchPassword } from './test-config.mjs';
 const TEMP = 'temp-user-test@example.com';
-const PW1 = 'temppassword1';
-const PW2 = 'temppassword2-reset';
+const PW1 = scratchPassword('probe');
+const PW2 = scratchPassword('probe-reset');
 
 const fails = [];
 const check = (name, ok, extra = '') => {
@@ -44,7 +44,7 @@ const api = (cookie, path, opts = {}) =>
   });
 const json = async (r) => { try { return await r.json(); } catch { return null; } };
 
-const admin = await login('t@x.com', 'testtesttest');
+const admin = await login(ADMIN.email, ADMIN.password);
 const funds = await json(await api(admin, '/funds'));
 const lcg1 = funds.find((f) => f.code === 'LCG1');
 const lcg2 = funds.find((f) => f.code === 'LCG2');
@@ -56,7 +56,7 @@ if (stale) await api(admin, `/users/${stale.id}`, { method: 'DELETE' });
 
 console.log('THE USER LIST CARRIES WHAT THE EDITOR NEEDS');
 users = await json(await api(admin, '/users'));
-const pm1Row = users.find((u) => u.email === 'pm1@example.com');
+const pm1Row = users.find((u) => u.email === MANAGER1.email);
 check('manager row lists its entity ids', Array.isArray(pm1Row.fund_ids) && pm1Row.fund_ids.length === 1,
   JSON.stringify(pm1Row.fund_ids));
 check('manager row lists its entity codes', pm1Row.fund_codes === 'LCG1', pm1Row.fund_codes);
@@ -96,7 +96,7 @@ const asViewer = await api(tempCookie, '/policies/1', { method: 'PUT', body: { n
 check('demotion to viewer blocks the same session', asViewer.status === 403, `status ${asViewer.status}`);
 
 console.log('\nEDITING A MANAGER\'S ENTITIES');
-const pmCookie = await login('pm1@example.com', 'managerpass1');
+const pmCookie = await login(MANAGER1.email, MANAGER1.password);
 const before = await json(await api(pmCookie, '/policies'));
 const grant = await api(admin, `/users/${pm1Row.id}`, { method: 'PUT',
   body: { full_name: pm1Row.full_name, role: 'manager', is_active: true,
@@ -126,7 +126,7 @@ check('and the refusal left their access untouched', stillThere.fund_codes === '
   stillThere.fund_codes);
 
 console.log('\nGUARDS');
-const me = users.find((u) => u.email === 't@x.com');
+const me = users.find((u) => u.email === ADMIN.email);
 check('cannot suspend yourself',
   (await api(admin, `/users/${me.id}`, { method: 'PUT',
     body: { role: 'admin', is_active: false } })).status === 400);
@@ -144,7 +144,7 @@ check('editing a user who does not exist 404s',
   (await api(admin, '/users/999999', { method: 'PUT', body: { role: 'viewer' } })).status === 404);
 
 console.log('\nONLY ADMINS MAY DO ANY OF THIS');
-const investor = await login('harrison@example.com', 'investorpass1');
+const investor = await login(INVESTOR1.email, INVESTOR1.password);
 for (const [who, cookie] of [['manager', pmCookie], ['investor', investor]]) {
   for (const [method, path] of [['PUT', `/users/${temp.id}`], ['DELETE', `/users/${temp.id}`],
                                 ['POST', `/users/${temp.id}/password`]]) {

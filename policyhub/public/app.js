@@ -116,16 +116,30 @@ function formValues(form) {
   return out;
 }
 
+/**
+ * One CSV cell, quoted and made inert.
+ *
+ * Excel and Sheets treat a cell beginning =, +, - or @ as a formula, so a
+ * carrier or insured name imported from someone else's file could execute on
+ * open. Prefixing a single quote makes the spreadsheet show the text and
+ * evaluate nothing; the quote is not part of the value once opened. Leading
+ * tabs and carriage returns get the same treatment because they slip past a
+ * naive check on the first character.
+ */
+const csvCell = (value) => {
+  let s = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
+};
+
 /** Download an array of objects as CSV. */
 function exportCsv(filename, rows, columns) {
-  const head = columns.map((c) => `"${c.header}"`).join(',');
+  const head = columns.map((c) => csvCell(c.header)).join(',');
   const body = rows.map((r) =>
-    columns.map((c) => {
-      const v = typeof c.get === 'function' ? c.get(r) : r[c.key];
-      return `"${String(v ?? '').replace(/"/g, '""')}"`;
-    }).join(',')
+    columns.map((c) => csvCell(typeof c.get === 'function' ? c.get(r) : r[c.key])).join(',')
   ).join('\n');
-  const blob = new Blob([`${head}\n${body}`], { type: 'text/csv;charset=utf-8' });
+  // The BOM makes Excel read it as UTF-8 rather than the local code page.
+  const blob = new Blob([`﻿${head}\n${body}`], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;
@@ -169,6 +183,7 @@ const STAFF_NAV = [
   ['dashboard', 'Dashboard'],
   ['policies', 'Policies'],
   ['servicing', 'Servicing'],
+  ['maturities', 'Maturities'],
   ['insureds', 'Insureds'],
   ['investors', 'Investors'],
   ['reports', 'Reports'],
@@ -182,6 +197,7 @@ const INVESTOR_NAV = [
   ['dashboard', 'Portfolio'],
   ['policies', 'My policies'],
   ['servicing', 'Premiums'],
+  ['maturities', 'Realized'],
   ['reports', 'Statements'],
   ['settings', 'Account'],
 ];
@@ -602,6 +618,24 @@ async function policyView() {
       ${canEditData() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
       ${canEditData() ? '<button class="primary" id="editBtn">Edit policy</button>' : ''}
     </div>
+
+    ${p.matured_on ? `
+    <div class="card" style="border-left:3px solid var(--text-primary)">
+      <div class="card-body">
+        <div class="label" style="margin-bottom:6px">Matured</div>
+        <div style="font-size:15px">
+          This policy left the active portfolio on <strong>${fmtDate(p.matured_on)}</strong> and
+          appears in <a href="#/maturities">Maturities</a>.
+          ${p.proceeds_amount != null
+            ? `Proceeds of <strong>${fmtExact(scaled(p.proceeds_amount, p))}</strong> were received${
+                p.proceeds_received_on ? ` on ${fmtDate(p.proceeds_received_on)}` : ''}.`
+            : 'The claim has not been recorded as paid yet.'}
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px">
+          Driven by the date of death on the insured record — clearing it returns the
+          policy to the active book.</div>
+      </div>
+    </div>` : ''}
 
     <div class="kpi-row">
       <div class="stat"><div class="label">Death benefit</div>
@@ -1294,12 +1328,28 @@ function openInsuredDialog(ins, onSaved) {
       ${inputField('LE report date', 'le_date', dateInput(ins?.le_date), 'date')}
       ${inputField('Date of death', 'date_of_death', dateInput(ins?.date_of_death), 'date')}
     </div>
+    <div class="field" style="margin-top:-6px">
+      <span class="muted" style="font-size:12px">
+        Entering a date of death moves this person's policies out of the active
+        portfolio and into <strong>Maturities</strong>. A survivorship policy waits
+        for the second death, since a second-to-die contract pays nothing on the
+        first. Clearing the date puts the policy back.</span>
+    </div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(ins?.notes || '')}</textarea></div>`;
 
   openDialog(isNew ? 'New insured' : 'Edit insured', body, async (v) => {
-    if (isNew) await api('/insureds', { method: 'POST', body: v });
-    else await api(`/insureds/${ins.id}`, { method: 'PUT', body: v });
-    toast(isNew ? 'Insured created' : 'Insured updated');
+    if (isNew) {
+      await api('/insureds', { method: 'POST', body: v });
+      toast('Insured created');
+    } else {
+      const saved = await api(`/insureds/${ins.id}`, { method: 'PUT', body: v });
+      // Say plainly what recording a death did, rather than leaving someone to
+      // wonder why a policy vanished from the grid.
+      const matured = (saved.policies || []).filter((p) => p.matured);
+      toast(matured.length
+        ? `Insured updated — ${matured.map((p) => p.policy_number).join(', ')} moved to Maturities`
+        : 'Insured updated');
+    }
     onSaved?.();
   });
 }
@@ -1398,6 +1448,184 @@ async function servicingView() {
     after: () => document.querySelectorAll('tr.clickable').forEach((tr) =>
       tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`))),
   };
+}
+
+/* ---------------------------- maturities ----------------------------- */
+
+/**
+ * The register of policies that have paid out, or are waiting to.
+ *
+ * Nothing lands here by hand: recording a date of death moves the policy out
+ * of the active book automatically. On a survivorship policy that means the
+ * *second* death, since a second-to-die contract pays nothing on the first.
+ */
+async function maturitiesView() {
+  const m = await api('/maturities');
+  const t = m.totals;
+  const rows = m.rows;
+  const investorView = isInvestorUser();
+
+  // Realized position: what came in against what went in. Only meaningful once
+  // the carrier has actually paid, so unpaid claims are excluded from the gain
+  // rather than counted as a loss of the whole basis.
+  const collected = rows.filter((r) => r.proceeds_amount != null);
+  const collectedBasis = collected.reduce((s, r) => s + (Number(r.total_invested) || 0) * (shareFactor(r) || 1), 0);
+  const gain = Number(t.total_proceeds) - collectedBasis;
+  const multiple = collectedBasis > 0 ? Number(t.total_proceeds) / collectedBasis : null;
+
+  const nameOf = (r) =>
+    esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() || '—');
+
+  const html = `
+    <div class="page-head">
+      <div><h1>${investorView ? 'Realized' : 'Maturities'}</h1>
+        <div class="sub">${rows.length} matured ${rows.length === 1 ? 'policy' : 'policies'} ·
+          ${t.paid_count} paid · ${rows.length - t.paid_count} awaiting payment</div></div>
+      <div class="spacer"></div>
+      ${shareToggle()}
+      ${rows.length ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
+    </div>
+
+    ${rows.length === 0 ? `
+      <div class="card"><div class="card-body">
+        <div class="empty">
+          No policies have matured.<br>
+          <span class="muted" style="font-size:13px">
+            A policy moves here on its own once a date of death is recorded on the
+            insured. Survivorship policies wait for the second death.</span>
+        </div>
+      </div></div>` : `
+
+    <div class="kpi-row">
+      <div class="stat">
+        <div class="label">Death benefit matured</div>
+        <div class="value hero">${fmtExact(t.total_death_benefit)}</div>
+        <div class="note">${fmtExact(t.outstanding_benefit)} not yet collected</div>
+      </div>
+      <div class="stat">
+        <div class="label">Proceeds received</div>
+        <div class="value">${fmtExact(t.total_proceeds)}</div>
+        <div class="note">${t.paid_count} of ${rows.length} ${t.paid_count === 1 ? 'claim' : 'claims'} paid</div>
+      </div>
+      <div class="stat">
+        <div class="label">Capital invested</div>
+        <div class="value">${fmtExact(t.total_invested)}</div>
+        <div class="note">${fmtExact(collectedBasis)} against paid claims</div>
+      </div>
+      <div class="stat">
+        <div class="label">Realized gain</div>
+        <div class="value" style="color:${gain >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${fmtExact(gain)}</div>
+        <div class="note">${multiple ? `${multiple.toFixed(2)}× on capital collected` : 'no claims paid yet'}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Matured policies</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">most recent first</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr>
+          <th>Matured</th><th>Insured</th><th>Policy #</th><th>Carrier</th>
+          <th>Type</th>${investorView ? '' : '<th>Owner</th>'}
+          <th class="num">Death benefit</th><th class="num">Invested</th>
+          <th class="num">Proceeds</th><th>Received</th><th class="num">Gain</th>
+          ${canEditData() ? '<th></th>' : ''}
+        </tr></thead>
+        <tbody>${rows.map((r) => {
+          const f = shareFactor(r);
+          const benefit = Number(r.death_benefit || 0) * f;
+          const basis = Number(r.total_invested || 0) * f;
+          const paid = r.proceeds_amount == null ? null : Number(r.proceeds_amount) * f;
+          const g = paid == null ? null : paid - basis;
+          return `<tr class="clickable" data-id="${r.id}">
+            <td class="strong">${fmtDate(r.matured_on)}</td>
+            <td>${nameOf(r)}${r.lives_count > 1
+                 ? ` <span class="muted" style="font-size:12px">+${r.lives_count - 1}</span>` : ''}</td>
+            <td class="secondary">${esc(r.policy_number)}</td>
+            <td>${esc(r.carrier_name)}</td>
+            <td>${esc(r.product_type || '—')}</td>
+            ${investorView ? '' : `<td>${esc(r.fund_code || '—')}</td>`}
+            <td class="num">${fmtExact(benefit)}</td>
+            <td class="num">${fmtExact(basis)}</td>
+            <td class="num">${paid == null
+              ? '<span class="badge grace"><span class="dot"></span>Awaiting</span>' : fmtExact(paid)}</td>
+            <td>${r.proceeds_received_on ? fmtDate(r.proceeds_received_on) : '<span class="muted">—</span>'}</td>
+            <td class="num" ${g == null ? '' : `style="color:${g >= 0 ? 'var(--success-text)' : 'var(--critical)'}"`}>
+              ${g == null ? '<span class="muted">—</span>' : fmtExact(g)}</td>
+            ${canEditData() ? `<td><button class="btn-sm" data-proceeds="${r.id}"
+                 >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button></td>` : ''}
+          </tr>`;
+        }).join('')}</tbody>
+        <tfoot><tr>
+          <td colspan="${investorView ? 5 : 6}">Totals — ${rows.length}
+            ${rows.length === 1 ? 'policy' : 'policies'}</td>
+          <td class="num">${fmtExact(t.total_death_benefit)}</td>
+          <td class="num">${fmtExact(t.total_invested)}</td>
+          <td class="num">${fmtExact(t.total_proceeds)}</td>
+          <td></td>
+          <td class="num">${fmtExact(gain)}</td>
+          ${canEditData() ? '<td></td>' : ''}
+        </tr></tfoot>
+      </table></div>
+    </div>
+
+    <div class="card"><div class="card-body">
+      <span class="muted" style="font-size:12px">
+        Gain compares proceeds against every dollar in the ledger for that policy —
+        acquisition cost, premiums, fees, servicing and commissions — and is shown
+        only once the claim has been paid. A policy returns to the active book if
+        its date of death is removed.</span>
+    </div></div>`}`;
+
+  return {
+    html,
+    after: () => {
+      wireShareToggle();
+      document.querySelectorAll('tr.clickable').forEach((tr) =>
+        tr.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          go(`#/policy/${tr.dataset.id}`);
+        }));
+      document.querySelectorAll('[data-proceeds]').forEach((b) =>
+        b.addEventListener('click', () =>
+          openProceedsDialog(rows.find((r) => r.id === Number(b.dataset.proceeds)))));
+      $('#exportMaturitiesBtn')?.addEventListener('click', () =>
+        exportCsv('maturities.csv', rows, [
+          { header: 'Matured', key: 'matured_on' },
+          { header: 'Insured', get: (r) => r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() },
+          { header: 'Policy #', key: 'policy_number' },
+          { header: 'Carrier', key: 'carrier_name' },
+          { header: 'Product', key: 'product_type' },
+          { header: 'Owner', key: 'fund_code' },
+          { header: 'Death Benefit', get: (r) => Number(r.death_benefit || 0) * shareFactor(r) },
+          { header: 'Capital Invested', get: (r) => Number(r.total_invested || 0) * shareFactor(r) },
+          { header: 'Proceeds', get: (r) => r.proceeds_amount == null ? '' : Number(r.proceeds_amount) * shareFactor(r) },
+          { header: 'Received', key: 'proceeds_received_on' },
+        ]));
+    },
+  };
+}
+
+function openProceedsDialog(r) {
+  if (!r) return;
+  openDialog(`Proceeds — ${r.policy_number}`, `
+    <div class="field"><span class="muted" style="font-size:12px">
+      ${esc(r.carrier_name)} · matured ${fmtDate(r.matured_on)} ·
+      death benefit ${fmtExact(r.death_benefit)}</span></div>
+    <div class="field-row">
+      ${inputField('Gross proceeds received', 'proceeds_amount', r.proceeds_amount, 'number', 'step=0.01 min=0')}
+      ${inputField('Date received', 'proceeds_received_on', dateInput(r.proceeds_received_on), 'date')}
+    </div>
+    <span class="muted" style="font-size:12px">
+      Enter what the carrier actually paid, which may differ from the death benefit
+      after any loan balance or interest adjustment. Leave the amount blank to mark
+      the claim as still outstanding.</span>
+  `, async (v) => {
+    await api(`/policies/${r.id}/proceeds`, { method: 'PUT', body: {
+      proceeds_amount: v.proceeds_amount === '' ? null : v.proceeds_amount,
+      proceeds_received_on: v.proceeds_received_on || null,
+    } });
+    toast(v.proceeds_amount === '' ? 'Claim marked outstanding' : 'Proceeds recorded');
+  }, 'Save');
 }
 
 /* ----------------------------- insureds ------------------------------ */
@@ -2115,6 +2343,7 @@ const VIEWS = {
   policies: policiesView,
   policy: policyView,
   servicing: servicingView,
+  maturities: maturitiesView,
   insureds: insuredsView,
   investors: investorsView,
   investor: investorView,

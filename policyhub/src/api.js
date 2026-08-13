@@ -1,6 +1,6 @@
 import express from 'express';
 import { q, audit } from './db.js';
-import { requireAuth, requireRole, loadScope, login, changePassword,
+import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
 
 const router = express.Router();
@@ -165,7 +165,7 @@ const TXN_FIELDS = { txn_date: date, txn_type: str, amount: num, remarks: str };
 
 router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
-router.get('/auth/me', requireAuth, wrap(async (req, res) => {
+router.get('/auth/me', authenticate, wrap(async (req, res) => {
   const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role };
   if (req.user.role === 'investor' && req.user.iid) {
     const { rows } = await q('SELECT id, name FROM investors WHERE id = $1', [req.user.iid]);
@@ -180,8 +180,8 @@ router.get('/auth/me', requireAuth, wrap(async (req, res) => {
   }
   res.json(out);
 }));
-router.post('/auth/password', requireAuth, wrap(changePassword));
-router.get('/users', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(async (req, res) => {
+router.post('/auth/password', authenticate, wrap(changePassword));
+router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
             u.investor_id, i.name AS investor_name,
@@ -195,14 +195,26 @@ router.get('/users', requireAuth, wrap(loadScope), blockScoped, requireRole('adm
   );
   res.json(rows);
 }));
-router.post('/users', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(createUser));
-router.put('/users/:id', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(updateUser));
-router.delete('/users/:id', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(deleteUser));
-router.post('/users/:id/password', requireAuth, wrap(loadScope), blockScoped,
+router.post('/users', authenticate, blockScoped, requireRole('admin'), wrap(createUser));
+router.put('/users/:id', authenticate, blockScoped, requireRole('admin'), wrap(updateUser));
+router.delete('/users/:id', authenticate, blockScoped, requireRole('admin'), wrap(deleteUser));
+router.post('/users/:id/password', authenticate, blockScoped,
   requireRole('admin'), wrap(resetPassword));
 
-router.use(requireAuth);        // everything below requires a session
-router.use(wrap(loadScope));    // and carries the caller's entity scope
+// Everything below requires a session AND a fresh read of the account.
+// authenticate is the pair; nothing may sit between its two halves.
+router.use(authenticate);
+
+/**
+ * Every route parameter in this API is a database serial. Reject anything that
+ * is not one before it reaches a query: otherwise Postgres raises the type
+ * error, and a message naming the column type it expected is a free hint to
+ * anyone probing. A bad id is "not found", which is also simply true.
+ */
+const serialParam = (req, res, next, v) =>
+  /^\d{1,9}$/.test(String(v)) ? next() : res.status(404).json({ error: 'Not found' });
+router.param('id', serialParam);
+router.param('linkId', serialParam);
 
 /* ------------------------------------------------------------------ *
  * funds
@@ -343,7 +355,28 @@ router.put('/insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   );
   if (!rows[0]) return res.status(404).json({ error: 'Insured not found' });
   await audit(req.user.uid, 'insured', rows[0].id, 'update', sets.join(','));
-  res.json(rows[0]);
+
+  // Recording a death moves policies out of the active book by database
+  // trigger. Report which ones, so the person who typed the date is told
+  // rather than discovering it later.
+  let maturityChanges = [];
+  if ('date_of_death' in req.body) {
+    const { rows: affected } = await q(
+      `SELECT p.id, p.policy_number, p.carrier_name, p.status, p.matured_on
+         FROM policies p
+        WHERE p.insured_id = $1
+           OR p.id IN (SELECT policy_id FROM policy_insureds WHERE insured_id = $1)`,
+      [rows[0].id]
+    );
+    maturityChanges = affected.map((p) => ({
+      id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
+      matured: p.status === 'Matured' && p.matured_on !== null,
+    }));
+    for (const p of affected.filter((x) => x.status === 'Matured' && x.matured_on))
+      await audit(req.user.uid, 'policy', p.id, 'update',
+        `matured on ${p.matured_on} (death recorded for ${rows[0].last_name || rows[0].display_name})`);
+  }
+  res.json({ ...rows[0], policies: maturityChanges });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -365,6 +398,9 @@ router.get('/policies', wrap(async (req, res) => {
              OR pl.insured_first ILIKE '%'||$1||'%'
              OR pl.display_name ILIKE '%'||$1||'%')
         AND ($2 = '' OR pl.status = $2)
+        -- Matured policies belong to the Maturities register, not the active
+        -- book. They come back only when explicitly asked for by status.
+        AND ($2 <> '' OR pl.status <> 'Matured')
         AND ($3 = '' OR pl.fund_code = $3)
         AND ${visibleTo('pl.id', 'pl.fund_id', 4, 5)}
       ORDER BY pl.insured_last, pl.insured_first, pl.policy_number`,
@@ -645,6 +681,84 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
     scopedToInvestor: scope !== null,
   });
+}));
+
+/* ------------------------------------------------------------------ *
+ * maturities
+ *
+ * A policy leaves the active book the moment its qualifying death is
+ * recorded — the database trigger does that, so it happens no matter which
+ * route the date arrived by. This endpoint is the register of what has
+ * matured and what has been collected against it.
+ * ------------------------------------------------------------------ */
+
+router.get('/maturities', wrap(async (req, res) => {
+  const scope = scopeId(req);
+  const funds = fundScope(req);
+  const w = `(${shareOf('pl.id', 1)} / 100.0)`;
+  const vis = visibleTo('pl.id', 'pl.fund_id', 1, 2);
+
+  // Death benefit at maturity is the carrier's last reported figure, falling
+  // back to the face amount when no snapshot was ever taken.
+  const benefit = 'COALESCE(pl.death_benefit, pl.face_amount)';
+
+  const [rows, totals] = await Promise.all([
+    q(`SELECT pl.id, pl.policy_number, pl.carrier_name, pl.product_type,
+              pl.fund_code, pl.display_name, pl.insured_first, pl.insured_last,
+              pl.insured_dob, pl.status,
+              pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
+              pl.face_amount, ${benefit}          AS death_benefit,
+              pl.total_invested, pl.total_acquisition, pl.total_premiums,
+              ${shareOf('pl.id', 1)}              AS my_pct,
+              (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
+                                                   AS lives_count
+         FROM policy_latest pl
+        WHERE pl.status = 'Matured' AND ${vis}
+        ORDER BY pl.matured_on DESC NULLS LAST, pl.policy_number`,
+      [scope, funds]),
+    q(`SELECT COUNT(*)::int                                     AS policy_count,
+              COUNT(pl.proceeds_amount)::int                    AS paid_count,
+              COALESCE(SUM(${benefit} * ${w}), 0)               AS total_death_benefit,
+              COALESCE(SUM(pl.proceeds_amount * ${w}), 0)       AS total_proceeds,
+              COALESCE(SUM(pl.total_invested * ${w}), 0)        AS total_invested,
+              COALESCE(SUM(pl.total_acquisition * ${w}), 0)     AS total_acquisition,
+              COALESCE(SUM(CASE WHEN pl.proceeds_amount IS NULL THEN ${benefit} * ${w} END), 0)
+                                                                AS outstanding_benefit
+         FROM policy_latest pl
+        WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds]),
+  ]);
+
+  res.json({
+    rows: rows.rows,
+    totals: totals.rows[0],
+    scopedToInvestor: scope !== null,
+  });
+}));
+
+/** Record (or clear) what the carrier actually paid on a matured policy. */
+router.put('/policies/:id/proceeds', canEdit, inPolicyScope('id'), wrap(async (req, res) => {
+  const { rows: cur } = await q(
+    'SELECT policy_number, status, matured_on FROM policies WHERE id = $1', [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: 'Policy not found' });
+  if (cur[0].status !== 'Matured')
+    return res.status(400).json({
+      error: 'Proceeds can only be recorded once the policy has matured. Add the date of death first.' });
+
+  const amount = num(req.body.proceeds_amount);
+  const on = date(req.body.proceeds_received_on);
+  if (amount !== null && amount < 0)
+    return res.status(400).json({ error: 'Proceeds cannot be negative' });
+
+  const { rows } = await q(
+    `UPDATE policies SET proceeds_amount = $1, proceeds_received_on = $2, updated_at = now()
+      WHERE id = $3 RETURNING id, proceeds_amount, proceeds_received_on`,
+    [amount, on, req.params.id]
+  );
+  await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
+    amount === null
+      ? `proceeds cleared on ${cur[0].policy_number}`
+      : `proceeds ${amount} received ${on || 'date not given'} on ${cur[0].policy_number}`);
+  res.json(rows[0]);
 }));
 
 /* ------------------------------------------------------------------ *

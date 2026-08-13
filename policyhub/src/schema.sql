@@ -131,6 +131,21 @@ CREATE TABLE IF NOT EXISTS user_funds (
 );
 CREATE INDEX IF NOT EXISTS idx_user_funds_user ON user_funds (user_id);
 
+-- Bumped whenever a password changes. Every session cookie carries the number
+-- it was issued under, so raising it retires all of that user's cookies at once
+-- instead of waiting out the 12-hour expiry.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+
+-- Failed sign-in attempts, kept in the database rather than in process memory
+-- so that the throttle survives a restart or redeploy and is shared by every
+-- instance. Rows older than the window are pruned as they are counted.
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id         BIGSERIAL PRIMARY KEY,
+  ident      TEXT NOT NULL,             -- lower(email) | client ip
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts (ident, created_at);
+
 -- Additional lives on a policy (survivorship / second-to-die / joint).
 -- The PRIMARY insured stays on policies.insured_id; this table holds the
 -- extra lives, so there is exactly one source of truth for each.
@@ -190,8 +205,143 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (created_at DESC);
 
 -- ---------------------------------------------------------------------
---  Convenience view: each policy with its most recent value snapshot
+--  Maturities
+--
+--  A policy matures when the death that triggers the claim is recorded.
+--  Which death that is depends on the product:
+--
+--    SUL (survivorship / second-to-die) — the carrier pays only after the
+--      LAST insured has died, so a first death is recorded but the policy
+--      stays in the active book until the second.
+--    Everything else — the first recorded death matures it.
+--
+--  matured_on holds the date that triggered it. Its presence is also what
+--  marks the maturity as automatic: a policy an administrator marked
+--  'Matured' by hand has no matured_on and is left alone by the trigger.
 -- ---------------------------------------------------------------------
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS matured_on DATE;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS proceeds_amount NUMERIC(16,2);
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS proceeds_received_on DATE;
+CREATE INDEX IF NOT EXISTS idx_policies_matured ON policies (matured_on);
+
+-- The rule, as a function, so the trigger and any report agree by construction.
+CREATE OR REPLACE FUNCTION policy_maturity_date(p_id INTEGER)
+RETURNS DATE LANGUAGE sql STABLE AS $$
+  SELECT CASE
+           WHEN l.lives = 0 THEN NULL
+           WHEN p.product_type = 'SUL' THEN
+             CASE WHEN l.deaths = l.lives THEN l.last_death ELSE NULL END
+           ELSE l.first_death
+         END
+    FROM policies p
+    CROSS JOIN LATERAL (
+      SELECT COUNT(*)::int                AS lives,
+             COUNT(dod)::int              AS deaths,
+             MIN(dod)                     AS first_death,
+             MAX(dod)                     AS last_death
+        FROM (
+          SELECT i.date_of_death AS dod
+            FROM insureds i WHERE i.id = p.insured_id
+          UNION ALL
+          SELECT i2.date_of_death
+            FROM policy_insureds pi JOIN insureds i2 ON i2.id = pi.insured_id
+           WHERE pi.policy_id = p.id
+        ) lives_of_policy
+    ) l
+   WHERE p.id = p_id;
+$$;
+
+-- Apply the rule to one policy. Sold and Lapsed are left alone: a policy that
+-- was sold is somebody else's claim, and one that lapsed pays nothing, so a
+-- death recorded afterwards should not quietly resurrect either.
+CREATE OR REPLACE FUNCTION apply_policy_maturity(p_id INTEGER)
+RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+  computed DATE;
+  cur      RECORD;
+BEGIN
+  SELECT status, matured_on INTO cur FROM policies WHERE id = p_id;
+  IF NOT FOUND OR cur.status IN ('Sold', 'Lapsed') THEN RETURN; END IF;
+
+  computed := policy_maturity_date(p_id);
+
+  IF computed IS NOT NULL THEN
+    UPDATE policies
+       SET matured_on  = computed,
+           status      = 'Matured',
+           status_date = COALESCE(status_date, computed),
+           updated_at  = now()
+     WHERE id = p_id
+       AND (matured_on IS DISTINCT FROM computed OR status <> 'Matured');
+
+  ELSIF cur.matured_on IS NOT NULL THEN
+    -- The qualifying death was removed or a second life was added to a
+    -- survivorship policy. Undo the automatic maturity, and with it the
+    -- proceeds recorded against a claim that is no longer being made.
+    UPDATE policies
+       SET matured_on = NULL, status = 'Inforce',
+           proceeds_amount = NULL, proceeds_received_on = NULL,
+           updated_at = now()
+     WHERE id = p_id;
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_maturity_for_insured() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT id FROM policies WHERE insured_id = NEW.id
+    UNION
+    SELECT policy_id FROM policy_insureds WHERE insured_id = NEW.id
+  LOOP
+    PERFORM apply_policy_maturity(r.id);
+  END LOOP;
+  RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_maturity_for_policy() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM apply_policy_maturity(COALESCE(NEW.policy_id, OLD.policy_id));
+  RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_maturity_self() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM apply_policy_maturity(NEW.id);
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_maturity_insured ON insureds;
+CREATE TRIGGER trg_maturity_insured
+  AFTER INSERT OR UPDATE OF date_of_death ON insureds
+  FOR EACH ROW EXECUTE FUNCTION sync_maturity_for_insured();
+
+DROP TRIGGER IF EXISTS trg_maturity_lives ON policy_insureds;
+CREATE TRIGGER trg_maturity_lives
+  AFTER INSERT OR DELETE ON policy_insureds
+  FOR EACH ROW EXECUTE FUNCTION sync_maturity_for_policy();
+
+-- Changing the product type or the primary insured can change the answer too.
+DROP TRIGGER IF EXISTS trg_maturity_policy ON policies;
+CREATE TRIGGER trg_maturity_policy
+  AFTER INSERT OR UPDATE OF product_type, insured_id, status ON policies
+  FOR EACH ROW EXECUTE FUNCTION sync_maturity_self();
+
+-- ---------------------------------------------------------------------
+--  Convenience view: each policy with its most recent value snapshot
+--
+--  Dropped and rebuilt rather than replaced: the view selects policies.*,
+--  so any column added to that table lands in the middle of the view's
+--  column list, and CREATE OR REPLACE VIEW may only append at the end.
+-- ---------------------------------------------------------------------
+DROP VIEW IF EXISTS policy_latest;
 CREATE OR REPLACE VIEW policy_latest AS
 SELECT
   p.*,
@@ -229,3 +379,15 @@ LEFT JOIN LATERAL (
     SUM(amount) FILTER (WHERE txn_type = 'Acquisition Cost') AS total_acquisition
   FROM transactions tx WHERE tx.policy_id = p.id
 ) t ON TRUE;
+
+-- Reconcile every policy against the maturity rule at startup. It is cheap and
+-- idempotent, it backfills a database that predates these columns, and it means
+-- a change to the rule above takes effect on the next deploy rather than
+-- waiting for someone to touch each record.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT id FROM policies LOOP
+    PERFORM apply_policy_maturity(r.id);
+  END LOOP;
+END $$;

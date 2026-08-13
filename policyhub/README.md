@@ -17,6 +17,7 @@ leaves your database.
 | **Policies** | Sortable, filterable grid mirroring your existing CRM columns — policy #, insured, DOB, age, carrier, issue date, face, death benefit, owner, premium, AV, CSV, COI, invested, last withdrawal, values-as-of, status. Column totals in the footer. CSV export. |
 | **Policy detail** | Overview with **all lives insured** (survivorship / second-to-die policies carry two or more), **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
+| **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested and realized gain, with a per-policy claim record. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
 | **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
@@ -29,6 +30,50 @@ from a dropdown on the policy form, which also offers inline creation so a new
 entity can be added without leaving the dialog. Renaming an entity updates every
 policy pointing at it; deleting one is refused while any policy still references
 it, so policies can't be orphaned.
+
+## Maturities
+
+A policy leaves the active portfolio the moment its date of death is recorded on
+the insured — nothing has to be marked by hand. Which death counts depends on
+the product:
+
+- **SUL (survivorship / second-to-die)** — the carrier pays only after the
+  **last** insured has died. A first death is recorded and the policy stays in
+  the active book, because that is the truth about when money arrives.
+- **Everything else** — the first recorded death matures it.
+
+Once matured, the policy drops out of the dashboard totals, the servicing
+calendar, the alerts, the premium forecast and the policies grid, and appears on
+the **Maturities** register instead. It is still reachable: its own page opens
+normally and the grid's status filter will show it again.
+
+The register carries, per policy, the maturity date, death benefit, capital
+invested, proceeds received and the date they arrived, plus the realized gain.
+**Record proceeds** takes what the carrier actually paid, which is often not the
+death benefit — a loan balance or interest adjustment moves it. Until an amount
+is entered the claim reads *Awaiting*, and the totals separate benefit matured
+from benefit collected so an unpaid claim is never mistaken for cash in hand.
+
+Realized gain is proceeds less every dollar in that policy's ledger — acquisition
+cost, premiums, fees, servicing, commissions. It is shown only for claims that
+have actually been paid; an outstanding claim would otherwise read as a total
+loss of its basis.
+
+**It reverses.** Clearing the date of death returns the policy to the active book
+and discards any proceeds recorded against the claim, so a date typed into the
+wrong record is a mistake you can simply undo. Adding another life to a matured
+survivorship policy does the same, since the carrier is no longer at its last
+death. Policies already marked **Sold** or **Lapsed** are left alone: a sold
+policy is somebody else's claim, and a lapsed one pays nothing.
+
+The rule lives in a database trigger rather than in the route that happens to
+write the date, so it applies identically whether the death arrives through the
+insured dialog, the API, or a CSV import. `scripts/maturity-test.mjs` sets death
+dates every one of those ways and asserts the same outcome each time.
+
+An investor login gets the same register as **Realized**, weighted to their
+percentage, so their lifetime picture stays complete without inflating the
+active book.
 
 **Deleting a policy** is admin-only and requires typing the policy number to confirm.
 It cascades to the policy's value snapshots, ledger entries and additional-insured
@@ -45,7 +90,7 @@ dashboard, alerts and reports while keeping its history.
 | **admin** | everything | everything, including other users | yes |
 | **editor** | everything | everything except users and deletes | yes |
 | **viewer** | everything | nothing | password only |
-| **manager** | only their owning entities | everything inside them, including import and delete | **no** — password only |
+| **manager** | only their owning entities | everything inside them, including import, maturities and delete | **no** — password only |
 | **investor** | only policies they hold a share of | nothing | password only |
 
 ### Portfolio managers
@@ -158,7 +203,8 @@ user_funds       which owning entities a portfolio manager may work inside
 funds            owning entity: code, full legal name, notes (LCG2, LCG3, …)
 insureds         person: DOB, gender, state, life expectancy, date of death
 policies         carrier, policy #, product type (UL/SUL/VUL/IUL/GUL/Term/WL), face,
-                 issue date, premium schedule, acquisition
+                 issue date, premium schedule, acquisition, maturity date and
+                 proceeds received
 policy_insureds  additional lives on a policy (joint / survivorship / secondary);
                  the primary insured stays on policies.insured_id
 policy_values    one row per as-of date: AV, CSV, COI, death benefit, loan, last withdrawal
@@ -172,6 +218,12 @@ audit_log        who changed what, when
 
 `policy_latest` is a view joining each policy to its most recent value snapshot and
 its invested-to-date totals — it's what the grid and dashboard read from.
+
+`policy_maturity_date(policy_id)` is the maturity rule as a SQL function, and
+`apply_policy_maturity(policy_id)` applies it. Triggers on `insureds`,
+`policy_insureds` and `policies` call it whenever a death date, a life or a
+product type changes, and every startup reconciles the whole book — which also
+backfills a database created before these columns existed.
 
 A policy's **coverage runway** is account value ÷ monthly cost of insurance. **Invested
 to date** is the sum of acquisition cost, premium payments, fees, servicing and
@@ -197,14 +249,21 @@ from your `.env`. The schema is created automatically on first run.
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | yes | `postgres://user:pass@host:5432/dbname` |
-| `SESSION_SECRET` | yes | Long random string. Changing it signs everyone out. |
+| `SESSION_SECRET` | **yes in production** | 32+ random characters. Production will not start without it. Changing it signs everyone out. |
 | `ADMIN_EMAIL` | first run | Seeds the first admin account |
-| `ADMIN_PASSWORD` | first run | Minimum 10 characters. Change after first login. |
+| `ADMIN_PASSWORD` | **first run in production** | Minimum 10 characters. No default exists. |
 | `ADMIN_NAME` | no | Display name |
-| `NODE_ENV` | production | Enables secure cookies and HSTS |
+| `NODE_ENV` | production | Secure cookies, HSTS, generic error responses |
 | `PORT` | no | Defaults to 3000 |
+| `PGSSLROOTCERT` / `PGSSLROOTCERT_PEM` | no | CA certificate for the database, as a path or inline |
+| `PGSSLMODE` | no | `no-verify` accepts an unverifiable database certificate |
+| `PGSSL` | no | `true` / `false` forces database TLS on or off |
 
 Once the first admin exists, `ADMIN_*` is ignored — add further users in Settings.
+
+In development, leaving `SESSION_SECRET` and `ADMIN_PASSWORD` unset is fine: the
+app generates a per-process signing key and a random admin password, printing
+the password once at startup.
 
 ---
 
@@ -281,30 +340,103 @@ colours stay chromatic — a lapse warning must never depend on gray alone.
 
 - Passwords hashed with bcrypt (cost 12); never stored or logged in plain text
 - Session cookie is `httpOnly`, `sameSite=lax`, and `secure` in production; 12-hour expiry
-- Failed logins throttled to 8 attempts per 15 minutes per email + IP
+- Failed logins throttled in the database — 8 per account and 30 per IP address
+  per 15 minutes — so the limit survives a restart and is shared across instances
 - Every API route except health and login requires a session; writes require `admin`, `editor` or `manager`
-- Role, status and scope are re-read from the database on every request, so
-  suspending or deleting an account ends its open sessions at once rather than
-  when the 12-hour cookie expires
 - All SQL is parameterised — no string-built queries
 - Content-Security-Policy blocks external scripts; the app loads no third-party assets
 - Every create, update, delete, import and login is written to `audit_log`
 
+### Sessions can actually be revoked
+
+A signed cookie that carries a role is only as current as the last time somebody
+checked. So on **every** request the app re-reads the account: role, active
+status, entity access and a `token_version` counter.
+
+- Suspending or deleting an account ends its open sessions on the next click
+- A role change applies at once, in both directions
+- Changing a password bumps `token_version`, which retires every cookie issued
+  before it — including one already stolen. The browser that made the change is
+  handed a fresh cookie, so that person is not signed out of their own session.
+- An admin password reset does the same, which is the case that matters most:
+  the reason for resetting is usually that someone else may hold the old one
+
+`requireAuth` (verify the cookie) and `loadScope` (re-read the account) are
+exported as a single `authenticate` pair precisely so no route can put a role
+check between them and end up authorising against a stale token.
+
+### No default secrets
+
+There is no fallback signing key and no default admin password. In production
+the app **refuses to start** if `SESSION_SECRET` is missing or shorter than 32
+characters, and refuses to seed the first admin without `ADMIN_PASSWORD`. In
+development it generates both, prints the admin password once, and warns that
+sessions will not survive a restart.
+
+### Database TLS
+
+The database certificate is **verified**, not merely accepted. Encrypting a
+connection without checking who is on the other end stops a passive eavesdropper
+but not an active one. Provide the CA with `PGSSLROOTCERT` (path) or
+`PGSSLROOTCERT_PEM` (inline).
+
+`PGSSLMODE=no-verify` turns verification off and logs a warning every start. It
+is the right setting for Render's internal database endpoint — a private-network
+hop whose certificate comes from a CA the public trust store cannot see — and
+wrong for anything crossing the open internet.
+
+### Untrusted data
+
+Policy data arrives by CSV from other people's systems, so it is treated as
+hostile everywhere it is rendered:
+
+- Chart tooltips escape every interpolated value. A carrier named
+  `<img onerror=…>` draws as text.
+- CSV export prefixes any cell starting `=`, `+`, `-`, `@`, tab or carriage
+  return with `'`, so a crafted carrier name cannot become a live formula when
+  the export is opened in Excel or Sheets
+- Route parameters must be integers before any query runs, so a malformed id
+  returns "Not found" rather than a Postgres message naming the column type
+- Uploads are capped at 5 MB and 25,000 rows, restricted to admin/editor/manager,
+  and limited to one at a time per account — parsing is synchronous, and a 512 MB
+  instance should not be knocked over by somebody holding down Upload
+
+### Error responses
+
+In production a server fault returns `Something went wrong. Quote reference
+<id>.` and nothing else; the full error, with the request that caused it, goes
+to the server log under that reference. Outside production the detail comes
+back, because that is where somebody is trying to fix it.
+
 **Operational responsibilities that are yours, not the app's:** run it over HTTPS,
 keep `SESSION_SECRET` and `DATABASE_URL` out of version control, enable automatic
-database backups at your host, and remove users promptly when access should end.
+database backups at your host, remove users promptly when access should end, and
+run `npm audit` in your build environment.
 
 ---
 
 ## Testing
 
+No password that works anywhere is stored in this repository. The suites read
+their accounts from the environment; `scripts/seed-test-accounts.mjs` creates
+those accounts on a throwaway database with freshly generated passwords and
+writes them to a git-ignored `.env.test`:
+
 ```bash
+createdb policyhub_test
+DATABASE_URL=postgres://…/policyhub_test node scripts/seed-test-accounts.mjs
+DATABASE_URL=postgres://…/policyhub_test npm start &
 node scripts/e2e.mjs
 ```
 
-Drives a real browser through login, the grid, sorting, search, policy detail tabs,
-snapshot and transaction creation, CSV import, dark mode, mobile layout, and
-unauthenticated-access checks.
+The seeder refuses to run against `NODE_ENV=production` or a `DATABASE_URL` that
+looks hosted. Every suite is idempotent and asserts relationships rather than
+fixed counts, so they can be re-run against a database other suites have
+changed.
+
+`e2e.mjs` drives a real browser through login, the grid, sorting, search, policy
+detail tabs, snapshot and transaction creation, CSV import, dark mode, mobile
+layout, and unauthenticated-access checks.
 
 The rest of `scripts/` splits into two kinds. The `*-security-test.mjs` files talk
 to the API directly with `fetch`, deliberately bypassing the interface, and assert
@@ -324,6 +456,9 @@ reach those rules correctly.
 | `manager-ui-test.mjs` | the manager interface and its missing Settings tab |
 | `user-admin-test.mjs` | suspend, reactivate, delete, entity editing, password reset, self-guards |
 | `user-admin-ui-test.mjs` | the Users card and the edit dialog |
+| `maturity-test.mjs` | the survivorship rule, auto-transition both ways, removal from every active view, proceeds, scoping |
+| `maturity-ui-test.mjs` | recording a death through the interface and the register it produces |
+| `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 
 Each is idempotent — they clean up after themselves and can be re-run against the
 same database.
