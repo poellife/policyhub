@@ -17,7 +17,7 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeou
 await p.click('a[href="#/reports"]');
 await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Reports');
 await p.waitForSelector('#rptGenerate');
-check('reports page renders', (await p.locator('.rpt-choice').count())===4);
+check('reports page renders', (await p.locator('.rpt-choice').count())===6);
 await p.screenshot({path:`${SHOTS}/r0-reports-picker.png`,fullPage:true});
 
 const run = async (type, label, opts={}) => {
@@ -79,6 +79,48 @@ await p.emulateMedia({media:'print'});
 await p.pdf({path:'/home/claude/shots/pdf-factsheet.pdf', printBackground:true, format:'Letter',
              margin:{top:'0.55in',bottom:'0.55in',left:'0.55in',right:'0.55in'}});
 await p.emulateMedia({media:'screen'});
+
+
+console.log('\nRETURN — POLICIES IN FORCE');
+const s5 = await run('return-active','active return');
+check('headline is the hypothetical rate', /IRR IF MATURED TODAY/i.test(s5));
+check('names it as unrealized', /have not been realized/i.test(s5));
+check('ranks policies by return', /POLICIES, RANKED BY RETURN/i.test(s5));
+check('breaks out owner entities', /BY OWNER ENTITY/i.test(s5));
+check('lists what it leaves out', /NOT IN THIS REPORT/i.test(s5));
+check('states the XIRR convention', /365-day year/.test(s5));
+check('shows cost basis when ticked', /CAPITAL INVESTED/i.test(s5));
+const chart5 = await p.locator('#rptReturnChart svg').count();
+check('the IRR chart is drawn', chart5 === 1);
+check('with bars anchored at zero', /drawn from zero/.test(s5));
+
+const s5nb = await run('return-active','active return, no basis', {basis:false});
+check('cost basis disappears when unticked',
+  !/CAPITAL INVESTED/i.test(s5nb) && !/MULTIPLE/i.test(s5nb));
+check('but the rates remain', /IRR/.test(s5nb));
+
+console.log('\nRETURN — REALIZED');
+const s6 = await run('return-realized','realized return');
+check('headline is the realized rate', /REALIZED IRR/i.test(s6));
+check('explains the payment-date convention',
+  /dated to the day it cleared rather than the date of death/i.test(s6));
+check('has a matured and a paid column', /matured/i.test(s6) && /paid/i.test(s6));
+// The entity breakdown is shown only when there is more than one entity to
+// compare — the same rule the portfolio summary uses.
+const oneEntity = (s6.match(/LCG\d/g) || []).filter((v, i, a) => a.indexOf(v) === i).length < 2;
+check('breaks out owner entities when there is more than one',
+  oneEntity || /BY OWNER ENTITY/i.test(s6), oneEntity ? 'single entity — table omitted' : '');
+check('names the in-force policies it excludes', /Inforce/i.test(s6));
+
+// The two documents must not be the same document.
+check('the two reports cover different policies', s5 !== s6);
+check('and the active one is the larger book', s5.length > s6.length,
+  `${s5.length} vs ${s6.length} chars`);
+
+console.log('\nENTITY SUBTOTALS ON PAPER');
+const entityRows = await p.$$eval('.rpt-table tbody tr', (rs) =>
+  rs.map((r) => [...r.querySelectorAll('td')].map((c) => c.textContent.trim())));
+check('the entity table has a row per entity', entityRows.length > 0);
 
 console.log('\nPRINT LAYOUT');
 await p.emulateMedia({media:'print'});

@@ -235,7 +235,7 @@ export function lineChart(container, { points, series, height = 210, valueFmt = 
  * Magnitude comparison — one hue, sequential by construction.
  * rows: [{ label, value, note? }]
  */
-export function barChart(container, { rows, height, valueFmt = fmtCompact, max }) {
+export function barChart(container, { rows, height, valueFmt = fmtCompact, max, signed = false }) {
   container.innerHTML = '';
   if (!rows.length) { container.innerHTML = '<div class="empty">No data yet</div>'; return; }
 
@@ -245,18 +245,41 @@ export function barChart(container, { rows, height, valueFmt = fmtCompact, max }
   const labelW = Math.min(190, Math.max(90, W * 0.32));
   const valueW = 74;
   const barW = W - labelW - valueW - 10;
-  const top = Number(max) || Math.max(...rows.map((r) => Math.abs(Number(r.value) || 0)), 1);
+  const values = rows.map((r) => Number(r.value) || 0);
   const color = seriesColor(0);
+
+  /**
+   * With `signed`, the axis is anchored at zero and negative bars run left of
+   * it. Without it a bar's length is |value|, which would draw a −40% return
+   * exactly as long as a +40% one — the same picture for opposite outcomes.
+   * Sign is carried by direction, by a distinct fill, and by the signed
+   * number beside every bar, so it never rests on colour alone.
+   */
+  const lo = signed ? Math.min(0, ...values) : 0;
+  const hi = Number(max) || Math.max(signed ? 0 : 1, ...values.map((v) => (signed ? v : Math.abs(v))));
+  const span = hi - lo || 1;
+  const zeroX = labelW + ((0 - lo) / span) * barW;
+  const negColor = getComputedStyle(document.documentElement)
+    .getPropertyValue('--critical').trim() || color;
 
   const svg = el('svg', {
     class: 'chart', viewBox: `0 0 ${W} ${H}`, width: '100%', height: H,
     role: 'img', 'aria-label': 'Comparison chart',
   });
 
+  if (signed && lo < 0) {
+    svg.appendChild(el('line', {
+      class: 'axis-line', x1: zeroX, x2: zeroX, y1: 2, y2: H - 2,
+    }));
+  }
+
   rows.forEach((r, i) => {
     const y = i * rowH + 6;
     const v = Number(r.value) || 0;
-    const w = Math.max(2, (Math.abs(v) / top) * barW);
+    const w = signed
+      ? Math.max(2, (Math.abs(v) / span) * barW)
+      : Math.max(2, (Math.abs(v) / hi) * barW);
+    const x = signed ? (v < 0 ? zeroX - w : zeroX) : labelW;
     const label = r.label && r.label.length > 26 ? `${r.label.slice(0, 25)}…` : (r.label || '—');
 
     svg.appendChild(el('text',
@@ -265,19 +288,29 @@ export function barChart(container, { rows, height, valueFmt = fmtCompact, max }
 
     // 2px surface gap between adjacent bars is achieved by the 4px row inset.
     const bar = el('rect', {
-      class: 'bar', x: labelW, y: y + 5, width: w, height: rowH - 14, fill: color, rx: 4,
+      class: signed && v < 0 ? 'bar neg' : 'bar',
+      x, y: y + 5, width: w, height: rowH - 14,
+      fill: signed && v < 0 ? negColor : color, rx: 4,
     });
     svg.appendChild(bar);
 
+    // A negative bar's label sits to its left, unless the bar is short enough
+    // that the label would run into the row's name — then it goes to the right
+    // of the zero line, where there is always room.
+    const labelLeft = signed && v < 0 && x - 8 > labelW + 46;
     const t = el('text', {
-      class: 'value-label', x: labelW + w + 8, y: y + rowH / 2 - 2, 'dominant-baseline': 'middle',
+      class: 'value-label',
+      x: labelLeft ? x - 8 : (signed && v < 0 ? zeroX + 8 : x + w + 8),
+      y: y + rowH / 2 - 2,
+      'text-anchor': labelLeft ? 'end' : 'start',
+      'dominant-baseline': 'middle',
     }, valueFmt(v));
     svg.appendChild(t);
 
     const hit = el('rect', { class: 'hit', x: 0, y, width: W, height: rowH });
     hit.addEventListener('mousemove', (ev) =>
       showTip(`<div class="t-title">${esc(r.label || '—')}</div>
-        <div class="t-row"><span class="swatch" style="background:${esc(color)}"></span>
+        <div class="t-row"><span class="swatch" style="background:${esc(signed && v < 0 ? negColor : color)}"></span>
         <span>${esc(r.seriesName || 'Total')}</span><span class="v">${esc(valueFmt(v))}</span></div>
         ${r.note ? `<div class="t-row muted"><span>${esc(r.note)}</span></div>` : ''}`,
         ev.clientX, ev.clientY));

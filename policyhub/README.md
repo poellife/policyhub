@@ -21,7 +21,7 @@ leaves your database.
 | **Return / IRR** | Date-exact internal rate of return on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio IRR on the dashboard. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
-| **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
+| **Reports** | Six print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, **policy fact sheets** (one page each), and two return reports — **in force** and **realized**. |
 | **Investors** | Directory of investors with position counts and their share of death benefit, capital invested and cash value. Each investor has a page listing every position and its percentage. |
 | **Settings** | Password change, **owner entities**, user management — add, edit, suspend, reactivate, delete, reset a password (admin) — and a full activity log. |
 
@@ -114,6 +114,31 @@ after saving.
   invented — but the capital lost is still reported.
 - **A rate is never fabricated.** Cash that only ever went out has no IRR;
   the answer is "—", not zero.
+
+### The two return reports
+
+**Return — policies in force** and **Return — realized** are the printable form of
+all this. Both carry headline tiles, an IRR-by-policy chart, owner-entity
+subtotals, the full ranking, and a methodology note stating exactly what was
+assumed.
+
+Three things they do deliberately:
+
+- **Rates are capital-weighted, never averaged.** An entity's IRR is solved from
+  the combined flows of its policies. The simple mean of the individual rates is
+  printed beside it, because the gap between the two is itself information — on
+  the sample book the mean reads 29.6% against a weighted 17.6%, which is what a
+  few small positions with outsized rates do to an average.
+- **Nothing is silently dropped.** A "Not in this report" table names every
+  policy the basis excludes, with its status and capital, so the ranking is never
+  mistaken for the whole book.
+- **Assumptions are marked on the figure, not buried.** An unpaid claim shows the
+  death benefit with a `*` and is counted as collected today; the tile splits
+  cash received from cash assumed.
+
+The IRR-by-policy chart is anchored at zero, so a losing position runs left of
+the line in the status colour with a signed label — direction, colour and number
+all carry the sign, never colour alone.
 
 ### Where else it appears
 
@@ -358,6 +383,8 @@ and avoids running headless Chrome on the server — which would not fit in a
 | Policy schedule | Every policy as a landscape table with column totals — the formatted version of the grid |
 | Premium forecast | 12/24/36/60-month projection by month with running capital requirement, optional payment-level detail, and an explicit list of policies that *could not* be projected |
 | Policy fact sheet | One page per policy: headline tiles, policy terms, premium and servicing, all lives insured, AV/CSV history chart and recent carrier values |
+| Return — policies in force | IRR on every live policy as if it matured today. Ranked best to worst, with an IRR-by-policy chart, owner-entity subtotals and the capital-weighted book rate. Landscape. |
+| Return — realized | The same for matured policies, using the cheque that actually arrived on the day it cleared. Landscape. |
 
 **Cost basis toggle.** Every report can be generated with or without acquisition
 cost, capital invested and benefit multiple, so the same document serves an

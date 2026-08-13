@@ -263,6 +263,78 @@ if (invView?.result) {
   check('but the rate is identical — a return has no size', true, 'skipped');
 }
 
+console.log('\nTHE RETURN REPORTS');
+const active = await json(await api(admin, '/reports/returns?basis=active'));
+const realized = await json(await api(admin, '/reports/returns?basis=realized'));
+
+check('the active basis excludes matured policies',
+  !active.rows.some((r) => r.status === 'Matured'),
+  [...new Set(active.rows.map((r) => r.status))].join(','));
+check('the realized basis contains only matured ones',
+  realized.rows.length > 0 && realized.rows.every((r) => r.status === 'Matured'));
+check('the two bases do not overlap',
+  !active.rows.some((r) => realized.rows.some((y) => y.id === r.id)));
+check('the settled fixture is on the realized report',
+  realized.rows.some((r) => r.id === pol.id));
+
+check('rows are ranked by return, best first',
+  active.rows.filter((r) => r.irr !== null)
+    .every((r, i, a) => i === 0 || a[i - 1].irr >= r.irr));
+check('policies with no computable rate sort last',
+  active.rows.every((r, i, a) => r.irr !== null || a.slice(i).every((x) => x.irr === null)));
+
+console.log('\nENTITY SUBTOTALS RECONCILE');
+for (const basis of [active, realized]) {
+  const label = basis.basis;
+  const policiesIn = basis.byFund.reduce((s, f) => s + f.n, 0);
+  check(`${label}: every policy is in exactly one entity group`,
+    policiesIn === basis.rows.length, `${policiesIn} of ${basis.rows.length}`);
+  const investedIn = basis.byFund.reduce((s, f) => s + f.invested, 0);
+  check(`${label}: entity capital sums to the book`,
+    Math.abs(investedIn - basis.portfolio.invested) < 0.01,
+    `${investedIn.toFixed(2)} vs ${basis.portfolio.invested.toFixed(2)}`);
+  const returnedIn = basis.byFund.reduce((s, f) => s + f.returned, 0);
+  check(`${label}: entity proceeds sum to the book`,
+    Math.abs(returnedIn - basis.portfolio.returned) < 0.01);
+  // The rate must NOT be an average — that is the whole point of solving
+  // each entity from its own combined flows.
+  if (basis.byFund.length > 1 && basis.rated_count > 1) {
+    const meanOfEntities = basis.byFund.reduce((s, f) => s + (f.irr || 0), 0) / basis.byFund.length;
+    check(`${label}: the book rate is not the mean of the entity rates`,
+      !near(basis.portfolio.irr, meanOfEntities, 1e-9),
+      `${fmtIrr(basis.portfolio.irr)} vs mean ${fmtIrr(meanOfEntities)}`);
+  }
+  check(`${label}: the simple mean is reported alongside`, basis.mean_irr !== null);
+}
+
+console.log('\nNOTHING IS SILENTLY DROPPED');
+const allPolicies = await json(await api(admin, '/policies?status='));
+const activeCovered = active.rows.length + active.excluded.reduce((s, e) => s + e.n, 0);
+check('active: every non-sold policy is either listed or named as excluded',
+  activeCovered >= allPolicies.filter((p2) => p2.status !== 'Sold').length,
+  `${activeCovered} accounted for`);
+check('realized names the in-force policies it leaves out',
+  realized.excluded.some((e) => e.status === 'Inforce'),
+  realized.excluded.map((e) => `${e.status}:${e.n}`).join(' '));
+
+console.log('\nREPORT SCOPE');
+const fundOnly = await json(await api(admin, '/reports/returns?basis=active&fund=LCG1'));
+check('the fund filter narrows the report',
+  fundOnly.rows.length < active.rows.length && fundOnly.rows.every((r) => r.fund_code === 'LCG1'),
+  `${fundOnly.rows.length} of ${active.rows.length}`);
+const mgrReport = await json(await api(manager, '/reports/returns?basis=active'));
+check('a manager sees only their entity', mgrReport.rows.every((r) => r.fund_code === 'LCG1'));
+check('and their book rate is their own',
+  !near(mgrReport.portfolio.irr, active.portfolio.irr, 1e-9)
+  || mgrReport.rows.length === active.rows.length,
+  `${fmtIrr(mgrReport.portfolio.irr)} vs ${fmtIrr(active.portfolio.irr)}`);
+const invReport = await json(await api(investor, '/reports/returns?basis=active'));
+check('an investor gets a scoped report', invReport.scopedToInvestor === true);
+check('holding only policies they own',
+  invReport.rows.every((r) => Number(r.my_pct) > 0));
+check('an unauthenticated report request is refused',
+  (await fetch(`${BASE}/api/reports/returns?basis=active`)).status === 401);
+
 check('an unauthenticated request is refused',
   (await fetch(`${BASE}/api/policies/${pol.id}/irr`)).status === 401);
 check('a non-numeric policy id is refused',

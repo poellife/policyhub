@@ -732,20 +732,31 @@ function terminalFlow(p, asOf) {
  * investor. Two queries regardless of how many policies — the ledger is
  * fetched in one pass and bucketed in memory.
  */
-async function portfolioFlows(req, { onlyMatured = false } = {}) {
+/** Which policies each basis covers. Anything else is reported, not dropped. */
+const BASIS_FILTER = {
+  all: "pl.status <> 'Sold'",
+  active: "pl.status NOT IN ('Matured','Sold','Lapsed')",
+  realized: "pl.status = 'Matured'",
+};
+
+async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {}) {
   const scope = scopeId(req);
   const funds = fundScope(req);
   const vis = visibleTo('pl.id', 'pl.fund_id', 1, 2);
   const asOf = today();
+  const filter = BASIS_FILTER[basis] || (onlyMatured ? BASIS_FILTER.realized : BASIS_FILTER.all);
 
   const { rows: policies } = await q(
-    `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on,
-            pl.proceeds_amount, pl.proceeds_received_on,
+    `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on, pl.fund_code,
+            pl.carrier_name, pl.product_type, pl.display_name,
+            pl.insured_first, pl.insured_last, pl.insured_dob,
+            pl.proceeds_amount, pl.proceeds_received_on, pl.face_amount,
             COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
+            (${shareOf('pl.id', 1)}) AS my_pct,
             (${shareOf('pl.id', 1)}) / 100.0 AS factor
        FROM policy_latest pl
-      WHERE ${onlyMatured ? "pl.status = 'Matured' AND " : "pl.status <> 'Sold' AND "}${vis}`,
-    [scope, funds]
+      WHERE ${filter} AND ($3 = '' OR pl.fund_code = $3) AND ${vis}`,
+    [scope, funds, fund]
   );
   if (!policies.length) return { policies: [], byPolicy: new Map(), combined: [] };
 
@@ -1167,6 +1178,96 @@ router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (
 /* ------------------------------------------------------------------ *
  * reports
  * ------------------------------------------------------------------ */
+
+/**
+ * Return analysis, in one of two bases.
+ *
+ *   active   — policies still in force, each valued as if the insured died
+ *              today and the carrier paid the current death benefit
+ *   realized — matured policies, using the cheque that actually arrived on
+ *              the day it arrived (or the benefit assumed collected today
+ *              where the claim is still outstanding)
+ *
+ * Owner entities get their own IRR computed from their own combined flows,
+ * not by averaging the policies inside them — a $5m position and a $50k one
+ * do not contribute equally to a rate, and averaging pretends they do.
+ */
+router.get('/reports/returns', wrap(async (req, res) => {
+  const basis = req.query.basis === 'realized' ? 'realized' : 'active';
+  const fund = str(req.query.fund);
+
+  const { policies, byPolicy, combined, asOf } = await portfolioFlows(req, { basis, fund });
+
+  const rows = policies.map((p) => {
+    const a = analyzeFlows(byPolicy.get(p.id) || []);
+    const factor = Number(p.factor) || 0;
+    return {
+      id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
+      product_type: p.product_type, fund_code: p.fund_code, status: p.status,
+      display_name: p.display_name, insured_first: p.insured_first,
+      insured_last: p.insured_last, insured_dob: p.insured_dob,
+      my_pct: scopeId(req) === null ? null : Number(p.my_pct),
+      face_amount: Number(p.face_amount || 0) * factor,
+      death_benefit: Number(p.benefit || 0) * factor,
+      matured_on: p.matured_on,
+      proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
+      proceeds_received_on: p.proceeds_received_on,
+      settled: p.proceeds_amount != null,
+      irr: a.irr, invested: a.invested, returned: a.returned, profit: a.profit,
+      multiple: a.multiple, days: a.days, years: a.years,
+      first_flow: a.first_flow, last_flow: a.last_flow,
+      short_period: a.short_period, ambiguous: a.ambiguous,
+    };
+  }).sort((x, y) => {
+    // Highest return first; anything without a computable rate sinks to the
+    // bottom rather than sorting as if it were zero.
+    if (x.irr === null && y.irr === null) return y.invested - x.invested;
+    if (x.irr === null) return 1;
+    if (y.irr === null) return -1;
+    return y.irr - x.irr;
+  });
+
+  const groups = new Map();
+  for (const p of policies) {
+    const key = p.fund_code || 'Unassigned';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p.id);
+  }
+  const byFund = [...groups.entries()].map(([fund_code, ids]) => {
+    const flows = ids.flatMap((id) => byPolicy.get(id) || []);
+    const a = analyzeFlows(flows);
+    return { fund_code, n: ids.length, irr: a.irr, invested: a.invested,
+             returned: a.returned, profit: a.profit, multiple: a.multiple, days: a.days };
+  }).sort((x, y) => (y.irr ?? -Infinity) - (x.irr ?? -Infinity));
+
+  // Anything the basis leaves out is named, so the reader can see the shape of
+  // what is missing instead of assuming the table is the whole book.
+  const scope = scopeId(req);
+  const funds = fundScope(req);
+  const { rows: excluded } = await q(
+    `SELECT pl.status, COUNT(*)::int AS n,
+            COALESCE(SUM(pl.total_invested * (${shareOf('pl.id', 1)} / 100.0)), 0) AS invested
+       FROM policy_latest pl
+      WHERE NOT (${BASIS_FILTER[basis]}) AND ($3 = '' OR pl.fund_code = $3)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      GROUP BY pl.status ORDER BY pl.status`,
+    [scope, funds, fund]
+  );
+
+  const portfolio = analyzeFlows(combined);
+  // The simple mean is reported alongside, because the gap between it and the
+  // capital-weighted rate is itself worth seeing.
+  const rated = rows.filter((r) => r.irr !== null);
+  const meanIrr = rated.length ? rated.reduce((s, r) => s + r.irr, 0) / rated.length : null;
+
+  res.json({
+    basis, as_of: asOf, fund,
+    rows, byFund, excluded, portfolio,
+    mean_irr: meanIrr,
+    rated_count: rated.length,
+    scopedToInvestor: scope !== null,
+  });
+}));
 
 const MODE_MONTHS = { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 };
 

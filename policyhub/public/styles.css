@@ -542,6 +542,8 @@ select[multiple] { padding: 6px; }
 .rpt-block { margin-bottom: 24px; }
 .rpt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
 .rpt-note { font-size: 11.5px; line-height: 1.6; color: #5c5c5c; margin: 0; }
+/* The marker on a figure that carries a caveat, explained in the notes. */
+.rpt-flag { color: #8a8a8a; }
 
 .rpt-tiles {
   display: grid; gap: 0; margin-bottom: 26px;
@@ -608,6 +610,9 @@ table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-n
 .rpt-sheet .chart .line { stroke: #0a0a0a; }
 .rpt-sheet .chart .marker { stroke: #ffffff; fill: #0a0a0a; }
 .rpt-sheet .chart .bar { fill: #0a0a0a; }
+/* A negative bar keeps its own fill on paper too — direction alone is easy
+   to miss in a black-and-white print, so the colour reinforces it. */
+.rpt-sheet .chart .bar.neg { fill: #c62828; }
 .rpt-sheet .chart text.value-label { fill: #5c5c5c; }
 .rpt-sheet .legend .item { color: #5c5c5c; }
 

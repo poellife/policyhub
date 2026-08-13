@@ -9,6 +9,7 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
+import { fmtIrr } from './irr.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
@@ -109,6 +110,16 @@ const REPORTS = {
     name: 'Policy fact sheets',
     blurb: 'One page per policy — terms, lives insured, value history and premium schedule.',
     landscape: false,
+  },
+  'return-active': {
+    name: 'Return — policies in force',
+    blurb: 'IRR on every live policy as if it matured today, ranked, with owner-entity subtotals. The unrealized picture.',
+    landscape: true,
+  },
+  'return-realized': {
+    name: 'Return — realized',
+    blurb: 'IRR on every matured policy from the cheque that actually arrived. What the book has actually returned.',
+    landscape: true,
   },
 };
 
@@ -326,6 +337,195 @@ function buildForecast(d, o) {
       </p>
     </div>
     ${footer('Premium Forecast')}`;
+}
+
+/* --------------------------- return reports -------------------------- */
+
+/**
+ * Return analysis, in force or realized. One builder for both, because the
+ * two documents differ only in what the terminal cash flow is — an assumed
+ * death benefit dated today, or the cheque that actually cleared.
+ *
+ * Rates are capital-weighted throughout: an entity's IRR is solved from the
+ * combined flows of its policies, not averaged across them. The simple mean
+ * is printed beside it precisely so the gap between the two is visible —
+ * when a few small positions carry outsized rates, the mean flatters the
+ * book and the weighted figure does not.
+ */
+function buildReturn(d, o, { realized }) {
+  const p = d.portfolio;
+  const rows = d.rows;
+  const title = realized ? 'Realized Return' : 'Portfolio Return — In Force';
+
+  const tile = (label, value, note) => `
+    <div class="rpt-tile"><div class="rpt-tile-label">${label}</div>
+      <div class="rpt-tile-value">${value}</div>
+      ${note ? `<div class="rpt-tile-note">${note}</div>` : ''}</div>`;
+
+  const flag = (r) => {
+    if (r.irr === null) return '';
+    const why = [];
+    if (realized && !r.settled) why.push('claim outstanding, assumed collected today');
+    if (r.short_period) why.push('held under 90 days');
+    if (r.ambiguous) why.push('flows change direction more than once');
+    return why.length ? ' *' : '';
+  };
+  const anyFlagged = rows.some((r) => flag(r));
+
+  const settledCount = rows.filter((r) => r.settled).length;
+  const cashReceived = rows.reduce((s, r) => s + (r.settled ? Number(r.proceeds_amount) || 0 : 0), 0);
+  const assumed = Math.max(0, Number(p.returned) - cashReceived);
+  const weightedNote = d.mean_irr === null ? ''
+    : `Simple average of the ${d.rated_count} policy rates is ${fmtIrr(d.mean_irr)}`;
+
+  const fundTable = d.byFund.length > 1 ? `
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">By owner entity</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Entity</th><th class="num">Policies</th>
+          ${o.showBasis ? '<th class="num">Capital invested</th>' : ''}
+          <th class="num">${realized ? 'Proceeds' : 'Death benefit'}</th>
+          ${o.showBasis ? '<th class="num">Profit</th><th class="num">Multiple</th>' : ''}
+          <th class="num">IRR</th></tr></thead>
+        <tbody>${d.byFund.map((f) => `<tr>
+          <td class="strong">${esc(f.fund_code)}</td>
+          <td class="num">${f.n}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(f.invested)}</td>` : ''}
+          <td class="num">${fmtExact(f.returned)}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(f.profit)}</td>
+            <td class="num">${f.multiple ? `${f.multiple.toFixed(2)}×` : '—'}</td>` : ''}
+          <td class="num strong">${fmtIrr(f.irr)}</td>
+        </tr>`).join('')}</tbody>
+        <tfoot><tr><td>Whole book</td><td class="num">${rows.length}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(p.invested)}</td>` : ''}
+          <td class="num">${fmtExact(p.returned)}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(p.profit)}</td>
+            <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
+          <td class="num">${fmtIrr(p.irr)}</td></tr></tfoot>
+      </table>
+    </div>` : '';
+
+  return `
+    ${letterhead(title, `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
+    ${confidential(o.showBasis)}
+
+    <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
+      ${tile(realized ? 'Realized IRR' : 'IRR if matured today', fmtIrr(p.irr), weightedNote)}
+      ${tile(realized ? 'Proceeds' : 'Death benefit', fmtExact(p.returned),
+        realized
+          ? (assumed > 0
+              ? `${fmtExact(cashReceived)} received · ${fmtExact(assumed)} assumed on ${rows.length - settledCount} unpaid`
+              : `all ${rows.length} ${rows.length === 1 ? 'claim' : 'claims'} paid`)
+          : 'Current carrier-reported benefit')}
+      ${o.showBasis ? tile('Capital invested', fmtExact(p.invested),
+        `First outlay ${fmtDate(p.first_flow)}`) : ''}
+      ${o.showBasis ? tile('Profit', fmtExact(p.profit),
+        p.multiple ? `${p.multiple.toFixed(2)}× capital` : '') : ''}
+      ${tile('Cash-flow span', p.years ? `${p.years.toFixed(1)} yr` : '—',
+        `${fmtDate(p.first_flow)} to ${fmtDate(p.last_flow)}`)}
+    </div>
+
+    ${rows.length ? `
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">IRR by policy${rows.length > 12 ? ' — top 12' : ''}</h3>
+      <div id="rptReturnChart"></div>
+      <p class="rpt-note">
+        ${rows.length > 12 ? `Showing the 12 highest of ${rows.length}; the full ranking is in the table below. ` : ''}
+        Bars are drawn from zero — a negative return runs left of the line.
+      </p>
+    </div>` : ''}
+
+    ${fundTable}
+
+    <div class="rpt-block">
+      <h3 class="rpt-h3">Policies, ranked by return</h3>
+      <table class="rpt-table rpt-table-tight">
+        <thead><tr>
+          <th class="num">#</th><th>Insured</th><th>Policy no.</th><th>Carrier</th>
+          <th>Type</th><th>Owner</th>
+          ${realized ? '<th>Matured</th><th>Paid</th>' : ''}
+          <th class="num">${realized ? 'Proceeds' : 'Death benefit'}</th>
+          ${o.showBasis ? '<th class="num">Invested</th><th class="num">Profit</th><th class="num">Multiple</th>' : ''}
+          <th class="num">Days</th><th class="num">IRR</th>
+        </tr></thead>
+        <tbody>${rows.length === 0
+          ? `<tr><td colspan="14">No ${realized ? 'matured' : 'in-force'} policies to report.</td></tr>`
+          : rows.map((r, i) => `<tr>
+            <td class="num">${i + 1}</td>
+            <td>${esc(insuredOf(r))}</td>
+            <td>${esc(r.policy_number)}</td>
+            <td>${esc(r.carrier_name)}</td>
+            <td>${esc(r.product_type || '—')}</td>
+            <td>${esc(r.fund_code || '—')}</td>
+            ${realized ? `<td>${fmtDate(r.matured_on)}</td>
+              <td>${r.settled ? fmtDate(r.proceeds_received_on) : 'awaiting'}</td>` : ''}
+            <td class="num">${fmtExact(realized && r.settled ? r.proceeds_amount : r.death_benefit)}${
+              realized && !r.settled ? '<span class="rpt-flag"> *</span>' : ''}</td>
+            ${o.showBasis ? `<td class="num">${fmtExact(r.invested)}</td>
+              <td class="num">${fmtExact(r.profit)}</td>
+              <td class="num">${r.multiple ? `${r.multiple.toFixed(2)}×` : '—'}</td>` : ''}
+            <td class="num">${r.days.toLocaleString('en-US')}</td>
+            <td class="num strong">${fmtIrr(r.irr)}${flag(r)}</td>
+          </tr>`).join('')}</tbody>
+        ${rows.length ? `<tfoot><tr>
+          <td colspan="${6 + (realized ? 2 : 0)}">Totals — ${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>
+          <td class="num">${fmtExact(p.returned)}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(p.invested)}</td>
+            <td class="num">${fmtExact(p.profit)}</td>
+            <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
+          <td class="num">${p.days.toLocaleString('en-US')}</td>
+          <td class="num">${fmtIrr(p.irr)}</td>
+        </tr></tfoot>` : ''}
+      </table>
+    </div>
+
+    ${d.excluded.length ? `
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">Not in this report</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Status</th><th class="num">Policies</th>
+          ${o.showBasis ? '<th class="num">Capital invested</th>' : ''}</tr></thead>
+        <tbody>${d.excluded.map((e) => `<tr>
+          <td>${esc(e.status)}</td><td class="num">${e.n}</td>
+          ${o.showBasis ? `<td class="num">${fmtExact(e.invested)}</td>` : ''}
+        </tr>`).join('')}</tbody>
+      </table>
+      <p class="rpt-note">
+        Listed rather than dropped, so the table above is not mistaken for the whole book.
+      </p>
+    </div>` : ''}
+
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">Basis of calculation</h3>
+      <p class="rpt-note">
+        IRR is solved on the actual date of every cash flow over a 365-day year — the
+        same convention as Excel's XIRR, so these figures reconcile against a
+        spreadsheet. Money out is acquisition cost, premium payments, fees, servicing
+        and commissions as recorded in the ledger. Policy loans are excluded: a loan is
+        repaid out of the death benefit, so treating it as income would count it twice.
+      </p>
+      <p class="rpt-note">
+        ${realized
+          ? 'The inflow is the cheque that was actually received, dated to the day it ' +
+            'cleared rather than the date of death — carriers take weeks to pay and that ' +
+            'delay is a real cost to the return. Where a claim is still outstanding, the ' +
+            'death benefit is assumed collected today and the rate is marked.'
+          : 'Each policy is valued as if the insured died today and the carrier paid the ' +
+            'current death benefit immediately, with no further premiums. These are ' +
+            'hypothetical returns on positions that have not been realized; the actual ' +
+            'rate will differ by however long each policy remains in force and whatever ' +
+            'premium is paid in the meantime.'}
+      </p>
+      <p class="rpt-note">
+        Entity and portfolio rates are solved from combined cash flows, not averaged
+        across policies — a large position contributes more to a rate than a small one.
+        ${d.mean_irr !== null ? `The simple average of the individual rates is ${fmtIrr(d.mean_irr)},
+        against a capital-weighted ${fmtIrr(p.irr)}.` : ''}
+        ${anyFlagged ? `A * marks a figure that needs reading with care: ${realized ? 'a claim not yet paid, whose death benefit is shown and assumed collected today; ' : ''}a holding period under 90 days; or cash flows that change direction more than once, where more than one rate can satisfy the equation.` : ''}
+        ${p.ambiguous ? ' The combined series changes direction more than once, which is normal for a book of many policies but means the portfolio rate is one of several mathematically valid roots.' : ''}
+      </p>
+    </div>
+    ${footer(title)}`;
 }
 
 function buildFactSheets(sheets, o) {
@@ -590,6 +790,26 @@ export async function reportsView(api, state) {
                 note: `${m.payments.length} payment${m.payments.length === 1 ? '' : 's'}`,
                 seriesName: 'Premium due' })),
             });
+
+          } else if (r.type === 'return-active' || r.type === 'return-realized') {
+            const realized = r.type === 'return-realized';
+            const d = await api(`/reports/returns?basis=${realized ? 'realized' : 'active'}`
+              + `&fund=${encodeURIComponent(o.fund)}`);
+            out.innerHTML = `<div class="rpt-sheet">${buildReturn(d, o, { realized })}</div>`;
+            charts = () => {
+              const el = $('#rptReturnChart');
+              if (!el || !d.rows.length) return;
+              barChart(el, {
+                // Rates, not amounts: the axis is anchored at zero so a loss
+                // reads as a loss rather than as an equally long win.
+                signed: true,
+                rows: d.rows.filter((x) => x.irr !== null).slice(0, 12).map((x) => ({
+                  label: insuredOf(x), value: x.irr * 100,
+                  note: `${x.policy_number} · ${x.days.toLocaleString('en-US')} days`,
+                  seriesName: 'IRR' })),
+                valueFmt: (v) => `${v >= 0 ? '' : '−'}${Math.abs(v).toFixed(1)}%`,
+              });
+            };
 
           } else {
             const picked = [...$('#rptPolicies').selectedOptions].map((op) => Number(op.value));
