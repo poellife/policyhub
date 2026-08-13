@@ -4,6 +4,7 @@
 
 import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
 import { reportsView } from './reports.js';
+import { analyzeFlows, fmtIrr, today as irrToday } from './irr.js';
 
 /* ------------------------------- api --------------------------------- */
 
@@ -343,6 +344,13 @@ async function dashboardView() {
         <div class="note">≈ ${fmtExact(annualPremium)} per year</div>
       </div>
       <div class="stat">
+        <div class="label">Portfolio IRR</div>
+        <div class="value">${fmtIrr(sum.irr?.irr)}</div>
+        <div class="note">${sum.irr?.days
+          ? `if every policy matured today · ${(sum.irr.days / 365).toFixed(1)} yr span`
+          : 'no dated cash flows yet'}</div>
+      </div>
+      <div class="stat">
         <div class="label">Needs attention</div>
         <div class="value" style="${critical ? 'color:var(--critical)' : ''}">${svc.alerts.length}</div>
         <div class="note">${critical} critical</div>
@@ -596,13 +604,16 @@ let detailTab = 'overview';
 async function policyView() {
   const p = await api(`/policies/${state.params.id}`);
   const values = [...p.values].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
+  // Only fetched when the tab is open — it replays the whole ledger.
+  const irrData = detailTab === 'return' ? await api(`/policies/${p.id}/irr`) : null;
   const age = ageFrom(p.insured_dob);
   const coi = Number(p.cost_of_insurance) || 0;
   const av = Number(p.account_value) || 0;
   const monthsCovered = coi > 0 ? av / coi : null;
 
   const tabs = [['overview', 'Overview'], ['values', 'Value history'],
-                ['transactions', 'Transactions'], ['servicing', 'Servicing']];
+                ['transactions', 'Transactions'], ['return', 'Return / IRR'],
+                ['servicing', 'Servicing']];
 
   const html = `
     <div class="page-head">
@@ -660,7 +671,7 @@ async function policyView() {
       ${tabs.map(([k, label]) =>
         `<button data-tab="${k}" class="${detailTab === k ? 'active' : ''}">${label}</button>`).join('')}
     </div>
-    <div id="tabBody">${renderDetailTab(p, values, monthsCovered)}</div>`;
+    <div id="tabBody">${renderDetailTab(p, values, monthsCovered, irrData)}</div>`;
 
   return {
     html,
@@ -674,14 +685,15 @@ async function policyView() {
         const ins = await api(`/insureds/${p.insured_id}`);
         openInsuredDialog(ins);
       });
-      wireDetailTab(p, values);
+      wireDetailTab(p, values, irrData);
     },
   };
 }
 
-function renderDetailTab(p, values, monthsCovered) {
+function renderDetailTab(p, values, monthsCovered, irrData) {
   if (detailTab === 'values') return valuesTab(p, values);
   if (detailTab === 'transactions') return transactionsTab(p);
+  if (detailTab === 'return') return returnTab(p, irrData);
   if (detailTab === 'servicing') return servicingTab(p, monthsCovered);
   return overviewTab(p, values);
 }
@@ -1017,7 +1029,210 @@ function servicingTab(p, monthsCovered) {
   </div>`;
 }
 
-function wireDetailTab(p, values) {
+/* ---------------------------- return / IRR --------------------------- */
+
+/**
+ * Internal rate of return on this policy, and a calculator for the one
+ * number that matters at the end: what the cheque actually was and when it
+ * cleared. Both figures are solved from dated cash flows — the day each
+ * premium left and the day the money came back — so they answer the same
+ * question a spreadsheet's XIRR would, and can be checked against one.
+ */
+function returnTab(p, d) {
+  if (!d) return '<div class="empty"><span class="spin"></span></div>';
+  const r = d.result;
+  const settled = d.settled;
+  const dash = '<span class="muted">—</span>';
+
+  const caveats = [];
+  if (r.short_period) caveats.push(
+    'This position is under three months old. Annualising a short holding period ' +
+    'magnifies small timing differences — read the profit and the multiple, not the rate.');
+  if (r.ambiguous) caveats.push(
+    'Cash flows change direction more than once (a withdrawal between premiums, ' +
+    'for example), so more than one rate can satisfy the equation. The one shown ' +
+    'is the first root above −100%.');
+  if (!settled && r.irr !== null) caveats.push(
+    d.status === 'Matured'
+      ? 'The claim has not been recorded as paid, so this assumes the death benefit ' +
+        'is collected today. Enter the cheque below for the exact figure.'
+      : 'This is a hypothetical: it assumes the insured died today and the carrier ' +
+        'paid the current death benefit immediately, with no further premiums.');
+
+  const flowRows = r.flows.map((f) => `
+    <tr>
+      <td class="strong">${fmtDate(f.date)}</td>
+      <td>${esc(f.label || '')}${f.actual === false
+        ? ' <span class="badge grace"><span class="dot"></span>Assumed</span>' : ''}</td>
+      <td class="num" style="color:${f.amount < 0 ? 'var(--critical)' : 'var(--success-text)'}">
+        ${fmtExact(f.amount)}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="kpi-row">
+      <div class="stat">
+        <div class="label">${settled ? 'Realized IRR' : d.status === 'Matured' ? 'IRR if collected today' : 'IRR if matured today'}</div>
+        <div class="value hero">${fmtIrr(r.irr)}</div>
+        <div class="note">${r.days} days · ${r.years.toFixed(2)} years held</div>
+      </div>
+      <div class="stat">
+        <div class="label">Capital invested</div>
+        <div class="value">${fmtExact(r.invested)}</div>
+        <div class="note">first outlay ${r.first_flow ? fmtDate(r.first_flow) : '—'}</div>
+      </div>
+      <div class="stat">
+        <div class="label">${settled ? 'Proceeds received' : 'Proceeds assumed'}</div>
+        <div class="value">${fmtExact(r.returned)}</div>
+        <div class="note">${settled
+          ? `received ${d.proceeds_received_on ? fmtDate(d.proceeds_received_on) : '—'}`
+          : `death benefit as of ${fmtDate(d.as_of)}`}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Profit</div>
+        <div class="value" style="color:${r.profit >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${fmtExact(r.profit)}</div>
+        <div class="note">${r.multiple ? `${r.multiple.toFixed(2)}× capital` : '—'}</div>
+      </div>
+    </div>
+
+    ${caveats.length ? `<div class="card"><div class="card-body">
+      ${caveats.map((c) => `<div class="muted" style="font-size:12.5px;margin-bottom:6px">${c}</div>`).join('')}
+    </div></div>` : ''}
+
+    ${canEditData() ? `
+    <div class="card">
+      <div class="card-head"><h2>Settle the claim</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">figures update as you type</span></div>
+      <div class="card-body">
+        <div class="field-row">
+          <div class="field"><label>Final date of death</label>
+            <input type="date" id="calcDod" value="${esc(dateInput(d.matured_on) || '')}">
+            <span class="muted" style="font-size:12px">Saved to the insured record, which is what
+              moves the policy to Maturities.</span></div>
+          <div class="field"><label>Death benefit cheque</label>
+            <input type="number" step="0.01" min="0" id="calcAmount"
+              value="${d.proceeds_amount ?? ''}" placeholder="${Number(d.death_benefit).toFixed(2)}">
+            <span class="muted" style="font-size:12px">Exact amount received, after any loan
+              or interest adjustment.</span></div>
+          <div class="field"><label>Date the cheque cleared</label>
+            <input type="date" id="calcPaid" value="${esc(dateInput(d.proceeds_received_on) || '')}">
+            <span class="muted" style="font-size:12px">The IRR is measured to this date —
+              collection lag is a real cost.</span></div>
+        </div>
+
+        <div class="kpi-row" style="margin-top:4px">
+          <div class="stat">
+            <div class="label">Exact IRR</div>
+            <div class="value hero" id="calcIrr">${dash}</div>
+            <div class="note" id="calcNote">Enter a cheque amount and date</div>
+          </div>
+          <div class="stat">
+            <div class="label">Profit</div>
+            <div class="value" id="calcProfit">${dash}</div>
+            <div class="note" id="calcMultiple">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Against the assumption</div>
+            <div class="value" id="calcDelta">${dash}</div>
+            <div class="note">vs ${fmtIrr(r.irr)} shown above</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="primary" id="calcSave">Save the settlement</button>
+          <button id="calcReset">Reset</button>
+        </div>
+        <div id="calcMsg" style="margin-top:10px"></div>
+      </div>
+    </div>` : ''}
+
+    <div class="card">
+      <div class="card-head"><h2>Cash flows</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">every figure dated to the day it moved</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Date</th><th>Item</th><th class="num">Amount</th></tr></thead>
+        <tbody id="flowRows">${flowRows || '<tr><td colspan="3"><div class="empty">No ledger entries yet. Add the acquisition cost and premiums on the Transactions tab.</div></td></tr>'}</tbody>
+        <tfoot><tr><td colspan="2">Net</td>
+          <td class="num">${fmtExact(r.profit)}</td></tr></tfoot>
+      </table></div>
+    </div>
+
+    <div class="card"><div class="card-body">
+      <span class="muted" style="font-size:12px">
+        IRR is solved on actual dates over a 365-day year — the same convention as
+        Excel's XIRR, so these figures reconcile against a spreadsheet. Policy loans
+        are excluded: a loan is repaid out of the death benefit, so counting it as
+        income would double it against the proceeds.</span>
+    </div></div>`;
+}
+
+function wireReturnTab(p, d) {
+  if (!d || !canEditData()) return;
+  const amountEl = $('#calcAmount'), paidEl = $('#calcPaid'), dodEl = $('#calcDod');
+  if (!amountEl) return;
+
+  const recalc = () => {
+    const amount = Number(amountEl.value);
+    const paid = paidEl.value || dodEl.value || irrToday();
+    if (!amount || amount <= 0) {
+      $('#calcIrr').textContent = '—';
+      $('#calcProfit').textContent = '—';
+      $('#calcMultiple').textContent = '—';
+      $('#calcDelta').textContent = '—';
+      $('#calcNote').textContent = 'Enter a cheque amount and date';
+      return;
+    }
+    // Same solver the server uses — one implementation, so the number on
+    // screen while typing is the number that gets saved.
+    const a = analyzeFlows([...d.ledger, { date: paid, amount, label: 'Death benefit received' }]);
+    $('#calcIrr').textContent = fmtIrr(a.irr);
+    $('#calcProfit').textContent = fmtExact(a.profit);
+    $('#calcProfit').style.color = a.profit >= 0 ? 'var(--success-text)' : 'var(--critical)';
+    $('#calcMultiple').textContent = a.multiple ? `${a.multiple.toFixed(2)}× capital` : '—';
+    $('#calcNote').textContent = `${a.days} days · ${a.years.toFixed(2)} years held`;
+    const base = d.result.irr;
+    const delta = base === null || a.irr === null ? null : a.irr - base;
+    $('#calcDelta').textContent = delta === null ? '—'
+      : `${delta >= 0 ? '+' : '−'}${fmtIrr(Math.abs(delta))}`;
+    $('#calcDelta').style.color = delta === null ? '' : delta >= 0 ? 'var(--success-text)' : 'var(--critical)';
+  };
+
+  [amountEl, paidEl, dodEl].forEach((el) => el.addEventListener('input', recalc));
+  recalc();
+
+  $('#calcReset').addEventListener('click', () => {
+    amountEl.value = d.proceeds_amount ?? '';
+    paidEl.value = dateInput(d.proceeds_received_on) || '';
+    dodEl.value = dateInput(d.matured_on) || '';
+    recalc();
+  });
+
+  $('#calcSave').addEventListener('click', async (e) => {
+    const msg = $('#calcMsg');
+    e.target.disabled = true;
+    try {
+      // The date of death has to land first: it is what matures the policy,
+      // and proceeds are refused on one that has not.
+      if (dodEl.value && dodEl.value !== dateInput(d.matured_on)) {
+        if (!p.insured_id) throw new Error('This policy has no insured on file to record a death against.');
+        await api(`/insureds/${p.insured_id}`, { method: 'PUT', body: { date_of_death: dodEl.value } });
+      }
+      if (amountEl.value !== '' || paidEl.value) {
+        await api(`/policies/${p.id}/proceeds`, { method: 'PUT', body: {
+          proceeds_amount: amountEl.value === '' ? null : amountEl.value,
+          proceeds_received_on: paidEl.value || null,
+        } });
+      }
+      msg.innerHTML = '<div class="ok-box">Settlement saved.</div>';
+      toast('Settlement saved');
+      render();
+    } catch (err) {
+      msg.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      e.target.disabled = false;
+    }
+  });
+}
+
+function wireDetailTab(p, values, irrData) {
   if (detailTab === 'overview') {
     $('#addOwnerBtn')?.addEventListener('click', async () => {
       if (!state.investors.length) state.investors = await api('/investors');
@@ -1102,6 +1317,8 @@ function wireDetailTab(p, values) {
         render();
       }));
   }
+
+  if (detailTab === 'return') wireReturnTab(p, irrData);
 
   if (detailTab === 'servicing') {
     $('#logPremiumBtn')?.addEventListener('click', () =>
@@ -1517,6 +1734,13 @@ async function maturitiesView() {
         <div class="value" style="color:${gain >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${fmtExact(gain)}</div>
         <div class="note">${multiple ? `${multiple.toFixed(2)}× on capital collected` : 'no claims paid yet'}</div>
       </div>
+      <div class="stat">
+        <div class="label">${t.paid_count > 0 ? 'Realized IRR' : 'IRR if collected today'}</div>
+        <div class="value">${fmtIrr(m.portfolio?.irr)}</div>
+        <div class="note">${t.paid_count === rows.length
+          ? 'all claims paid · dated cash flows'
+          : `${rows.length - t.paid_count} claim${rows.length - t.paid_count === 1 ? '' : 's'} still assumed collected today`}</div>
+      </div>
     </div>
 
     <div class="card">
@@ -1528,6 +1752,7 @@ async function maturitiesView() {
           <th>Type</th>${investorView ? '' : '<th>Owner</th>'}
           <th class="num">Death benefit</th><th class="num">Invested</th>
           <th class="num">Proceeds</th><th>Received</th><th class="num">Gain</th>
+          <th class="num">IRR</th>
           ${canEditData() ? '<th></th>' : ''}
         </tr></thead>
         <tbody>${rows.map((r) => {
@@ -1551,6 +1776,13 @@ async function maturitiesView() {
             <td>${r.proceeds_received_on ? fmtDate(r.proceeds_received_on) : '<span class="muted">—</span>'}</td>
             <td class="num" ${g == null ? '' : `style="color:${g >= 0 ? 'var(--success-text)' : 'var(--critical)'}"`}>
               ${g == null ? '<span class="muted">—</span>' : fmtExact(g)}</td>
+            <td class="num ${paid == null ? 'secondary' : ''}" title="${
+              paid == null ? 'Provisional — assumes the death benefit is collected today'
+              : r.irr_short ? 'Held under 90 days — an annualised rate is unreliable here'
+              : r.irr_ambiguous ? 'Cash flows change direction more than once; more than one rate can satisfy the equation'
+              : `${r.irr_days} days held`}">
+              ${fmtIrr(r.irr)}${r.irr != null && (paid == null || r.irr_short || r.irr_ambiguous)
+                ? '<span class="muted"> *</span>' : ''}</td>
             ${canEditData() ? `<td><button class="btn-sm" data-proceeds="${r.id}"
                  >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button></td>` : ''}
           </tr>`;
@@ -1563,6 +1795,7 @@ async function maturitiesView() {
           <td class="num">${fmtExact(t.total_proceeds)}</td>
           <td></td>
           <td class="num">${fmtExact(gain)}</td>
+          <td class="num">${fmtIrr(m.portfolio?.irr)}</td>
           ${canEditData() ? '<td></td>' : ''}
         </tr></tfoot>
       </table></div>
@@ -1573,7 +1806,14 @@ async function maturitiesView() {
         Gain compares proceeds against every dollar in the ledger for that policy —
         acquisition cost, premiums, fees, servicing and commissions — and is shown
         only once the claim has been paid. A policy returns to the active book if
-        its date of death is removed.</span>
+        its date of death is removed.<br>
+        IRR is solved on the actual date of every cash flow over a 365-day year, the
+        same convention as Excel's XIRR. The portfolio figure combines every matured
+        policy's flows into one series rather than averaging the rates, so a large
+        position counts for more than a small one. A <strong>*</strong> marks a rate
+        that needs reading with care — an unpaid claim assumed collected today, a
+        holding period under 90 days, or flows that change direction more than once.
+        Hover it for the reason.</span>
     </div></div>`}`;
 
   return {
@@ -1600,6 +1840,8 @@ async function maturitiesView() {
           { header: 'Capital Invested', get: (r) => Number(r.total_invested || 0) * shareFactor(r) },
           { header: 'Proceeds', get: (r) => r.proceeds_amount == null ? '' : Number(r.proceeds_amount) * shareFactor(r) },
           { header: 'Received', key: 'proceeds_received_on' },
+          { header: 'IRR', get: (r) => (r.irr == null ? '' : (r.irr * 100).toFixed(4)) },
+          { header: 'Days Held', key: 'irr_days' },
         ]));
     },
   };
@@ -2408,9 +2650,30 @@ function wireShell() {
   render();
 })();
 
+/**
+ * Charts are drawn to the width available, so a genuine width change means
+ * redrawing them. Everything else about a resize is irrelevant, and a
+ * re-render is destructive: it replaces the DOM, so anything half typed —
+ * a settlement amount, a snapshot figure — would silently vanish.
+ *
+ * Hence two guards. Height-only changes are ignored (a phone's address bar
+ * collapsing, a screenshot tool extending the page), and a form with
+ * unsaved input in it is left alone entirely.
+ */
+let lastWidth = window.innerWidth;
 window.addEventListener('resize', () => {
+  if (window.innerWidth === lastWidth) return;
+  lastWidth = window.innerWidth;
   clearTimeout(window.__phResize);
   window.__phResize = setTimeout(() => {
-    if (state.user && ['dashboard', 'policy'].includes(state.route)) render();
+    if (!state.user || !['dashboard', 'policy'].includes(state.route)) return;
+    const active = document.activeElement;
+    if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return;
+    const dirty = [...document.querySelectorAll('#main input, #main select, #main textarea')]
+      .some((f) => (f.type === 'checkbox' || f.type === 'radio'
+        ? f.checked !== f.defaultChecked
+        : f.value !== f.defaultValue));
+    if (dirty) return;
+    render();
   }, 250);
 });

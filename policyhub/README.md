@@ -17,7 +17,8 @@ leaves your database.
 | **Policies** | Sortable, filterable grid mirroring your existing CRM columns — policy #, insured, DOB, age, carrier, issue date, face, death benefit, owner, premium, AV, CSV, COI, invested, last withdrawal, values-as-of, status. Column totals in the footer. CSV export. |
 | **Policy detail** | Overview with **all lives insured** (survivorship / second-to-die policies carry two or more), **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
-| **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested and realized gain, with a per-policy claim record. |
+| **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and IRR, with a per-policy claim record. |
+| **Return / IRR** | Date-exact internal rate of return on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio IRR on the dashboard. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
 | **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
@@ -74,6 +75,60 @@ dates every one of those ways and asserts the same outcome each time.
 An investor login gets the same register as **Realized**, weighted to their
 percentage, so their lifetime picture stays complete without inflating the
 active book.
+
+## Return and IRR
+
+Every policy has a **Return / IRR** tab. It solves the internal rate of return
+from the policy's dated cash flows — the day each premium actually left and the
+day money actually came back — over a 365-day year. That is Excel's XIRR
+convention, so any figure here reconciles against a spreadsheet.
+
+Two questions get answered:
+
+- **While the policy is in force** — "what would I have made if the insured died
+  this morning?" The carrier's current death benefit is dropped in at today's
+  date against the real ledger. It is labelled as the hypothetical it is.
+- **Once the claim is settled** — the exact realized return, using the cheque
+  that actually arrived on the day it actually cleared.
+
+**The calculator.** On the same tab, three fields: the final date of death, the
+exact death benefit cheque, and the date it cleared. The rate, the profit and the
+difference against the hypothetical update as you type, before anything is saved.
+Saving does both steps in order — writes the date of death to the insured record,
+which is what moves the policy to Maturities, then records the proceeds.
+
+The browser and the server run the **same solver from the same file**
+(`public/irr.js`, imported by `src/api.js`), so the number on screen while you
+type is the number that gets stored. `scripts/irr-ui-test.mjs` asserts exactly
+that, comparing what the browser displayed against what the server computed
+after saving.
+
+### Conventions
+
+- **The inflow lands on the day the cheque cleared**, not the date of death.
+  Carriers take weeks to pay and that delay is a real cost to the return. On a
+  five-year hold, a 76-day collection lag is worth about 1.5 points of IRR.
+- **Policy loans are excluded.** A loan is repaid out of the death benefit, so
+  counting it as income would double it against the proceeds.
+- **A lapse is a loss, not a blank.** No death benefit is assumed, so no rate is
+  invented — but the capital lost is still reported.
+- **A rate is never fabricated.** Cash that only ever went out has no IRR;
+  the answer is "—", not zero.
+
+### Where else it appears
+
+- **Dashboard** — portfolio IRR if every remaining policy matured today.
+- **Maturities** — an IRR column, and one rate across every matured policy's
+  combined flows. That is a true portfolio IRR, not an average of the rows: a
+  $5m position counts for more than a $50k one.
+- **Investor logins** — the same rates. Scaling every flow by a percentage
+  leaves the rate unchanged, so an investor's IRR on a policy equals the
+  sponsor's; only the dollars beside it are theirs.
+
+Rates that need reading with care are marked with a **\***: an unpaid claim
+assumed collected today, a holding period under 90 days (annualising a few weeks
+produces a headline nobody should quote), or cash flows that change direction
+more than once, where more than one rate can satisfy the equation.
 
 **Deleting a policy** is admin-only and requires typing the policy number to confirm.
 It cascades to the policy's value snapshots, ledger entries and additional-insured
@@ -218,6 +273,9 @@ audit_log        who changed what, when
 
 `policy_latest` is a view joining each policy to its most recent value snapshot and
 its invested-to-date totals — it's what the grid and dashboard read from.
+
+IRR is computed in `public/irr.js` — one implementation, loaded by the browser
+and imported by the server, so the two can never drift apart.
 
 `policy_maturity_date(policy_id)` is the maturity rule as a SQL function, and
 `apply_policy_maturity(policy_id)` applies it. Triggers on `insureds`,
@@ -458,6 +516,8 @@ reach those rules correctly.
 | `user-admin-ui-test.mjs` | the Users card and the edit dialog |
 | `maturity-test.mjs` | the survivorship rule, auto-transition both ways, removal from every active view, proceeds, scoping |
 | `maturity-ui-test.mjs` | recording a death through the interface and the register it produces |
+| `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
+| `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 
 Each is idempotent — they clean up after themselves and can be re-run against the

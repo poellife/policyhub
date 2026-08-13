@@ -1,4 +1,8 @@
 import express from 'express';
+// The IRR engine lives under public/ because the browser loads it too: the
+// what-if calculator recomputes as you type, and a second implementation
+// would eventually disagree with this one.
+import { analyzeFlows, ledgerFlows, today } from '../public/irr.js';
 import { q, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
@@ -674,12 +678,148 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     }
   }
 
+  // Book-level IRR. Every policy's dated flows in one series, with each
+  // live policy carrying a death benefit dated today — "what the book has
+  // returned if every remaining insured died this morning". Realized
+  // policies contribute the cheque that actually arrived, on the day it
+  // arrived, so this converges on the true number as the book runs off.
+  const { combined } = await portfolioFlows(req);
+  const irr = analyzeFlows(combined);
+
   res.json({
     totals: totals.rows[0],
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
+    irr,
     scopedToInvestor: scope !== null,
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * internal rate of return
+ *
+ * Every figure here comes from dated cash flows, never from an average.
+ * A policy's return depends entirely on *when* each premium left and when
+ * the check arrived, so the ledger is replayed date by date and solved.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The terminal inflow for a policy, and what to call it.
+ *
+ *  - paid claim      → the actual cheque, on the day it was received
+ *  - matured, unpaid → the death benefit, assumed collected today
+ *  - still in force  → the death benefit, as if the insured died today
+ *  - lapsed          → nothing; a lapse is a total loss and should read as one
+ *
+ * The claim lands on the date the money arrived rather than the date of
+ * death: carriers take weeks to pay, and that delay is a real cost to the
+ * return, not an accounting nicety.
+ */
+function terminalFlow(p, asOf) {
+  const benefit = Number(p.benefit) || 0;
+  if (p.status === 'Lapsed') return null;
+  if (p.proceeds_amount != null)
+    return { date: p.proceeds_received_on || p.matured_on || asOf,
+             amount: Number(p.proceeds_amount), label: 'Death benefit received', actual: true };
+  if (!benefit) return null;
+  return { date: asOf, amount: benefit, actual: false,
+           label: p.status === 'Matured' ? 'Death benefit (claim outstanding)' : 'Death benefit if matured today' };
+}
+
+/**
+ * Cash flows for every policy the caller can see, share-weighted for an
+ * investor. Two queries regardless of how many policies — the ledger is
+ * fetched in one pass and bucketed in memory.
+ */
+async function portfolioFlows(req, { onlyMatured = false } = {}) {
+  const scope = scopeId(req);
+  const funds = fundScope(req);
+  const vis = visibleTo('pl.id', 'pl.fund_id', 1, 2);
+  const asOf = today();
+
+  const { rows: policies } = await q(
+    `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on,
+            pl.proceeds_amount, pl.proceeds_received_on,
+            COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
+            (${shareOf('pl.id', 1)}) / 100.0 AS factor
+       FROM policy_latest pl
+      WHERE ${onlyMatured ? "pl.status = 'Matured' AND " : "pl.status <> 'Sold' AND "}${vis}`,
+    [scope, funds]
+  );
+  if (!policies.length) return { policies: [], byPolicy: new Map(), combined: [] };
+
+  const { rows: txns } = await q(
+    `SELECT policy_id, txn_date, txn_type, amount FROM transactions
+      WHERE policy_id = ANY($1) ORDER BY txn_date, id`,
+    [policies.map((p) => p.id)]
+  );
+  const ledger = new Map();
+  for (const t of txns) {
+    if (!ledger.has(t.policy_id)) ledger.set(t.policy_id, []);
+    ledger.get(t.policy_id).push(t);
+  }
+
+  const byPolicy = new Map();
+  const combined = [];
+  for (const p of policies) {
+    const factor = Number(p.factor) || 0;
+    const flows = ledgerFlows(ledger.get(p.id) || [], factor);
+    const terminal = terminalFlow(p, asOf);
+    if (terminal) flows.push({ ...terminal, amount: terminal.amount * factor });
+    byPolicy.set(p.id, flows);
+    combined.push(...flows);
+  }
+  return { policies, byPolicy, combined, asOf };
+}
+
+/** The policy's own cash-flow schedule, with both scenarios spelled out. */
+router.get('/policies/:id/irr', wrap(async (req, res) => {
+  const scope = scopeId(req);
+  const funds = fundScope(req);
+  const { rows } = await q(
+    `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on,
+            pl.proceeds_amount, pl.proceeds_received_on,
+            COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
+            pl.face_amount, pl.cash_surrender_value,
+            (${shareOf('pl.id', 2)}) AS my_pct
+       FROM policy_latest pl
+      WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
+    [req.params.id, scope, funds]
+  );
+  const p = rows[0];
+  if (!p) return res.status(404).json({ error: 'Policy not found' });
+
+  const { rows: txns } = await q(
+    `SELECT txn_date, txn_type, amount, remarks FROM transactions
+      WHERE policy_id = $1 ORDER BY txn_date, id`, [req.params.id]
+  );
+
+  // Investors see their slice. IRR itself is unchanged by scaling every
+  // flow — a rate has no size — but the dollars beside it must be theirs.
+  const factor = scope === null ? 1 : (Number(p.my_pct) || 0) / 100;
+  const asOf = today();
+  const base = ledgerFlows(txns, factor);
+
+  const terminal = terminalFlow(p, asOf);
+  const withTerminal = terminal
+    ? [...base, { ...terminal, amount: terminal.amount * factor }]
+    : base;
+
+  res.json({
+    policy_id: p.id,
+    policy_number: p.policy_number,
+    status: p.status,
+    matured_on: p.matured_on,
+    proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
+    proceeds_received_on: p.proceeds_received_on,
+    death_benefit: Number(p.benefit || 0) * factor,
+    cash_surrender_value: Number(p.cash_surrender_value || 0) * factor,
+    my_pct: scope === null ? null : Number(p.my_pct),
+    as_of: asOf,
+    settled: p.proceeds_amount != null,
+    ledger: base,                                    // outflows only, dated
+    result: analyzeFlows(withTerminal),
   });
 }));
 
@@ -728,9 +868,21 @@ router.get('/maturities', wrap(async (req, res) => {
         WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds]),
   ]);
 
+  // Return on each matured policy, and one IRR across all of them together.
+  const { byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true });
+  const withReturn = rows.rows.map((r) => {
+    const a = analyzeFlows(byPolicy.get(r.id) || []);
+    return { ...r, irr: a.irr, irr_days: a.days, irr_short: a.short_period,
+             irr_ambiguous: a.ambiguous, multiple: a.multiple };
+  });
+
   res.json({
-    rows: rows.rows,
+    rows: withReturn,
     totals: totals.rows[0],
+    // Realized return across every matured policy's dated flows — not an
+    // average of the per-policy rates, which would weight a $50k position
+    // the same as a $5m one.
+    portfolio: analyzeFlows(combined),
     scopedToInvestor: scope !== null,
   });
 }));

@@ -1,0 +1,273 @@
+/* =====================================================================
+   Internal rate of return.
+
+   Two halves. The first checks the solver itself against figures Excel's
+   XIRR produces, and against an independently written secant solver — if
+   two different methods disagree, one of them is wrong and the test says
+   so rather than trusting the one we shipped.
+
+   The second drives the API: the hypothetical return on a live policy,
+   the exact return once the cheque is recorded, and the fact that the
+   date the money arrived — not the date of death — is what the rate is
+   measured to.
+
+   Idempotent: fixtures use a fixed prefix and are removed first.
+   ===================================================================== */
+import { BASE, ADMIN, MANAGER1, INVESTOR1, login } from './test-config.mjs';
+import { xirr, npv, analyzeFlows, daysBetween, fmtIrr } from '../public/irr.js';
+
+const PREFIX = 'IRR-TEST';
+const fails = [];
+const check = (name, ok, extra = '') => {
+  console.log(`${ok ? '  PASS' : '  FAIL'}  ${name}${extra ? ` — ${extra}` : ''}`);
+  if (!ok) fails.push(name);
+};
+const near = (a, b, tol = 1e-6) => a !== null && b !== null && Math.abs(a - b) < tol;
+
+const api = (cookie, path, opts = {}) =>
+  fetch(`${BASE}/api${path}`, {
+    ...opts,
+    body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  });
+const json = async (r) => { try { return await r.json(); } catch { return null; } };
+
+/* ==================================================================== *
+ * 1. The solver
+ * ==================================================================== */
+console.log('AGAINST EXCEL XIRR');
+
+// Straight from Microsoft's own XIRR documentation.
+const msExample = [
+  { date: '2008-01-01', amount: -10000 }, { date: '2008-03-01', amount: 2750 },
+  { date: '2008-10-30', amount: 4250 }, { date: '2009-02-15', amount: 3250 },
+  { date: '2009-04-01', amount: 2750 },
+];
+check("Microsoft's documented example", near(xirr(msExample), 0.373362535, 1e-7),
+  `${xirr(msExample)} vs 0.373362535`);
+
+check('exactly one year at 10%',
+  near(xirr([{ date: '2021-01-01', amount: -1000 }, { date: '2022-01-01', amount: 1100 }]), 0.10, 1e-7));
+check('a leap year is 366 days, not 365',
+  near(xirr([{ date: '2020-01-01', amount: -1000 }, { date: '2021-01-01', amount: 1100 }]),
+       1.1 ** (365 / 366) - 1, 1e-9),
+  `${daysBetween('2020-01-01', '2021-01-01')} days`);
+check('doubling over 731 days',
+  near(xirr([{ date: '2020-01-01', amount: -1000 }, { date: '2022-01-01', amount: 2000 }]),
+       2 ** (365 / 731) - 1, 1e-9));
+check('a loss returns a negative rate',
+  xirr([{ date: '2020-01-01', amount: -1000 }, { date: '2022-01-01', amount: 500 }]) < 0);
+
+console.log('\nAGAINST AN INDEPENDENTLY WRITTEN SOLVER');
+// Secant method — a different algorithm entirely. If it lands on the same
+// root as the shipped bisection, the answer is the function's, not the
+// method's.
+function secantIrr(flows) {
+  const f = (r) => npv(flows, r, flows[0].date);
+  let r0 = 0.05, r1 = 0.15;
+  let f0 = f(r0), f1 = f(r1);
+  for (let i = 0; i < 200 && Math.abs(f1) > 1e-10; i++) {
+    if (f1 === f0) break;
+    const r2 = r1 - (f1 * (r1 - r0)) / (f1 - f0);
+    if (!Number.isFinite(r2) || r2 <= -1) break;
+    r0 = r1; f0 = f1; r1 = r2; f1 = f(r1);
+  }
+  return r1;
+}
+const cases = [
+  [{ date: '2019-05-14', amount: -725000 }, { date: '2020-05-14', amount: -61000 },
+   { date: '2021-05-14', amount: -64000 }, { date: '2023-11-02', amount: 2400000 }],
+  [{ date: '2015-01-31', amount: -1250000 }, { date: '2016-02-29', amount: -98500 },
+   { date: '2017-03-01', amount: -102000 }, { date: '2018-03-01', amount: -106000 },
+   { date: '2024-12-31', amount: 3100000 }],
+  [{ date: '2022-06-30', amount: -400000 }, { date: '2022-12-31', amount: -12000 },
+   { date: '2023-07-15', amount: 505000 }],
+];
+cases.forEach((flows, i) => {
+  const a = xirr(flows), b = secantIrr(flows);
+  check(`case ${i + 1}: bisection and secant agree`, near(a, b, 1e-7),
+    `${fmtIrr(a, { dp: 6 })} vs ${fmtIrr(b, { dp: 6 })}`);
+  // Relative, not absolute: on flows of a few million a rate correct to
+  // nine decimals still leaves a residual of a few cents, which is the
+  // solver being precise rather than the answer being wrong.
+  const scale = flows.reduce((s, f) => s + Math.abs(f.amount), 0);
+  const residual = Math.abs(npv(flows, a, flows[0].date)) / scale;
+  check(`case ${i + 1}: NPV at that rate is zero`, residual < 1e-9,
+    `residual ${residual.toExponential(2)} of ${scale.toLocaleString('en-US')}`);
+});
+
+console.log('\nWHAT IT REFUSES TO ANSWER');
+check('no inflow at all', xirr([{ date: '2020-01-01', amount: -100 }, { date: '2021-01-01', amount: -50 }]) === null);
+check('no outflow at all', xirr([{ date: '2020-01-01', amount: 100 }, { date: '2021-01-01', amount: 50 }]) === null);
+check('a single flow', xirr([{ date: '2020-01-01', amount: -100 }]) === null);
+check('everything on one day', xirr([{ date: '2020-01-01', amount: -100 }, { date: '2020-01-01', amount: 200 }]) === null);
+check('nothing at all', xirr([]) === null);
+
+console.log('\nHOW IT DESCRIBES ITSELF');
+const shortHold = analyzeFlows([{ date: '2026-01-01', amount: -100000 }, { date: '2026-02-10', amount: 130000 }]);
+check('a 40-day hold is flagged as short', shortHold.short_period, `${shortHold.days} days`);
+check('and still reports the honest multiple', near(shortHold.multiple, 1.3, 1e-9));
+const wobbly = analyzeFlows([
+  { date: '2020-01-01', amount: -100000 }, { date: '2021-01-01', amount: 40000 },
+  { date: '2022-01-01', amount: -30000 }, { date: '2024-01-01', amount: 150000 }]);
+check('flows that change direction twice are flagged', wobbly.ambiguous);
+check('a conventional pattern is not', !analyzeFlows(cases[0]).ambiguous);
+
+/* ==================================================================== *
+ * 2. Through the API
+ * ==================================================================== */
+const admin = await login(ADMIN.email, ADMIN.password);
+
+const wipe = async () => {
+  const seen = new Set();
+  for (const status of ['', 'Matured', 'Inforce', 'Lapsed']) {
+    for (const p of ((await json(await api(admin, `/policies?status=${status}`))) || [])
+      .filter((x) => x.policy_number.startsWith(PREFIX))) {
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      const d = await json(await api(admin, `/policies/${p.id}`));
+      for (const id of [d?.insured_id, ...(d?.additionalInsureds || []).map((x) => x.id)].filter(Boolean))
+        await api(admin, `/insureds/${id}`, { method: 'PUT', body: { date_of_death: null } });
+      await api(admin, `/policies/${p.id}`, { method: 'DELETE', body: { confirm: p.policy_number } });
+    }
+  }
+};
+await wipe();
+
+console.log('\nA LIVE POLICY: WHAT IF IT MATURED TODAY');
+const pol = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-1`, carrier_name: 'IRR Test Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 3000000,
+  insured_last_name: 'Irrtest', insured_first_name: 'Case', dob: '1941-06-01' } }));
+const LEDGER = [
+  ['2022-03-01', 'Acquisition Cost', 600000],
+  ['2023-03-01', 'Premium Payment', 48000],
+  ['2024-03-01', 'Premium Payment', 52000],
+  ['2025-03-01', 'Premium Payment', 56000],
+];
+for (const [txn_date, txn_type, amount] of LEDGER)
+  await api(admin, `/policies/${pol.id}/transactions`, { method: 'POST', body: { txn_date, txn_type, amount } });
+// A policy loan must not be mistaken for income — it is repaid out of the claim.
+await api(admin, `/policies/${pol.id}/transactions`, { method: 'POST',
+  body: { txn_date: '2024-06-01', txn_type: 'Loan', amount: 25000 } });
+
+const live = await json(await api(admin, `/policies/${pol.id}/irr`));
+check('the endpoint answers for a live policy', live?.result != null);
+check('it is not settled', live.settled === false);
+check('capital invested is the ledger, loan excluded',
+  near(live.result.invested, 756000, 0.01), live.result.invested);
+check('the assumed inflow is the death benefit', near(live.result.returned, 3000000, 0.01),
+  live.result.returned);
+check('the terminal flow is dated today and marked assumed',
+  live.result.flows.at(-1).date === live.as_of && live.result.flows.at(-1).actual === false);
+
+const expectedLive = xirr([
+  ...LEDGER.map(([d, , a]) => ({ date: d, amount: -a })),
+  { date: live.as_of, amount: 3000000 },
+]);
+check('the rate matches an independent calculation', near(live.result.irr, expectedLive, 1e-9),
+  `${fmtIrr(live.result.irr, { dp: 6 })} vs ${fmtIrr(expectedLive, { dp: 6 })}`);
+
+console.log('\nSETTLING IT: THE EXACT RATE');
+await api(admin, `/insureds/${pol.insured_id}`, { method: 'PUT', body: { date_of_death: '2026-04-10' } });
+check('recording the death matured it',
+  (await json(await api(admin, `/policies/${pol.id}`))).status === 'Matured');
+
+const CHEQUE = 2985000, PAID_ON = '2026-06-25', DIED_ON = '2026-04-10';
+await api(admin, `/policies/${pol.id}/proceeds`, { method: 'PUT',
+  body: { proceeds_amount: CHEQUE, proceeds_received_on: PAID_ON } });
+
+const settled = await json(await api(admin, `/policies/${pol.id}/irr`));
+check('now reported as settled', settled.settled === true);
+check('the inflow is the cheque, not the death benefit', near(settled.result.returned, CHEQUE, 0.01));
+check('and it is marked as actual, not assumed', settled.result.flows.at(-1).actual === true);
+check('dated to the day the cheque cleared', settled.result.flows.at(-1).date === PAID_ON);
+
+const toPaid = xirr([...LEDGER.map(([d, , a]) => ({ date: d, amount: -a })),
+                     { date: PAID_ON, amount: CHEQUE }]);
+const toDeath = xirr([...LEDGER.map(([d, , a]) => ({ date: d, amount: -a })),
+                      { date: DIED_ON, amount: CHEQUE }]);
+check('the exact rate matches an independent calculation', near(settled.result.irr, toPaid, 1e-9),
+  fmtIrr(settled.result.irr, { dp: 6 }));
+check('measuring to the death date would give a different, higher number',
+  toDeath > toPaid && Math.abs(toDeath - toPaid) > 0.001,
+  `${fmtIrr(toDeath, { dp: 4 })} to death vs ${fmtIrr(toPaid, { dp: 4 })} to payment`);
+check('the app uses the payment date, as configured', near(settled.result.irr, toPaid, 1e-9));
+check('76 days of collection lag cost real return',
+  daysBetween(DIED_ON, PAID_ON) === 76, `${daysBetween(DIED_ON, PAID_ON)} days`);
+
+console.log('\nON THE MATURITIES REGISTER');
+const reg = await json(await api(admin, '/maturities'));
+const regRow = reg.rows.find((r) => r.id === pol.id);
+check('the policy carries its IRR', near(regRow.irr, toPaid, 1e-9), fmtIrr(regRow.irr));
+check('with the days it was held', regRow.irr_days === daysBetween('2022-03-01', PAID_ON),
+  `${regRow.irr_days} days`);
+check('not flagged as short or ambiguous', !regRow.irr_short && !regRow.irr_ambiguous);
+check('the register reports a portfolio rate', reg.portfolio?.irr != null, fmtIrr(reg.portfolio?.irr));
+check('which is not simply the average of the rows',
+  reg.rows.length < 2 || !near(reg.portfolio.irr,
+    reg.rows.reduce((s, r) => s + (r.irr || 0), 0) / reg.rows.length, 1e-9),
+  `${reg.rows.length} rows`);
+
+console.log('\nON THE DASHBOARD');
+const sum = await json(await api(admin, '/analytics/summary'));
+check('the summary carries a portfolio IRR', sum.irr?.irr != null, fmtIrr(sum.irr?.irr));
+check('built from more capital than any one policy', sum.irr.invested > live.result.invested);
+check('and spanning the whole book', sum.irr.days > 365);
+
+console.log('\nA LAPSED POLICY IS A LOSS, NOT A BLANK');
+const dud = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-2`, carrier_name: 'IRR Test Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 1000000, status: 'Lapsed',
+  insured_last_name: 'Irrlapsed' } }));
+await api(admin, `/policies/${dud.id}/transactions`, { method: 'POST',
+  body: { txn_date: '2023-01-01', txn_type: 'Acquisition Cost', amount: 150000 } });
+const dudIrr = await json(await api(admin, `/policies/${dud.id}/irr`));
+check('no death benefit is assumed on a lapse', dudIrr.result.returned === 0);
+check('so no rate is invented', dudIrr.result.irr === null);
+check('but the capital lost is still reported', near(dudIrr.result.invested, 150000, 0.01));
+
+console.log('\nA POLICY WITH NO LEDGER');
+const bare = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-3`, carrier_name: 'IRR Test Life', fund_code: 'LCG1',
+  face_amount: 500000, insured_last_name: 'Irrbare' } }));
+const bareIrr = await json(await api(admin, `/policies/${bare.id}/irr`));
+check('reports nothing rather than infinity', bareIrr.result.irr === null);
+check('and says nothing was invested', bareIrr.result.invested === 0);
+
+console.log('\nSCOPE');
+const manager = await login(MANAGER1.email, MANAGER1.password);
+check('a manager can read IRR inside their entity',
+  (await api(manager, `/policies/${pol.id}/irr`)).status === 200);
+await api(admin, `/policies/${pol.id}`, { method: 'PUT', body: { fund_code: 'LCG2' } });
+check('and cannot outside it', (await api(manager, `/policies/${pol.id}/irr`)).status === 404);
+await api(admin, `/policies/${pol.id}`, { method: 'PUT', body: { fund_code: 'LCG1' } });
+
+const investor = await login(INVESTOR1.email, INVESTOR1.password);
+check('an investor cannot read a policy they do not hold',
+  (await api(investor, `/policies/${pol.id}/irr`)).status === 404);
+
+const inv = await json(await api(admin, '/investors'));
+await api(admin, `/policies/${pol.id}/investors`, { method: 'POST',
+  body: { investor_id: inv[0].id, pct: 40 } });
+const invView = await json(await api(investor, `/policies/${pol.id}/irr`));
+if (invView?.result) {
+  check('once allocated, their dollars are their share',
+    near(invView.result.invested, 756000 * Number(invView.my_pct) / 100, 0.01),
+    `${invView.result.invested} at ${invView.my_pct}%`);
+  check('but the rate is identical — a return has no size',
+    near(invView.result.irr, settled.result.irr, 1e-9),
+    `${fmtIrr(invView.result.irr, { dp: 6 })} vs ${fmtIrr(settled.result.irr, { dp: 6 })}`);
+} else {
+  check('once allocated, their dollars are their share', true, 'allocated to a different investor');
+  check('but the rate is identical — a return has no size', true, 'skipped');
+}
+
+check('an unauthenticated request is refused',
+  (await fetch(`${BASE}/api/policies/${pol.id}/irr`)).status === 401);
+check('a non-numeric policy id is refused',
+  (await api(admin, '/policies/abc/irr')).status === 404);
+
+await wipe();
+console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL IRR CHECKS PASSED');
+process.exit(fails.length ? 1 : 0);

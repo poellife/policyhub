@@ -1,0 +1,167 @@
+/* =====================================================================
+   Date-exact internal rate of return (XIRR).
+
+   Every cash flow carries its own date and is discounted by the actual
+   number of days between it and the first flow, over a 365-day year —
+   the same convention Excel's XIRR uses, so a figure produced here can be
+   checked against a spreadsheet without argument.
+
+       NPV(r) = Σ  amount_i / (1 + r) ^ (days_i / 365)
+
+   IRR is the r where that sum is zero.
+
+   Sign convention: money leaving the fund is negative (acquisition cost,
+   premiums, fees), money arriving is positive (the death benefit check,
+   withdrawals). A return needs both — an IRR on cash that only ever went
+   out is undefined, not zero, and this returns null rather than inventing
+   a number.
+
+   This module is loaded by the browser AND imported by the server, so it
+   is plain ES with no DOM and no Node APIs. One copy, one answer.
+   ===================================================================== */
+
+/** Whole days between two YYYY-MM-DD dates, calendar-exact, DST-proof. */
+export function daysBetween(from, to) {
+  const a = Date.UTC(...String(from).slice(0, 10).split('-').map((n, i) => (i === 1 ? +n - 1 : +n)));
+  const b = Date.UTC(...String(to).slice(0, 10).split('-').map((n, i) => (i === 1 ? +n - 1 : +n)));
+  return Math.round((b - a) / 86400000);
+}
+
+export const today = () => new Date().toISOString().slice(0, 10);
+
+/** Net present value of dated flows at an annual rate. */
+export function npv(flows, rate, from = flows[0]?.date) {
+  let total = 0;
+  for (const f of flows) {
+    const t = daysBetween(from, f.date) / 365;
+    total += Number(f.amount) / (1 + rate) ** t;
+  }
+  return total;
+}
+
+/**
+ * Solve for the rate.
+ *
+ * Bisection rather than Newton–Raphson: it cannot diverge, cannot land on
+ * a derivative of zero, and needs no starting guess. A few hundred halvings
+ * of the bracket is instant at this scale, and being unable to fail on
+ * awkward input is worth far more here than converging in six iterations
+ * instead of two hundred.
+ */
+export function xirr(rawFlows, { lo = -0.999999, hi = 1000, tol = 1e-12, maxIter = 400 } = {}) {
+  const flows = (rawFlows || [])
+    .filter((f) => f && f.date && Number.isFinite(Number(f.amount)) && Number(f.amount) !== 0)
+    .map((f) => ({ date: String(f.date).slice(0, 10), amount: Number(f.amount) }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  if (flows.length < 2) return null;
+  const hasOut = flows.some((f) => f.amount < 0);
+  const hasIn = flows.some((f) => f.amount > 0);
+  if (!hasOut || !hasIn) return null;
+
+  const from = flows[0].date;
+  const span = daysBetween(from, flows[flows.length - 1].date);
+  if (span <= 0) return null;                 // everything on one day: no time, no rate
+
+  let fLo = npv(flows, lo, from);
+  let fHi = npv(flows, hi, from);
+  if (!Number.isFinite(fLo) || !Number.isFinite(fHi)) return null;
+  if (fLo * fHi > 0) return null;             // no root in a sane range
+
+  // `tol` bounds the RATE, not the NPV. An NPV threshold would have to be
+  // scaled to the size of the flows to mean anything — a residual of one
+  // cent is exact on a $3m claim and hopeless on a $200 one.
+  let a = lo, b = hi;
+  for (let i = 0; i < maxIter; i++) {
+    const mid = (a + b) / 2;
+    if ((b - a) / 2 < tol) return mid;
+    const fMid = npv(flows, mid, from);
+    if (fMid === 0) return mid;
+    if (fLo * fMid < 0) { b = mid; } else { a = mid; fLo = fMid; }
+  }
+  return (a + b) / 2;
+}
+
+/** How many times the sign of the flows changes, in date order. */
+function signChanges(flows) {
+  let changes = 0, last = 0;
+  for (const f of flows) {
+    const s = Math.sign(Number(f.amount));
+    if (s === 0) continue;
+    if (last !== 0 && s !== last) changes++;
+    last = s;
+  }
+  return changes;
+}
+
+/**
+ * IRR plus everything needed to present it honestly.
+ *
+ * A 40% return earned over three weeks annualises to something absurd, and
+ * a flow pattern that changes sign more than once can have several
+ * mathematically valid IRRs. Both are reported rather than hidden, so the
+ * screen can caveat the number instead of quietly misleading someone.
+ */
+export function analyzeFlows(rawFlows) {
+  const flows = (rawFlows || [])
+    .filter((f) => f && f.date && Number(f.amount))
+    .map((f) => ({ ...f, date: String(f.date).slice(0, 10), amount: Number(f.amount) }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const out = flows.filter((f) => f.amount < 0).reduce((s, f) => s + -f.amount, 0);
+  const inn = flows.filter((f) => f.amount > 0).reduce((s, f) => s + f.amount, 0);
+  const first = flows[0]?.date ?? null;
+  const last = flows[flows.length - 1]?.date ?? null;
+  const days = first && last ? daysBetween(first, last) : 0;
+  const rate = xirr(flows);
+
+  return {
+    irr: rate,                                   // decimal, e.g. 0.1834 = 18.34%
+    flows,
+    invested: out,
+    returned: inn,
+    profit: inn - out,
+    multiple: out > 0 ? inn / out : null,
+    first_flow: first,
+    last_flow: last,
+    days,
+    years: days / 365,
+    // Under a quarter of a year, annualising magnifies rounding and timing
+    // into a headline number nobody should quote.
+    short_period: days > 0 && days < 90,
+    ambiguous: signChanges(flows) > 1,
+  };
+}
+
+/** Transaction types that represent capital going out of the fund. */
+export const OUTFLOW_TYPES = [
+  'Acquisition Cost', 'Premium Payment', 'Fee', 'Servicing', 'Commission',
+];
+/** Types that represent cash coming back before any maturity. */
+export const INFLOW_TYPES = ['Withdrawal'];
+
+/**
+ * Turn a policy's ledger into dated cash flows.
+ * `Loan` is deliberately excluded: a policy loan is borrowed against the
+ * death benefit and nets out of the claim, so counting it as income would
+ * double-count it against the proceeds.
+ */
+export function ledgerFlows(transactions = [], scale = 1) {
+  const flows = [];
+  for (const t of transactions) {
+    const amount = Number(t.amount) || 0;
+    if (!amount || !t.txn_date) continue;
+    if (OUTFLOW_TYPES.includes(t.txn_type)) flows.push({ date: t.txn_date, amount: -amount * scale, label: t.txn_type });
+    else if (INFLOW_TYPES.includes(t.txn_type)) flows.push({ date: t.txn_date, amount: amount * scale, label: t.txn_type });
+  }
+  return flows;
+}
+
+/** Format a decimal rate for display, with a ceiling on the absurd. */
+export function fmtIrr(rate, { dp = 2 } = {}) {
+  if (rate === null || rate === undefined || !Number.isFinite(rate)) return '—';
+  const pct = rate * 100;
+  if (pct > 9999) return '>9,999%';
+  if (pct < -99.99) return '−100%';
+  return `${pct.toFixed(dp)}%`;
+}
