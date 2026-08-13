@@ -57,6 +57,16 @@ const ALIASES = {
   transactiondate: 'txn_date', date: 'txn_date',
   transactiontype: 'txn_type', type: 'txn_type',
   amount: 'amount', transactionamount: 'amount',
+
+  // insured detail
+  dateofdeath: 'date_of_death', dod: 'date_of_death', deathdate: 'date_of_death',
+  smoker: 'smoker', tobacco: 'smoker',
+  leprovider: 'le_provider', ledate: 'le_date', lereportdate: 'le_date',
+  displayname: 'display_name',
+
+  // master file
+  recordtype: 'record_type', rowtype: 'record_type', record: 'record_type',
+  role: 'role', lifetype: 'role', insuredrole: 'role',
 };
 
 function mapRow(raw) {
@@ -320,8 +330,14 @@ const TXN_TYPES = ['Acquisition Cost', 'Premium Payment', 'Withdrawal', 'Loan',
                    'Fee', 'Commission', 'Servicing', 'Other'];
 
 async function importTransactions(rows, opts = {}) {
-  const result = { created: 0, updated: 0, values: 0, errors: [] };
+  const result = { created: 0, updated: 0, values: 0, skipped: 0, errors: [] };
   const allowedFunds = opts.fundScope || null;
+  // A ledger row is append-only, so re-uploading the same file would double
+  // the capital invested and halve every IRR computed from it. An identical
+  // row — same policy, date, type and amount — is therefore skipped and
+  // counted, unless the file genuinely contains two such payments and the
+  // person says so.
+  const allowDuplicates = !!opts.allowDuplicates;
   for (const [i, row] of rows.entries()) {
     const line = i + 2;
     try {
@@ -337,6 +353,15 @@ async function importTransactions(rows, opts = {}) {
       const type = TXN_TYPES.find((t) => norm(t) === norm(rawType)) || (rawType ? 'Other' : 'Premium Payment');
       const amount = num(row.amount);
       if (amount === null) { result.errors.push({ line, message: 'Missing or unreadable amount' }); continue; }
+
+      if (!allowDuplicates) {
+        const { rows: dup } = await q(
+          `SELECT 1 FROM transactions
+            WHERE policy_id = $1 AND txn_date = $2 AND txn_type = $3 AND amount = $4 LIMIT 1`,
+          [policyId, d, type, amount]
+        );
+        if (dup[0]) { result.skipped++; continue; }
+      }
 
       await q(
         `INSERT INTO transactions (policy_id, txn_date, txn_type, amount, remarks, source)
@@ -355,6 +380,188 @@ async function importTransactions(rows, opts = {}) {
  * Entry points
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Master import — one file, every record type
+ *
+ * A full data dump does not arrive as four tidy files. This takes one,
+ * works out what each row is, and loads them in dependency order so a
+ * transaction can appear above the policy it belongs to and still land.
+ * ------------------------------------------------------------------ */
+
+const RECORD_TYPES = {
+  policy: 'policy', policies: 'policy', p: 'policy',
+  insured: 'insured', insureds: 'insured', person: 'insured', life: 'life',
+  additionallife: 'life', additionalinsured: 'life', secondinsured: 'life',
+  survivorship: 'life', joint: 'life',
+  value: 'value', values: 'value', valuation: 'value', snapshot: 'value', v: 'value',
+  transaction: 'transaction', transactions: 'transaction', txn: 'transaction',
+  ledger: 'transaction', payment: 'transaction', t: 'transaction',
+};
+
+const VALUE_ONLY_KEYS = ['account_value', 'cash_surrender_value', 'cost_of_insurance',
+  'death_benefit', 'premium_paid_to_date', 'monthly_deduction', 'loan_balance'];
+const POLICY_ONLY_KEYS = ['carrier_name', 'face_amount', 'issue_date', 'product_type',
+  'premium_required', 'acquisition_cost', 'plan_name', 'owner_raw', 'fund_code', 'status'];
+const INSURED_ONLY_KEYS = ['dob', 'gender', 'le_months', 'le_provider', 'le_date',
+  'smoker', 'date_of_death', 'issue_state'];
+
+const has = (row, keys) => keys.some((k) => row[k] !== undefined && str(row[k]) !== '');
+
+/**
+ * What kind of record is this row?
+ *
+ * An explicit Record Type column always wins. Without one the shape of the
+ * row decides, but only on unambiguous evidence — a row that could be two
+ * things is returned as an error naming what to add, because guessing wrong
+ * on a book of record is worse than asking.
+ */
+export function classifyRow(row) {
+  const declared = str(row.record_type);
+  if (declared) {
+    const t = RECORD_TYPES[norm(declared)];
+    return t
+      ? { type: t }
+      : { error: `"${declared}" is not a record type. Use Policy, Insured, Life, Value or Transaction.` };
+  }
+
+  const looksTransaction = has(row, ['txn_type'])
+    || (has(row, ['txn_date']) && has(row, ['amount']));
+  const looksValue = has(row, VALUE_ONLY_KEYS) || has(row, ['as_of_date']);
+  const looksPolicy = has(row, POLICY_ONLY_KEYS);
+  const looksLife = has(row, ['role']);
+
+  if (looksTransaction && !looksPolicy) return { type: 'transaction' };
+  if (looksLife && !looksPolicy) return { type: 'life' };
+  // A policy row legitimately carries current values, so policy wins over
+  // value when both are present — that is the monthly-export shape.
+  if (looksPolicy) return { type: 'policy' };
+  if (looksValue) return { type: 'value' };
+  if (has(row, INSURED_ONLY_KEYS) && has(row, ['insured_name', 'insured_last_name', 'last_name']))
+    return { type: 'insured' };
+
+  return { error: 'Cannot tell what this row is. Add a "Record Type" column with Policy, Insured, Life, Value or Transaction.' };
+}
+
+/** Update a person's own details — life expectancy, date of death, and so on. */
+async function importInsuredRow(row) {
+  const insuredId = await resolveInsured(row);
+  if (!insuredId) throw new Error('A last name is required to identify the insured');
+  const fields = {
+    display_name: str(row.display_name) || null,
+    gender: str(row.gender) || null,
+    issue_state: undefined,               // not a person field
+    state: str(row.issue_state) || null,
+    smoker: str(row.smoker) || null,
+    le_months: int(row.le_months),
+    le_provider: str(row.le_provider) || null,
+    le_date: date(row.le_date),
+    date_of_death: date(row.date_of_death),
+    notes: str(row.notes) || null,
+  };
+  delete fields.issue_state;
+  const sets = [], vals = [];
+  let n = 1;
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === null || v === undefined) continue;
+    sets.push(`${k} = $${n++}`); vals.push(v);
+  }
+  if (!sets.length) throw new Error('No insured details supplied to update');
+  await q(`UPDATE insureds SET ${sets.join(',')}, updated_at = now() WHERE id = $${n}`,
+    [...vals, insuredId]);
+  return insuredId;
+}
+
+/** Attach an additional life to a policy — survivorship, joint, secondary. */
+async function importLifeRow(row, allowedFunds) {
+  const policyId = await findPolicyId(row, allowedFunds);
+  if (!policyId) throw new Error(`No policy matches "${str(row.policy_number)}"`);
+  const insuredId = await resolveInsured(row);
+  if (!insuredId) throw new Error('A last name is required for the additional life');
+
+  const { rows: pol } = await q('SELECT insured_id FROM policies WHERE id = $1', [policyId]);
+  if (pol[0]?.insured_id === insuredId)
+    throw new Error('That person is already the primary insured on this policy');
+
+  await q(
+    `INSERT INTO policy_insureds (policy_id, insured_id, role, notes)
+     VALUES ($1,$2,$3,$4) ON CONFLICT (policy_id, insured_id) DO UPDATE SET role = EXCLUDED.role`,
+    [policyId, insuredId, str(row.role) || 'Survivorship', str(row.notes)]
+  );
+  return policyId;
+}
+
+/**
+ * Load a mixed file.
+ *
+ * Rows are classified first, then run in dependency order — policies (which
+ * create their insureds), then insured detail, then additional lives, then
+ * values, then the ledger. Original line numbers travel with every row so an
+ * error points at the line in the file the person is looking at.
+ */
+async function importMaster(rows, opts, user) {
+  const allowedFunds = opts.fundScope || null;
+  const result = {
+    created: 0, updated: 0, values: 0, skipped: 0, errors: [],
+    byType: { policy: 0, insured: 0, life: 0, value: 0, transaction: 0, unclassified: 0 },
+  };
+
+  const buckets = { policy: [], insured: [], life: [], value: [], transaction: [] };
+  rows.forEach((row, i) => {
+    const line = i + 2;
+    const { type, error } = classifyRow(row);
+    if (error) {
+      result.errors.push({ line, message: error });
+      result.byType.unclassified++;
+      return;
+    }
+    buckets[type].push({ row, line });
+    result.byType[type]++;
+  });
+
+  // 1. Policies first — everything else hangs off them.
+  if (buckets.policy.length) {
+    const sub = await importPolicies(buckets.policy.map((b) => b.row), opts, user);
+    result.created += sub.created;
+    result.updated += sub.updated;
+    result.values += sub.values;
+    // importPolicies numbers its own rows from 2; map back to the real lines.
+    for (const e of sub.errors)
+      result.errors.push({ line: buckets.policy[e.line - 2]?.line ?? e.line, message: e.message });
+  }
+
+  // 2. Person-level detail, 3. additional lives.
+  for (const [kind, fn] of [['insured', importInsuredRow], ['life', importLifeRow]]) {
+    for (const { row, line } of buckets[kind]) {
+      try {
+        await fn(row, allowedFunds);
+        result.updated++;
+      } catch (e) {
+        result.errors.push({ line, message: e.message });
+      }
+    }
+  }
+
+  // 4. Value snapshots.
+  if (buckets.value.length) {
+    const sub = await importValues(buckets.value.map((b) => b.row), opts);
+    result.values += sub.values;
+    for (const e of sub.errors)
+      result.errors.push({ line: buckets.value[e.line - 2]?.line ?? e.line, message: e.message });
+  }
+
+  // 5. The ledger.
+  if (buckets.transaction.length) {
+    const sub = await importTransactions(buckets.transaction.map((b) => b.row), opts);
+    result.created += sub.created;
+    result.skipped += sub.skipped || 0;
+    for (const e of sub.errors)
+      result.errors.push({ line: buckets.transaction[e.line - 2]?.line ?? e.line, message: e.message });
+  }
+
+  result.errors.sort((a, b) => a.line - b.line);
+  return result;
+}
+
 export function previewCsv(buffer, type) {
   const rows = parseCsv(buffer);
   const recognised = new Set();
@@ -366,13 +573,31 @@ export function previewCsv(buffer, type) {
   for (const r of rows.slice(0, 50)) {
     for (const k of Object.keys(r)) (known.has(k) ? recognised : unrecognised).add(k);
   }
-  return {
+  const out = {
     type,
     rowCount: rows.length,
     recognised: [...recognised],
     unrecognised: [...unrecognised],
     sample: rows.slice(0, 8),
   };
+
+  // For a mixed file, say what each row was taken to be BEFORE anything is
+  // written. Getting this wrong silently is the whole risk of one-file import.
+  if (type === 'master') {
+    const byType = { policy: 0, insured: 0, life: 0, value: 0, transaction: 0, unclassified: 0 };
+    const problems = [];
+    rows.forEach((r, i) => {
+      const { type: t2, error } = classifyRow(r);
+      if (error) {
+        byType.unclassified++;
+        if (problems.length < 20) problems.push({ line: i + 2, message: error });
+      } else byType[t2]++;
+    });
+    out.byType = byType;
+    out.problems = problems;
+    out.declared = rows.some((r) => str(r.record_type) !== '');
+  }
+  return out;
 }
 
 export async function runImport(buffer, type, opts, user) {
@@ -380,13 +605,16 @@ export async function runImport(buffer, type, opts, user) {
   if (!rows.length) return { created: 0, updated: 0, values: 0, errors: [{ line: 1, message: 'File is empty' }] };
 
   let result;
-  if (type === 'values') result = await importValues(rows, opts);
-  else if (type === 'transactions') result = await importTransactions(rows);
+  if (type === 'master') result = await importMaster(rows, opts, user);
+  else if (type === 'values') result = await importValues(rows, opts);
+  else if (type === 'transactions') result = await importTransactions(rows, opts);
   else result = await importPolicies(rows, opts, user);
 
   result.rowCount = rows.length;
+  result.skipped = result.skipped || 0;
   await audit(user?.uid, 'import', null, 'import',
-    `${type}: ${result.created} created, ${result.updated} updated, ${result.values} value rows, ${result.errors.length} errors`);
+    `${type}: ${result.created} created, ${result.updated} updated, ${result.values} value rows, ` +
+    `${result.skipped} duplicates skipped, ${result.errors.length} errors`);
   return result;
 }
 
@@ -400,4 +628,19 @@ export const TEMPLATES = {
   transactions:
     'Policy Number,Carrier Name,Transaction Date,Transaction Type,Amount,Remarks\n' +
     '2975464,Genworth Call Pay,03/27/2023,Premium Payment,10000,Annual premium\n',
+  master:
+    'Record Type,Policy Number,Carrier Name,Last Name,First Name,DOB,Gender,State,LE Months,' +
+    'Date Of Death,Role,Product Type,Issue Date,Basic Face,Owner,Premium Required,Premium Mode,' +
+    'Next Premium Due,Acquisition Date,Acquisition Cost,Status,As Of Date,AV,CSV,COI,Death Benefit,' +
+    'Loan Balance,Transaction Date,Transaction Type,Amount,Remarks\n' +
+    'Policy,2975464,Genworth Call Pay,Setliff,Reuben,04/22/1937,M,SD,84,,,UL,10/21/2009,1000000,' +
+    'LCG1,10000,Annual,10/21/2026,03/19/2021,250300,Inforce,,,,,,,,,,\n' +
+    'Policy,884120,Brighthouse,Wolfe,Dean,06/02/1940,M,MI,96,,,SUL,03/14/2011,5000000,' +
+    'LCG2,96000,Annual,08/25/2026,07/02/2019,1120000,Inforce,,,,,,,,,,\n' +
+    'Life,884120,Brighthouse,Wolfe,Cheryl,11/18/1942,F,MI,102,,Survivorship,,,,,,,,,,,,,,,,,,,,\n' +
+    'Insured,,,Setliff,Reuben,04/22/1937,,,90,,,,,,,,,,,,,,,,,,,,,,Updated LE report\n' +
+    'Value,2975464,,,,,,,,,,,,,,,,,,,,06/30/2026,3200.10,3200.10,4050.00,1000000,0,,,,\n' +
+    'Value,2975464,,,,,,,,,,,,,,,,,,,,07/31/2026,3173.60,3173.60,4068.30,1000000,0,,,,\n' +
+    'Transaction,2975464,,,,,,,,,,,,,,,,,,,,,,,,,,03/27/2023,Premium Payment,10000,Annual premium\n' +
+    'Transaction,884120,,,,,,,,,,,,,,,,,,,,,,,,,,08/25/2024,Premium Payment,96000,\n',
 };

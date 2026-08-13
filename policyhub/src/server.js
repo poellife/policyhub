@@ -81,6 +81,7 @@ app.post('/api/import/run', authenticate, canImport, oneAtATime, upload.single('
       req.body.type || 'policies',
       // A manager's import is confined to their own entities.
       { asOfDate: req.body.asOfDate,
+        allowDuplicates: req.body.allowDuplicates === 'true' || req.body.allowDuplicates === true,
         fundScope: req.user.role === 'manager' ? (req.user.fundIds || [-1]) : null },
       req.user
     );

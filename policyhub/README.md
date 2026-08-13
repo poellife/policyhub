@@ -20,7 +20,7 @@ leaves your database.
 | **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and IRR, with a per-policy claim record. |
 | **Return / IRR** | Date-exact internal rate of return on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio IRR on the dashboard. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
-| **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
+| **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. A **master importer** takes a full data dump — policies, insureds, additional lives, value history and the whole ledger — in one file; three single-purpose importers remain for piecemeal updates. |
 | **Reports** | Six print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, **policy fact sheets** (one page each), and two return reports — **in force** and **realized**. |
 | **Investors** | Directory of investors with position counts and their share of death benefit, capital invested and cash value. Each investor has a page listing every position and its percentage. |
 | **Settings** | Password change, **owner entities**, user management — add, edit, suspend, reactivate, delete, reset a password (admin) — and a full activity log. |
@@ -352,6 +352,50 @@ the password once at startup.
 
 ## Importing data
 
+### One file for everything
+
+**Everything — one file** is the default. A single CSV carries every record type,
+with a **Record Type** column on each row saying what it is:
+
+| Record Type | What the row does |
+|---|---|
+| `Policy` | Creates or updates a policy, its primary insured, and — from any AV/CSV/COI columns — a value snapshot. An acquisition cost seeds the ledger. |
+| `Insured` | Updates a person: life expectancy, gender, state, smoker, date of death. |
+| `Life` | Attaches an additional life to a policy — survivorship, joint, secondary. |
+| `Value` | A dated carrier snapshot against an existing policy. |
+| `Transaction` | A dated ledger entry — premium, fee, withdrawal, commission. |
+
+Columns are the union of all five; a row leaves blank whatever it doesn't need.
+
+**Order in the file does not matter.** Rows are sorted into dependency order
+before anything is written — policies first (which create their insureds), then
+person detail, then additional lives, then values, then the ledger. A transaction
+can sit at the top of the file, above the policy it belongs to, and still land.
+
+**The Record Type column is optional.** Without it each row is classified by its
+shape: a dated amount with a type is a transaction, an as-of date with values is
+a snapshot, a carrier and a face amount is a policy. Inference only fires on
+unambiguous evidence — anything doubtful is refused by line number with a message
+saying to add the column, because guessing wrong on a book of record is worse
+than asking.
+
+**Nothing is written until you've seen the classification.** The preview reports
+how many rows were read as each type, whether that came from your column or from
+inference, and every row it could not classify with its line number.
+
+**Re-running the same file is safe.** A ledger row identical to one already on
+file — same policy, date, type and amount — is skipped and counted, so a second
+upload cannot double your capital invested and halve every IRR computed from it.
+Policies and snapshots update in place rather than duplicating. If a policy
+genuinely took two identical payments on the same day, tick **Allow duplicate
+ledger rows**.
+
+`scripts/master-import-test.mjs` covers all of this: mixed files, out-of-order
+rows, inference, refusals, line-accurate errors, re-run safety, and that a
+portfolio manager importing a policy for another entity is still rejected.
+
+### Column matching
+
 Column headers are matched case- and punctuation-insensitively, so your existing
 export headers work as-is: `Policy #`, `Primary Insured`, `Basic Face`, `Premium
 Required`, `AV`, `CSV`, `COI`, `Date Of Last Withdrawal`, `Values As Of`, and so on.
@@ -363,7 +407,9 @@ record. Re-importing the same file updates policies in place rather than duplica
 them — matching is on policy number + carrier.
 
 Templates are downloadable from the Import screen, or from
-`/api/import/template/{policies|values|transactions}`.
+`/api/import/template/{master|policies|values|transactions}`. The master template
+is a working file — it contains one example of every record type and imports
+cleanly as-is.
 
 `scripts/make-demo-csv.js` regenerates the fictional sample files in `demo/` if you
 want to try the app before loading real data.
@@ -543,6 +589,7 @@ reach those rules correctly.
 | `user-admin-ui-test.mjs` | the Users card and the edit dialog |
 | `maturity-test.mjs` | the survivorship rule, auto-transition both ways, removal from every active view, proceeds, scoping |
 | `maturity-ui-test.mjs` | recording a death through the interface and the register it produces |
+| `master-import-test.mjs` | one-file import: classification, dependency ordering, inference, refusals, re-run safety, scoping |
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |

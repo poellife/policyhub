@@ -2138,6 +2138,8 @@ function openInvestorDialog(inv) {
 /* ------------------------------ import ------------------------------- */
 
 const IMPORT_TYPES = [
+  ['master', 'Everything — one file (recommended)',
+   'A full data dump: policies, insureds, additional lives, value history and the whole transaction ledger in a single CSV. Each row carries a "Record Type" column saying what it is. Rows are loaded in dependency order, so a transaction can sit above the policy it belongs to and still land.'],
   ['policies', 'Policies (and current values)',
    'Your monthly CRM export. Creates or updates policies, and records a value snapshot from any AV / CSV / COI columns.'],
   ['values', 'Value snapshots only',
@@ -2166,16 +2168,29 @@ function importView() {
           <input type="date" id="asOfDate" value="${today()}">
         </div>
 
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-family:var(--font);font-size:13.5px;letter-spacing:0;color:var(--text-primary)">
+            <input type="checkbox" id="allowDupes" style="width:auto;margin:0">
+            Allow duplicate ledger rows
+          </label>
+          <span class="muted" style="font-size:12px">
+            Off by default: a transaction identical to one already on file — same policy,
+            date, type and amount — is skipped and counted, so re-running a file cannot
+            double your capital invested and halve every IRR. Tick this only if the policy
+            genuinely took two identical payments on the same day.</span>
+        </div>
+
         <div class="dropzone" id="dropzone">
           <div style="font-weight:600;margin-bottom:4px">Drop a CSV here, or click to choose a file</div>
-          <div class="muted" style="font-size:12.5px">Up to 20 MB</div>
+          <div class="muted" style="font-size:12.5px">Up to 5 MB · 25,000 rows</div>
           <input type="file" id="fileInput" accept=".csv,text/csv" style="display:none">
         </div>
 
         <div style="margin-top:10px">
-          <a href="#" data-template="policies">Download policies template</a> ·
-          <a href="#" data-template="values">values template</a> ·
-          <a href="#" data-template="transactions">transactions template</a>
+          <a href="#" data-template="master"><strong>Download the master template</strong></a> ·
+          <a href="#" data-template="policies">policies</a> ·
+          <a href="#" data-template="values">values</a> ·
+          <a href="#" data-template="transactions">transactions</a>
         </div>
       </div>
     </div>
@@ -2199,7 +2214,14 @@ function importView() {
         e.preventDefault(); dz.classList.remove('over');
         if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
       });
-      fi.addEventListener('change', () => fi.files[0] && handleFile(fi.files[0]));
+      fi.addEventListener('change', () => {
+        const f = fi.files[0];
+        // Clearing the input means choosing the SAME file again still fires a
+        // change event — otherwise a second run after fixing something in the
+        // spreadsheet appears to do nothing at all.
+        fi.value = '';
+        if (f) handleFile(f);
+      });
 
       document.querySelectorAll('[data-template]').forEach((a) =>
         a.addEventListener('click', (e) => {
@@ -2226,6 +2248,32 @@ async function handleFile(file) {
         <div class="card-head"><h2>Preview — ${esc(file.name)}</h2><div class="spacer"></div>
           <span class="muted">${preview.rowCount} rows</span></div>
         <div class="card-body">
+          ${preview.byType ? `
+          <div style="margin-bottom:14px">
+            <div style="margin-bottom:8px"><strong>What each row was read as</strong>
+              <span class="muted" style="font-size:12px">${preview.declared
+                ? '— from your Record Type column'
+                : '— inferred, because the file has no Record Type column'}</span></div>
+            <div class="kpi-row" style="margin:0">
+              ${[['policy','Policies'],['insured','Insured updates'],['life','Additional lives'],
+                 ['value','Value snapshots'],['transaction','Transactions']].map(([k,l]) => `
+                <div class="stat"><div class="label">${l}</div>
+                  <div class="value">${preview.byType[k]}</div></div>`).join('')}
+              ${preview.byType.unclassified ? `<div class="stat">
+                <div class="label">Unreadable</div>
+                <div class="value" style="color:var(--critical)">${preview.byType.unclassified}</div></div>` : ''}
+            </div>
+            ${preview.problems?.length ? `
+              <div class="error-box" style="margin-top:12px">
+                <strong>${preview.byType.unclassified} row${preview.byType.unclassified === 1 ? '' : 's'}
+                cannot be classified and will be skipped:</strong>
+                <ul style="margin:8px 0 0;padding-left:20px">
+                  ${preview.problems.slice(0, 8).map((pr) =>
+                    `<li>Line ${pr.line} — ${esc(pr.message)}</li>`).join('')}
+                </ul>
+              </div>` : ''}
+          </div>` : ''}
+
           <div style="margin-bottom:12px">
             <div style="margin-bottom:6px"><strong>Matched columns:</strong>
               <span class="secondary">${preview.recognised.map(esc).join(', ') || 'none'}</span></div>
@@ -2255,17 +2303,28 @@ async function handleFile(file) {
       fd2.append('file', file);
       fd2.append('type', type);
       fd2.append('asOfDate', $('#asOfDate').value);
+      fd2.append('allowDuplicates', $('#allowDupes').checked ? 'true' : 'false');
       try {
         const res = await api('/import/run', { method: 'POST', body: fd2 });
         out.innerHTML = `
           <div class="card"><div class="card-body">
             <div class="ok-box">Imported ${res.rowCount} rows from ${esc(file.name)}</div>
             <dl class="kv">
-              <dt>Policies created</dt><dd>${res.created}</dd>
-              <dt>Policies updated</dt><dd>${res.updated}</dd>
+              <dt>Records created</dt><dd>${res.created}</dd>
+              <dt>Records updated</dt><dd>${res.updated}</dd>
               <dt>Value snapshots written</dt><dd>${res.values}</dd>
+              ${res.skipped ? `<dt>Duplicate ledger rows skipped</dt><dd>${res.skipped}</dd>` : ''}
               <dt>Rows with errors</dt><dd>${res.errors.length}</dd>
             </dl>
+            ${res.byType ? `<div style="margin-top:12px">
+              <label>By record type</label>
+              <span class="secondary">${Object.entries(res.byType)
+                .filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(' · ')}</span>
+            </div>` : ''}
+            ${res.skipped ? `<div class="muted" style="margin-top:10px;font-size:12.5px">
+              ${res.skipped} ledger row${res.skipped === 1 ? ' was' : 's were'} already on file
+              and skipped, so nothing was double-counted. Tick "Allow duplicate ledger rows"
+              above if they were genuinely separate payments.</div>` : ''}
             ${res.errors.length ? `<div style="margin-top:14px">
               <label>Errors</label>
               <div class="table-wrap"><table class="data">

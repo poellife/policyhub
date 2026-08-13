@@ -212,6 +212,9 @@ check('editing an insured persists', leCell.includes('84') && leCell.includes('M
 console.log('\nIMPORT');
 await page.click('a[href="#/import"]');
 await page.waitForSelector('#dropzone');
+// The screen defaults to the master importer; this check is about the
+// single-purpose policies path, which has its own dedicated option.
+await page.selectOption('#importType', 'policies');
 await page.setInputFiles('#fileInput', '/home/claude/policyhub/demo/policies.csv');
 await page.waitForSelector('#runImportBtn', { timeout: 10000 });
 check('CSV preview shows matched columns',
@@ -220,7 +223,7 @@ await page.screenshot({ path: `${SHOTS}/11-import-preview.png`, fullPage: true }
 await page.click('#runImportBtn');
 await page.waitForSelector('.ok-box', { timeout: 20000 });
 const res = await page.locator('#importResult').textContent();
-check('re-import updates rather than duplicates', res.includes('Policies updated'));
+check('re-import updates rather than duplicates', res.includes('Records updated'), res.replace(/\s+/g,' ').trim().slice(0, 80));
 await page.screenshot({ path: `${SHOTS}/12-import-done.png`, fullPage: true });
 
 /* ---------------------------- settings ------------------------- */
