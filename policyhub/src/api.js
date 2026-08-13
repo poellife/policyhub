@@ -1,6 +1,7 @@
 import express from 'express';
 import { q, audit } from './db.js';
-import { requireAuth, requireRole, loadScope, login, changePassword, createUser, clearToken } from './auth.js';
+import { requireAuth, requireRole, loadScope, login, changePassword,
+         createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
 
 const router = express.Router();
 const canEdit = requireRole('admin', 'editor', 'manager');
@@ -180,19 +181,25 @@ router.get('/auth/me', requireAuth, wrap(async (req, res) => {
   res.json(out);
 }));
 router.post('/auth/password', requireAuth, wrap(changePassword));
-router.get('/users', requireAuth, blockScoped, requireRole('admin'), wrap(async (req, res) => {
+router.get('/users', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
             u.investor_id, i.name AS investor_name,
             COALESCE((SELECT string_agg(f.code, ', ' ORDER BY f.code)
                         FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
-                       WHERE uf.user_id = u.id), '') AS fund_codes
+                       WHERE uf.user_id = u.id), '') AS fund_codes,
+            COALESCE((SELECT array_agg(uf.fund_id)
+                        FROM user_funds uf WHERE uf.user_id = u.id), '{}') AS fund_ids
        FROM users u LEFT JOIN investors i ON i.id = u.investor_id
       ORDER BY u.id`
   );
   res.json(rows);
 }));
-router.post('/users', requireAuth, blockScoped, requireRole('admin'), wrap(createUser));
+router.post('/users', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(createUser));
+router.put('/users/:id', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(updateUser));
+router.delete('/users/:id', requireAuth, wrap(loadScope), blockScoped, requireRole('admin'), wrap(deleteUser));
+router.post('/users/:id/password', requireAuth, wrap(loadScope), blockScoped,
+  requireRole('admin'), wrap(resetPassword));
 
 router.use(requireAuth);        // everything below requires a session
 router.use(wrap(loadScope));    // and carries the caller's entity scope

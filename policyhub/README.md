@@ -21,7 +21,7 @@ leaves your database.
 | **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. Three importers: policies (+ current values), value snapshots, transactions. |
 | **Reports** | Four print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, and **policy fact sheets** (one page each). |
 | **Investors** | Directory of investors with position counts and their share of death benefit, capital invested and cash value. Each investor has a page listing every position and its percentage. |
-| **Settings** | Password change, **owner entities**, user management (admin), and a full activity log. |
+| **Settings** | Password change, **owner entities**, user management — add, edit, suspend, reactivate, delete, reset a password (admin) — and a full activity log. |
 
 **Owner entities** are managed in Settings — create, rename, annotate, and see each
 one's policy count, death benefit and capital invested. A policy's owner is chosen
@@ -42,7 +42,7 @@ dashboard, alerts and reports while keeping its history.
 
 | Role | Sees | Can change | Settings |
 |---|---|---|---|
-| **admin** | everything | everything | yes |
+| **admin** | everything | everything, including other users | yes |
 | **editor** | everything | everything except users and deletes | yes |
 | **viewer** | everything | nothing | password only |
 | **manager** | only their owning entities | everything inside them, including import and delete | **no** — password only |
@@ -76,6 +76,38 @@ API and asserts every cross-entity attempt fails.
 Entity assignments are read from the database on each request rather than baked
 into the session token, so changing a manager's entities takes effect immediately
 instead of at their next sign-in.
+
+## Managing accounts
+
+Settings → Users lists every login with its role, its investor or entity
+attachment, its status and its last sign-in. Each row offers **Edit**, **Suspend**
+(or **Reactivate**) and **Delete**.
+
+**Edit** changes the display name, the role, the status, and — for a manager —
+the set of owner entities they may work inside. The entity picker opens
+pre-selected with what they currently hold; whatever is highlighted when you save
+becomes their complete access, so removing an entity is simply deselecting it. A
+manager must keep at least one. Switching the role to *investor* swaps the picker
+for the investor list. The dialog also carries an optional password field, for
+resetting the password of someone who has lost theirs.
+
+**Suspending** keeps the account and its history but closes it. **Deleting**
+removes the login; their entries in the activity log survive, attributed to the
+deleted account rather than erased.
+
+Both take effect on the suspended user's *next request*, not at their next
+sign-in. Role, status and entity access are re-read from the database on every
+API call rather than trusted from the 12-hour session cookie, so an open browser
+tab is cut off within a click — which is the behaviour you want the day someone
+leaves. The same is true in reverse: promote someone and their existing session
+gains the new permissions immediately.
+
+Three things are refused outright: suspending your own account, demoting your own
+account out of admin, and deleting your own account. Each would let the last
+administrator lock everyone out, so they're rejected server-side and the controls
+are absent from your own row. `scripts/user-admin-test.mjs` proves each of these
+against the API, holding a cookie issued *before* the change to confirm the
+immediacy.
 
 ## Fractional ownership and the investor portal
 
@@ -250,7 +282,10 @@ colours stay chromatic — a lapse warning must never depend on gray alone.
 - Passwords hashed with bcrypt (cost 12); never stored or logged in plain text
 - Session cookie is `httpOnly`, `sameSite=lax`, and `secure` in production; 12-hour expiry
 - Failed logins throttled to 8 attempts per 15 minutes per email + IP
-- Every API route except health and login requires a session; writes require `admin` or `editor`
+- Every API route except health and login requires a session; writes require `admin`, `editor` or `manager`
+- Role, status and scope are re-read from the database on every request, so
+  suspending or deleting an account ends its open sessions at once rather than
+  when the 12-hour cookie expires
 - All SQL is parameterised — no string-built queries
 - Content-Security-Policy blocks external scripts; the app loads no third-party assets
 - Every create, update, delete, import and login is written to `audit_log`
@@ -270,3 +305,25 @@ node scripts/e2e.mjs
 Drives a real browser through login, the grid, sorting, search, policy detail tabs,
 snapshot and transaction creation, CSV import, dark mode, mobile layout, and
 unauthenticated-access checks.
+
+The rest of `scripts/` splits into two kinds. The `*-security-test.mjs` files talk
+to the API directly with `fetch`, deliberately bypassing the interface, and assert
+that every forbidden request fails — that's where the authorisation rules are
+actually proven. The `*-ui-test.mjs` files drive a browser and assert the screens
+reach those rules correctly.
+
+| Script | Covers |
+|---|---|
+| `e2e.mjs` | the main interface end to end |
+| `entity-test.mjs` | owner entities: create, rename, reassign, delete guard |
+| `delete-test.mjs` | policy deletion, cascade, confirmation and audit entry |
+| `reports-test.mjs` | all four reports, both cost-basis modes, print layout |
+| `investor-security-test.mjs` | investor scoping — cross-investor reads and every write |
+| `investor-ui-test.mjs` | the investor portal, share toggle and hidden navigation |
+| `manager-security-test.mjs` | manager scoping — cross-entity reads, writes, import, Settings |
+| `manager-ui-test.mjs` | the manager interface and its missing Settings tab |
+| `user-admin-test.mjs` | suspend, reactivate, delete, entity editing, password reset, self-guards |
+| `user-admin-ui-test.mjs` | the Users card and the edit dialog |
+
+Each is idempotent — they clean up after themselves and can be re-run against the
+same database.

@@ -44,12 +44,127 @@ export function requireAuth(req, res, next) {
  * changing someone's entities takes effect immediately instead of at next login.
  */
 export async function loadScope(req, res, next) {
+  // Re-read the account on every request. This costs one indexed lookup and buys
+  // three things: suspending someone takes effect immediately rather than when
+  // their 12-hour token expires, a role change applies at once, and a deleted
+  // account cannot keep using a still-valid cookie.
+  const { rows } = await q(
+    'SELECT is_active, role, investor_id FROM users WHERE id = $1', [req.user.uid]
+  );
+  const u = rows[0];
+  if (!u) {
+    clearToken(res);
+    return res.status(401).json({ error: 'This account no longer exists' });
+  }
+  if (!u.is_active) {
+    clearToken(res);
+    return res.status(401).json({ error: 'This account has been suspended' });
+  }
+  req.user.role = u.role;
+  req.user.iid = u.investor_id;
   req.user.fundIds = null;
-  if (req.user?.role === 'manager') {
-    const { rows } = await q('SELECT fund_id FROM user_funds WHERE user_id = $1', [req.user.uid]);
-    req.user.fundIds = rows.map((r) => r.fund_id);
+  if (u.role === 'manager') {
+    const { rows: f } = await q('SELECT fund_id FROM user_funds WHERE user_id = $1', [req.user.uid]);
+    req.user.fundIds = f.map((r) => r.fund_id);
   }
   next();
+}
+
+/** Number of admins who can still sign in — used to avoid locking everyone out. */
+async function activeAdminCount(excludeId = null) {
+  const { rows } = await q(
+    `SELECT COUNT(*)::int AS n FROM users
+      WHERE role = 'admin' AND is_active = TRUE AND ($1::int IS NULL OR id <> $1)`,
+    [excludeId]
+  );
+  return rows[0].n;
+}
+
+const ROLES = ['admin', 'editor', 'viewer', 'manager', 'investor'];
+
+export async function updateUser(req, res) {
+  const id = parseInt(req.params.id, 10);
+  const { rows } = await q('SELECT * FROM users WHERE id = $1', [id]);
+  const target = rows[0];
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
+  const role = ROLES.includes(req.body.role) ? req.body.role : target.role;
+  const isActive = 'is_active' in req.body ? !!req.body.is_active : target.is_active;
+
+  if (id === req.user.uid && (!isActive || role !== 'admin' && target.role === 'admin'))
+    return res.status(400).json({
+      error: 'You cannot suspend or demote your own account. Ask another admin.' });
+
+  // Never allow the last account that can administer the system to be closed off.
+  const losesAdmin = target.role === 'admin' && (role !== 'admin' || !isActive);
+  if (losesAdmin && (await activeAdminCount(id)) === 0)
+    return res.status(400).json({
+      error: 'This is the last active administrator. Promote someone else first.' });
+
+  const investorId = role === 'investor'
+    ? parseInt(req.body.investor_id, 10) || target.investor_id
+    : null;
+  if (role === 'investor' && !Number.isInteger(investorId))
+    return res.status(400).json({ error: 'Choose which investor this login belongs to' });
+
+  await q(
+    `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4 WHERE id = $5`,
+    [String(req.body.full_name ?? target.full_name), role, isActive, investorId, id]
+  );
+
+  // Entity access is replaced wholesale, so removing one is just leaving it out.
+  if (role === 'manager') {
+    const fundIds = (Array.isArray(req.body.fund_ids) ? req.body.fund_ids : [])
+      .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+    if (!fundIds.length)
+      return res.status(400).json({ error: 'A manager needs at least one owner entity' });
+    await q('DELETE FROM user_funds WHERE user_id = $1 AND fund_id <> ALL($2)', [id, fundIds]);
+    for (const fid of fundIds)
+      await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [id, fid]);
+  } else {
+    await q('DELETE FROM user_funds WHERE user_id = $1', [id]);
+  }
+
+  await audit(req.user.uid, 'user', id, 'update',
+    `${target.email} → role ${role}, ${isActive ? 'active' : 'suspended'}`);
+  const { rows: out } = await q(
+    'SELECT id, email, full_name, role, is_active, investor_id FROM users WHERE id = $1', [id]);
+  res.json(out[0]);
+}
+
+export async function deleteUser(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (id === req.user.uid)
+    return res.status(400).json({ error: 'You cannot delete your own account' });
+
+  const { rows } = await q('SELECT * FROM users WHERE id = $1', [id]);
+  const target = rows[0];
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
+  if (target.role === 'admin' && (await activeAdminCount(id)) === 0)
+    return res.status(400).json({
+      error: 'This is the last active administrator. Promote someone else first.' });
+
+  // The audit trail keeps the record of what they did; the login goes.
+  await q('UPDATE audit_log SET user_id = NULL WHERE user_id = $1', [id]);
+  await q('DELETE FROM users WHERE id = $1', [id]);
+  await audit(req.user.uid, 'user', id, 'delete', `${target.email} (${target.role})`);
+  res.json({ ok: true });
+}
+
+/** Admin-initiated password reset, for the person who forgot theirs. */
+export async function resetPassword(req, res) {
+  const id = parseInt(req.params.id, 10);
+  const newPassword = String(req.body.password || '');
+  if (newPassword.length < 10)
+    return res.status(400).json({ error: 'Password must be at least 10 characters' });
+  const { rows } = await q('SELECT email FROM users WHERE id = $1', [id]);
+  if (!rows[0]) return res.status(404).json({ error: 'User not found' });
+  const hash = await bcrypt.hash(newPassword, 12);
+  await q('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
+  await audit(req.user.uid, 'user', id, 'update', `password reset for ${rows[0].email}`);
+  res.json({ ok: true });
 }
 
 export function requireRole(...roles) {

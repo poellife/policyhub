@@ -180,6 +180,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .btn-danger { color: var(--critical); border-color: var(--border); }
 .btn-danger:hover { border-color: var(--critical); }
 .btn-sm { padding: 5px 11px; font-size: 12.5px; }
+/* A suspended account still has to be readable — dimmed, not hidden. */
+tr.row-muted td { opacity: .55; }
+tr.row-muted td:last-child, tr.row-muted .badge { opacity: 1; }
 .btn-icon { padding: 6px 10px; }
 
 input, select, textarea {

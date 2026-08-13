@@ -43,7 +43,7 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-app.post('/api/import/preview', requireAuth, requireRole('admin','editor','manager'), upload.single('file'),
+app.post('/api/import/preview', requireAuth, wrap(loadScope), requireRole('admin','editor','manager'), upload.single('file'),
   wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     res.json(previewCsv(req.file.buffer, req.body.type || 'policies'));
@@ -66,7 +66,7 @@ app.post('/api/import/run', requireAuth, requireRole('admin', 'editor', 'manager
   })
 );
 
-app.get('/api/import/template/:type', requireAuth, requireRole('admin','editor','manager'), (req, res) => {
+app.get('/api/import/template/:type', requireAuth, wrap(loadScope), requireRole('admin','editor','manager'), (req, res) => {
   const csv = TEMPLATES[req.params.type];
   if (!csv) return res.status(404).json({ error: 'Unknown template' });
   res.setHeader('Content-Type', 'text/csv');

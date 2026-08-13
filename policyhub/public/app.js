@@ -1856,14 +1856,31 @@ async function settingsView() {
         <div class="card-head"><h2>Users</h2><div class="spacer"></div>
           <button class="btn-sm primary" id="addUserBtn">Add user</button></div>
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Investor / entities</th><th>Last sign-in</th></tr></thead>
-          <tbody>${users.map((u) => `<tr>
+          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Investor / entities</th>
+            <th>Status</th><th>Last sign-in</th><th></th></tr></thead>
+          <tbody>${users.map((u) => `<tr class="${u.is_active ? '' : 'row-muted'}">
             <td class="strong">${esc(u.email)}</td><td>${esc(u.full_name)}</td>
             <td>${esc(u.role)}</td>
             <td class="secondary">${esc(u.investor_name || u.fund_codes || '')}</td>
+            <td>${u.is_active
+                  ? '<span class="badge inforce"><span class="dot"></span>Active</span>'
+                  : '<span class="badge lapsed"><span class="dot"></span>Suspended</span>'}</td>
             <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-US') : 'never'}</td>
+            <td style="white-space:nowrap">
+              <button class="btn-sm" data-edit-user="${u.id}">Edit</button>
+              ${u.id === state.user.id ? '' : `
+                <button class="btn-sm" data-toggle-user="${u.id}" data-active="${u.is_active}"
+                  data-email="${esc(u.email)}">${u.is_active ? 'Suspend' : 'Reactivate'}</button>
+                <button class="btn-sm btn-danger" data-del-user="${u.id}"
+                  data-email="${esc(u.email)}">Delete</button>`}
+            </td>
           </tr>`).join('')}</tbody>
         </table></div>
+        <div class="card-body" style="border-top:1px solid var(--grid);padding-top:12px">
+          <span class="muted" style="font-size:12px">
+            Suspending takes effect immediately — an open session is ended on the next click.
+            Deleting removes the login but keeps everything they did in the audit trail below.</span>
+        </div>
       </div>` : ''}
     </div>
 
@@ -1920,6 +1937,31 @@ async function settingsView() {
           $('#pwMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
         }
       });
+      document.querySelectorAll('[data-edit-user]').forEach((b) =>
+        b.addEventListener('click', () =>
+          openUserDialog(users.find((u) => u.id === Number(b.dataset.editUser)), funds, render)));
+      document.querySelectorAll('[data-toggle-user]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const wasActive = b.dataset.active === 'true';
+          if (!confirm(`${wasActive ? 'Suspend' : 'Reactivate'} ${b.dataset.email}?`)) return;
+          const u = users.find((x) => x.id === Number(b.dataset.toggleUser));
+          try {
+            await api(`/users/${u.id}`, { method: 'PUT', body: {
+              full_name: u.full_name, role: u.role, is_active: !wasActive,
+              investor_id: u.investor_id, fund_ids: u.fund_ids || [] } });
+            toast(wasActive ? 'Account suspended' : 'Account reactivated');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
+      document.querySelectorAll('[data-del-user]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          if (!confirm(`Permanently delete the login for ${b.dataset.email}?\n\nTheir activity log entries are kept.`)) return;
+          try {
+            await api(`/users/${b.dataset.delUser}`, { method: 'DELETE' });
+            toast('Login deleted');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
       $('#addEntityBtn')?.addEventListener('click', () => openEntityDialog(null, render));
       document.querySelectorAll('[data-edit-entity]').forEach((b) =>
         b.addEventListener('click', () =>
@@ -1977,6 +2019,93 @@ async function settingsView() {
       });
     },
   };
+}
+
+/* --------------------------- user editing ---------------------------- */
+
+/**
+ * Edit an existing login: name, role, status, and — for a manager — exactly
+ * which owner entities they may work inside. Entity access is replaced with
+ * whatever is selected here, so removing one is simply deselecting it.
+ * The password field is optional and goes to a separate endpoint, since a
+ * reset is a different act from an account change and is audited as such.
+ */
+async function openUserDialog(u, funds, onSaved) {
+  if (!u) return;
+  if (!state.investors.length) {
+    try { state.investors = await api('/investors'); } catch { /* not fatal */ }
+  }
+  const self = u.id === state.user.id;
+  const held = (u.fund_ids || []).map(Number);
+
+  const dlg = openDialog(`Edit ${u.email}`, `
+    ${inputField('Full name', 'full_name', u.full_name)}
+    <div class="field-row">
+      <div class="field"><label>Role</label>
+        <select name="role" ${self ? 'disabled' : ''}>
+          ${['admin', 'editor', 'viewer', 'manager', 'investor'].map((r) =>
+            `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Status</label>
+        <select name="is_active" ${self ? 'disabled' : ''}>
+          <option value="true" ${u.is_active ? 'selected' : ''}>Active</option>
+          <option value="false" ${u.is_active ? '' : 'selected'}>Suspended</option>
+        </select>
+      </div>
+    </div>
+    ${self ? `<div class="field" style="margin-top:-4px">
+      <span class="muted" style="font-size:12px">
+        You cannot change your own role or suspend yourself. Ask another administrator.</span>
+    </div>` : ''}
+
+    <div class="field" id="fundPick" style="display:none">
+      <label>Owner entities *</label>
+      <select name="fund_ids" multiple size="${Math.min(5, Math.max(2, funds.length))}">
+        ${funds.map((f) => `<option value="${f.id}" ${held.includes(Number(f.id)) ? 'selected' : ''}
+          >${esc(f.code)}${f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">
+        Hold ⌘ or Ctrl to pick several. Whatever is highlighted when you save becomes their
+        complete access — deselect an entity to take it away. Changes apply immediately,
+        including to a session they already have open.</span>
+    </div>
+
+    <div class="field" id="investorPick" style="display:none">
+      <label>Investor *</label>
+      <select name="investor_id">
+        <option value="">Choose an investor…</option>
+        ${state.investors.map((i) =>
+          `<option value="${i.id}" ${Number(i.id) === Number(u.investor_id) ? 'selected' : ''}
+            >${esc(i.name)}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">
+        This login sees only the policies this investor holds a share of.</span>
+    </div>
+
+    ${inputField('Set a new password (optional, 10+ characters)', 'password', '', 'password',
+      'minlength=10 autocomplete=new-password')}
+  `, async (v) => {
+    // A disabled select submits nothing, so fall back to the record's own values.
+    await api(`/users/${u.id}`, { method: 'PUT', body: {
+      full_name: v.full_name,
+      role: self ? u.role : v.role,
+      is_active: self ? u.is_active : v.is_active === 'true',
+      investor_id: v.investor_id || null,
+      fund_ids: v.fund_ids || [],
+    } });
+    if (v.password) await api(`/users/${u.id}/password`, { method: 'POST', body: { password: v.password } });
+    toast(v.password ? 'Account updated and password reset' : 'Account updated');
+    onSaved?.();
+  }, 'Save changes');
+
+  const roleSel = $('select[name=role]', dlg);
+  const sync = () => {
+    $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
+    $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+  };
+  roleSel.addEventListener('change', sync);
+  sync();
 }
 
 /* ------------------------------ render ------------------------------- */
