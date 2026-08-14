@@ -54,9 +54,9 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row', { time
 console.log('NAVIGATION');
 const nav = await p.$$eval('.nav a', (a) => a.map((x) => x.textContent.trim()));
 check('Maturities sits in the menu', nav.includes('Maturities'), nav.join('/'));
-check('after Servicing, before Insureds',
-  nav.indexOf('Maturities') === nav.indexOf('Servicing') + 1
-  && nav.indexOf('Maturities') < nav.indexOf('Insureds'));
+check('between Servicing and Insureds',
+  nav.indexOf('Maturities') > nav.indexOf('Servicing')
+  && nav.indexOf('Maturities') < nav.indexOf('Insureds'), nav.join('/'));
 
 console.log('\nBEFORE THE DEATH IS RECORDED');
 const searchGrid = async (term) => {

@@ -20,8 +20,9 @@ leaves your database.
 | **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and IRR, with a per-policy claim record. |
 | **Return / IRR** | Date-exact internal rate of return on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio IRR on the dashboard. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
-| **Import** | CSV upload with automatic column matching, preview before commit, and per-row error reporting. A **master importer** takes a full data dump — policies, insureds, additional lives, value history and the whole ledger — in one file; three single-purpose importers remain for piecemeal updates. |
+| **Import** | Drop in any number of CSV files and Excel workbooks at once. Every sheet is read, every row is classified, and the whole dump — policies, insureds, additional lives, value history and the full ledger — loads in one pass. Column names are matched automatically; nothing is written until you have seen the preview. Three single-purpose importers remain for piecemeal updates. |
 | **Reports** | Six print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, **policy fact sheets** (one page each), and two return reports — **in force** and **realized**. |
+| **Opportunities** | Policies being offered rather than owned. Managers and above post the terms, the premium schedule and the LE, choose which investors see each one, and confirm the requests that come back. Investors see what is left, what the return looks like at life expectancy and two years either side, and can ask for a percentage. |
 | **Investors** | Directory of investors with position counts and their share of death benefit, capital invested and cash value. Each investor has a page listing every position and its percentage. |
 | **Settings** | Password change, **owner entities**, user management — add, edit, suspend, reactivate, delete, reset a password (admin) — and a full activity log. |
 
@@ -234,6 +235,77 @@ are absent from your own row. `scripts/user-admin-test.mjs` proves each of these
 against the API, holding a cookie issued *before* the change to confirm the
 immediacy.
 
+## Opportunities
+
+A place to introduce a policy to investors before anybody owns it.
+
+An opportunity is **its own record, not a policy**. A deal that may never
+close must not reach the dashboard, the IRR reports or the maturities
+register, and keeping it separate means no query has to remember to exclude
+it. When it funds, one click creates the policy, records the purchase price in
+the ledger and writes the cap table from the confirmed allocations — nothing
+is re-keyed.
+
+### What an investor sees
+
+Only what has been shared with them. An opportunity that is not on their list
+returns "not found", not "forbidden" — the second answer would confirm it
+exists. The **Opportunities** tab in their menu carries a count of offers they
+have not yet answered, which is the first thing they will notice on signing in.
+
+Each offer shows the policy terms, the asking price as a percentage of face,
+the posted premium schedule with their own share of each payment, and:
+
+**Return if the insured lives to…** — three columns. Two years early, at life
+expectancy, and two years late. Life expectancy is a median, not a promise:
+around half of insureds outlive it, and every extra month is another premium
+paid and another month of waiting. The late column is the one worth
+underwriting against, so it is given equal weight rather than hidden in a
+footnote. The estimate runs from the **date of the LE report**, not from today
+— an estimate written two years ago has already spent two years of itself.
+
+Premiums beyond the end of the posted schedule are continued at the same
+annual rate rather than assumed to stop, and the analysis says so.
+
+### Scarcity that is real
+
+Each card shows what is left, what is taken, and a bar that fills as the
+offer goes. Under 25% remaining, or a deadline inside a week, the card is
+marked urgent and the bar changes colour. None of it is decoration: every
+figure is the live number.
+
+**A request holds its percentage immediately.** The moment one investor asks
+for 65%, every other investor sees 35% available. That is what makes the
+scarcity honest rather than theatrical. It becomes an allocation only when a
+manager confirms it; declining releases it straight back.
+
+**Nobody learns who else is in.** An investor sees the total taken and nothing
+more — no names, no count, consistent with the rule that a co-owner is never
+visible on a shared policy. `scripts/opportunity-test.mjs` asserts that no
+other investor's name appears anywhere in the payload.
+
+**Two people cannot take the same slice.** A request is written inside a
+transaction that locks the opportunity row, so two investors clicking at the
+same instant cannot between them take 130% of a policy. The suite fires two
+simultaneous 60% requests at the same offer and asserts exactly one succeeds.
+
+An investor changing a request they already hold is not blocked by their own
+percentage — someone holding 82% can reduce it to 40%, and the difference is
+released to everybody else.
+
+### Who can do what
+
+| | Post & edit | Choose who sees it | Confirm requests | Fund it | Take a share |
+|---|---|---|---|---|---|
+| admin | yes | yes | yes | yes | no |
+| editor | yes | yes | yes | no | no |
+| manager | yes, inside their entities | yes | yes | yes | no |
+| viewer | no | no | no | no | no |
+| investor | no | no | no | no | yes |
+
+A manager sees only opportunities belonging to their own owner entities and
+cannot create one anywhere else — the same boundary that governs policies.
+
 ## Fractional ownership and the investor portal
 
 An owning **entity** (LCG1, LCG2) holds a policy on paper. **Investors** hold
@@ -293,6 +365,10 @@ investors        investor of record: name, legal name, type, contact, tax id las
 policy_investors fractional allocation: policy + investor + percentage; a policy's
                  allocations may total under 100% but never over
 users.investor_id ties a login to an investor; that session is scoped to their book
+opportunities    a policy being offered: terms, LE, asking price, deadline
+opportunity_premiums   the premium schedule as offered
+opportunity_shares     which investors may see an opportunity
+opportunity_commitments  who asked for what percentage, and whether it was confirmed
 audit_log        who changed what, when
 ```
 
@@ -352,10 +428,31 @@ the password once at startup.
 
 ## Importing data
 
-### One file for everything
+### One upload for everything
 
-**Everything — one file** is the default. A single CSV carries every record type,
-with a **Record Type** column on each row saying what it is:
+**Everything — full data dump** is the default. Drop in as many files as you
+like, CSV or Excel, and the whole lot is read together.
+
+**Excel workbooks are read tab by tab.** Every visible sheet becomes part of the
+import; hidden working tabs are left alone. Dates come through as dates — Excel
+stores them as serial numbers with a format attached, and both the 1900 and 1904
+epochs are handled — so a premium dated 4/9/2020 lands as 2020-04-09 rather than
+as 43930. A title line above the header is skipped rather than mistaken for the
+header.
+
+**A premium tab named after its policy is understood.** The common shape — one
+tab per policy, holding nothing but a Date column and a Premium column, with the
+policy number only in the tab's name — is recognised: the policy number is taken
+from the sheet name, the rows are read as premium payments, and a trailing Total
+row is treated as the footer it is. The preview says so in as many words:
+*"read as premium history for policy WB-1001, 1 total row ignored"*.
+
+There is no Excel library behind this. A workbook is a ZIP of XML, and the
+reader in `src/xlsx.js` is about two hundred lines of Node's own `zlib` — which
+keeps the dependency tree, and `npm audit`, exactly where the security review
+left them.
+
+Within a file, each row carries a **Record Type** saying what it is:
 
 | Record Type | What the row does |
 |---|---|
@@ -367,10 +464,11 @@ with a **Record Type** column on each row saying what it is:
 
 Columns are the union of all five; a row leaves blank whatever it doesn't need.
 
-**Order in the file does not matter.** Rows are sorted into dependency order
-before anything is written — policies first (which create their insureds), then
-person detail, then additional lives, then values, then the ledger. A transaction
-can sit at the top of the file, above the policy it belongs to, and still land.
+**Order does not matter, and neither does which file a row is in.** Everything
+uploaded is pooled and sorted into dependency order before anything is written —
+policies first (which create their insureds), then person detail, then additional
+lives, then values, then the ledger. A transaction can sit at the top of one file
+and the policy it belongs to in another, and both still land.
 
 **The Record Type column is optional.** Without it each row is classified by its
 shape: a dated amount with a type is a transaction, an as-of date with values is
@@ -379,9 +477,12 @@ unambiguous evidence — anything doubtful is refused by line number with a mess
 saying to add the column, because guessing wrong on a book of record is worse
 than asking.
 
-**Nothing is written until you've seen the classification.** The preview reports
-how many rows were read as each type, whether that came from your column or from
-inference, and every row it could not classify with its line number.
+**Nothing is written until you've seen the classification.** The preview lists
+every file and sheet found with its row count, reports how many rows were read as
+each type, says whether that came from your column or from the shape of the rows,
+and names anything it could not classify. Every message carries the file, the tab
+and the line — "line 12" on its own would be useless once several files are in
+play.
 
 **Re-running the same file is safe.** A ledger row identical to one already on
 file — same policy, date, type and amount — is skipped and counted, so a second
@@ -390,9 +491,14 @@ Policies and snapshots update in place rather than duplicating. If a policy
 genuinely took two identical payments on the same day, tick **Allow duplicate
 ledger rows**.
 
-`scripts/master-import-test.mjs` covers all of this: mixed files, out-of-order
-rows, inference, refusals, line-accurate errors, re-run safety, and that a
-portfolio manager importing a policy for another entity is still rejected.
+`scripts/master-import-test.mjs` covers all of this against
+`demo/sample-workbook.xlsx` — a workbook with a title row, a hidden tab, two
+per-policy premium tabs with Total footers, plus loose CSVs alongside it:
+classification, dependency ordering across files, inference, refusals,
+file-and-tab-accurate errors, re-run safety, and that a portfolio manager
+importing a policy for another entity is still rejected.
+
+Limits: 20 files an upload, 5 MB each, 25,000 rows in total.
 
 ### Column matching
 
@@ -590,6 +696,8 @@ reach those rules correctly.
 | `maturity-test.mjs` | the survivorship rule, auto-transition both ways, removal from every active view, proceeds, scoping |
 | `maturity-ui-test.mjs` | recording a death through the interface and the register it produces |
 | `master-import-test.mjs` | one-file import: classification, dependency ordering, inference, refusals, re-run safety, scoping |
+| `opportunity-test.mjs` | sharing, privacy between investors, the race for the last slice, decisions, deadlines, LE scenarios, funding |
+| `opportunity-ui-test.mjs` | the menu badge, the scarcity bar, the scenario table, and taking a share |
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |

@@ -40,7 +40,28 @@ const state = {
   investors: [],
   sort: { key: 'insured_last', dir: 1 },
   funds: [],
+  oppCount: 0,        // drives the badge in the menu
 };
+
+/**
+ * Refresh the opportunity count behind the menu badge.
+ *
+ * Fire-and-forget: the shell has already painted, so this patches the badge
+ * in place rather than holding up the page for a count.
+ */
+async function refreshOppCount() {
+  try {
+    const s = await api('/opportunities/summary');
+    const next = Number(s.undecided) || 0;
+    if (next === state.oppCount) return;
+    state.oppCount = next;
+    const link = document.querySelector('.nav a[href="#/opportunities"]');
+    if (!link) return;
+    link.querySelector('.nav-badge')?.remove();
+    link.classList.toggle('has-badge', next > 0);
+    if (next > 0) link.insertAdjacentHTML('beforeend', `<span class="nav-badge">${next}</span>`);
+  } catch { /* a badge is not worth an error */ }
+}
 
 /* ----------------------------- helpers ------------------------------- */
 
@@ -184,6 +205,7 @@ const STAFF_NAV = [
   ['dashboard', 'Dashboard'],
   ['policies', 'Policies'],
   ['servicing', 'Servicing'],
+  ['opportunities', 'Opportunities'],
   ['maturities', 'Maturities'],
   ['insureds', 'Insureds'],
   ['investors', 'Investors'],
@@ -197,6 +219,7 @@ const STAFF_NAV = [
 const INVESTOR_NAV = [
   ['dashboard', 'Portfolio'],
   ['policies', 'My policies'],
+  ['opportunities', 'Opportunities'],
   ['servicing', 'Premiums'],
   ['maturities', 'Realized'],
   ['reports', 'Statements'],
@@ -226,15 +249,22 @@ const scaled = (v, p) =>
 
 function shell(inner) {
   const active = state.route === 'policy' ? 'policies'
-    : state.route === 'investor' ? 'investors' : state.route;
+    : state.route === 'investor' ? 'investors'
+    : state.route === 'opportunity' ? 'opportunities' : state.route;
   return `
     <div class="topbar">
       <div class="brand"><span class="brand-mark"></span>Poel Capital</div>
       <div class="brand-divider"></div>
       <div class="brand-sub">Policy Portfolio</div>
       <nav class="nav">
-        ${navItems().map(([r, label]) =>
-          `<a href="#/${r}" class="${active === r ? 'active' : ''}">${label}</a>`).join('')}
+        ${navItems().map(([r, label]) => {
+          // The count is the point of the badge: an investor should be able
+          // to tell at a glance that something is waiting for them.
+          const badge = r === 'opportunities' && state.oppCount > 0
+            ? `<span class="nav-badge">${state.oppCount}</span>` : '';
+          return `<a href="#/${r}" class="${active === r ? 'active' : ''}${
+            badge ? ' has-badge' : ''}">${label}${badge}</a>`;
+        }).join('')}
       </nav>
       <div class="topbar-right">
         <button class="btn-sm btn-icon" id="themeBtn" title="Toggle light / dark">◐</button>
@@ -1667,6 +1697,577 @@ async function servicingView() {
   };
 }
 
+/* --------------------------- opportunities --------------------------- */
+
+const OPP_STATUSES = ['Open', 'Closed', 'Withdrawn', 'Funded'];
+
+/** Days until a date, or null. Negative means it has passed. */
+function daysUntil(iso) {
+  if (!iso) return null;
+  const then = Date.UTC(...String(iso).slice(0, 10).split('-').map((n, i) => (i === 1 ? +n - 1 : +n)));
+  const now = new Date();
+  const today0 = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((then - today0) / 86400000);
+}
+
+function deadlineChip(o) {
+  const d = daysUntil(o.offer_closes_on);
+  if (d === null) return '';
+  if (d < 0) return '<span class="opp-deadline closed">Offer closed</span>';
+  if (d === 0) return '<span class="opp-deadline soon">Closes today</span>';
+  return `<span class="opp-deadline ${d <= 7 ? 'soon' : ''}">Closes in ${d} day${d === 1 ? '' : 's'}</span>`;
+}
+
+const oppName = (o) =>
+  `${o.insured_last_name || ''}${o.insured_first_name ? `, ${o.insured_first_name}` : ''}`.trim()
+  || o.policy_number || 'Untitled opportunity';
+
+/** The taken/remaining bar — the scarcity signal, straight from the data. */
+function remainingBar(o) {
+  const taken = Number(o.taken_pct) || 0;
+  const remaining = Math.max(0, 100 - taken);
+  const tight = remaining > 0 && remaining <= 25;
+  return `
+    <div>
+      <div class="opp-remaining">
+        <strong style="${remaining === 0 ? 'color:var(--text-muted)'
+          : tight ? 'color:var(--serious)' : ''}">${
+          remaining === 0 ? 'Fully spoken for' : `${fmtPct(remaining)} still available`}</strong>
+        ${taken > 0 ? `<span class="muted">${fmtPct(taken)} taken</span>` : ''}
+      </div>
+      <div class="opp-bar ${tight ? 'urgent' : ''}"><span style="width:${Math.min(100, taken)}%"></span></div>
+    </div>`;
+}
+
+const fmtPct = (v) => {
+  const n = Number(v) || 0;
+  return `${n % 1 ? n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '') : n}%`;
+};
+
+async function opportunitiesView() {
+  const rows = await api('/opportunities');
+  const staff = !isInvestorUser();
+  const live = rows.filter((o) => o.status === 'Open');
+  const rest = rows.filter((o) => o.status !== 'Open');
+
+  const card = (o) => {
+    const remaining = Math.max(0, 100 - (Number(o.taken_pct) || 0));
+    const d = daysUntil(o.offer_closes_on);
+    const urgent = o.status === 'Open' && ((d !== null && d >= 0 && d <= 7) || (remaining > 0 && remaining <= 25));
+    const gone = o.status !== 'Open' || remaining === 0;
+    return `
+    <div class="opp-card ${o.status === 'Open' ? 'live' : ''} ${urgent ? 'urgent' : ''} ${gone ? 'gone' : ''}"
+         data-opp="${o.id}">
+      <div class="opp-head">
+        <div>
+          <div class="opp-title">${esc(oppName(o))}</div>
+          <div class="opp-sub">${esc(o.carrier_name || '—')}
+            ${o.policy_number ? `· ${esc(o.policy_number)}` : ''}
+            ${o.product_type ? `· ${esc(o.product_type)}` : ''}
+            ${o.insured_dob ? `· age ${ageFrom(o.insured_dob) ?? '—'}` : ''}
+            ${o.insured_state ? `· ${esc(o.insured_state)}` : ''}
+            ${staff && o.fund_code ? `· ${esc(o.fund_code)}` : ''}</div>
+        </div>
+        <div class="spacer"></div>
+        <div style="text-align:right">
+          ${o.status === 'Open' ? deadlineChip(o)
+            : `<span class="opp-deadline closed">${esc(o.status)}</span>`}
+          ${staff ? `<div class="muted" style="font-size:12px;margin-top:6px">
+            shared with ${o.shared_with ?? 0} investor${o.shared_with === 1 ? '' : 's'}</div>` : ''}
+          ${o.my_pct ? `<div style="font-size:12px;margin-top:6px">
+            <span class="badge inforce"><span class="dot"></span>You: ${fmtPct(o.my_pct)} ${esc(o.my_status || '')}</span>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <div class="opp-figures">
+        <div><div class="label">Death benefit</div>
+          <div class="value">${fmtExact(o.face_amount)}</div></div>
+        <div><div class="label">Asking price</div>
+          <div class="value">${fmtExact(o.asking_price)}</div>
+          <div class="note">${o.face_amount && o.asking_price
+            ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
+        <div><div class="label">IRR at life expectancy</div>
+          <div class="value">${fmtIrr(o.irr_at_le)}</div>
+          <div class="note">${o.le_months ? `LE ${o.le_months} months` : 'no LE on file'}</div></div>
+        <div><div class="label">Projected maturity</div>
+          <div class="value" style="font-size:16px">${o.matures_on ? fmtDate(o.matures_on) : '—'}</div>
+          <div class="note">at life expectancy</div></div>
+      </div>
+
+      <div style="padding:15px 20px">
+        ${remainingBar(o)}
+        <div style="margin-top:13px;display:flex;gap:8px;flex-wrap:wrap">
+          <a class="btn ${o.status === 'Open' && remaining > 0 ? 'btn-primary' : ''}"
+             href="#/opportunity/${o.id}">${
+            isInvestorUser()
+              ? (o.my_pct ? 'Review your request' : remaining > 0 ? 'Look at this' : 'View details')
+              : 'Open'}</a>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Opportunities</h1>
+        <div class="sub">${isInvestorUser()
+          ? `${live.length} ${live.length === 1 ? 'offer is' : 'offers are'} open to you`
+          : `${live.length} open · ${rest.length} closed or funded`}</div></div>
+      <div class="spacer"></div>
+      ${canEditData() && !isInvestorUser()
+        ? '<button class="primary" id="newOppBtn">New opportunity</button>' : ''}
+    </div>
+
+    ${rows.length === 0 ? `
+      <div class="card"><div class="card-body"><div class="empty">
+        ${isInvestorUser()
+          ? 'Nothing is being offered to you right now. This is where new policies will appear.'
+          : 'No opportunities yet. Create one and choose which investors get to see it.'}
+      </div></div></div>` : ''}
+
+    ${live.map(card).join('')}
+    ${rest.length ? `<div class="eyebrow" style="margin:26px 0 12px;color:var(--text-muted)">
+      No longer open</div>${rest.map(card).join('')}` : ''}`;
+
+  return {
+    html,
+    after: () => {
+      $('#newOppBtn')?.addEventListener('click', () => openOpportunityDialog(null));
+      document.querySelectorAll('.opp-card').forEach((c) =>
+        c.addEventListener('click', (e) => {
+          if (e.target.closest('a,button')) return;
+          go(`#/opportunity/${c.dataset.opp}`);
+        }));
+    },
+  };
+}
+
+/* ------------------------- one opportunity --------------------------- */
+
+async function opportunityView() {
+  const o = await api(`/opportunities/${state.params.id}`);
+  const staff = !isInvestorUser();
+  const remaining = Math.max(0, 100 - (Number(o.taken_pct) || 0));
+  const a = o.analysis;
+  const mine = o.my_commitment;
+  // What THIS investor may ask for. Their own live request is already
+  // inside the taken figure, so it has to be added back — otherwise
+  // somebody holding 82% appears unable to reduce it to 40%.
+  const myHeld = mine && ['Requested', 'Confirmed'].includes(mine.status) ? Number(mine.pct) : 0;
+  const myMax = Math.min(100, remaining + myHeld);
+  const canTake = isInvestorUser() && o.status === 'Open'
+    && (daysUntil(o.offer_closes_on) === null || daysUntil(o.offer_closes_on) >= 0);
+
+  const scenarioTable = () => {
+    if (!a.priced) return `<div class="empty">
+      An asking price and death benefit are needed before a return can be worked out.</div>`;
+    const cell = (s, fn) => `<td class="num ${s.offset_months === 0 ? 'at-le' : ''}">${fn(s)}</td>`;
+    return `
+      <div class="table-wrap"><table class="data scenario-table">
+        <thead><tr><th></th>
+          ${a.scenarios.map((s) => `<th class="num ${s.offset_months === 0 ? 'at-le' : ''}">${
+            s.offset_months === 0 ? 'At life expectancy'
+              : s.offset_months < 0 ? `${-s.offset_months} months early`
+              : `${s.offset_months} months late`}</th>`).join('')}
+        </tr></thead>
+        <tbody>
+          <tr><td class="strong">Maturity date</td>
+            ${a.scenarios.map((s) => cell(s, (x) => fmtDate(x.matures_on))).join('')}</tr>
+          <tr><td class="strong">Years held</td>
+            ${a.scenarios.map((s) => cell(s, (x) => x.years.toFixed(1))).join('')}</tr>
+          <tr><td class="strong">Premiums paid</td>
+            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.premiums_paid))).join('')}</tr>
+          <tr><td class="strong">Total invested</td>
+            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.invested))).join('')}</tr>
+          <tr><td class="strong">Profit</td>
+            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.profit))).join('')}</tr>
+          <tr><td class="strong">Multiple</td>
+            ${a.scenarios.map((s) => cell(s, (x) => `${x.multiple.toFixed(2)}×`)).join('')}</tr>
+          <tr><td class="strong">IRR</td>
+            ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}"
+              style="font-size:16px">${fmtIrr(s.irr)}</td>`).join('')}</tr>
+        </tbody>
+      </table></div>`;
+  };
+
+  const projected = a.scenarios.some((s) => s.projected_beyond_schedule > 0);
+
+  const html = `
+    <div class="page-head">
+      <div>
+        <div class="sub"><a href="#/opportunities">← All opportunities</a></div>
+        <h1>${esc(oppName(o))}</h1>
+        <div class="sub">${esc(o.carrier_name || '—')}
+          ${o.policy_number ? `· Policy ${esc(o.policy_number)}` : ''}
+          ${o.product_type ? `· ${esc(o.product_type)}` : ''}
+          ${staff && o.fund_code ? `· ${esc(o.fund_code)}` : ''}
+          · ${o.status === 'Open' ? deadlineChip(o) : `<span class="opp-deadline closed">${esc(o.status)}</span>`}</div>
+      </div>
+      <div class="spacer"></div>
+      ${staff && canEditData() ? `
+        <button id="editOppBtn">Edit</button>
+        <button id="scheduleBtn">Premium schedule</button>
+        <button id="shareOppBtn">Share with investors</button>
+        ${['admin', 'manager'].includes(state.user.role) && o.status !== 'Funded'
+          ? '<button class="primary" id="fundOppBtn">Fund it</button>' : ''}` : ''}
+    </div>
+
+    <div class="opp-card ${o.status === 'Open' ? 'live' : ''}" style="margin-bottom:22px">
+      <div class="opp-figures">
+        <div><div class="label">Death benefit</div><div class="value">${fmtExact(o.face_amount)}</div></div>
+        <div><div class="label">Asking price</div><div class="value">${fmtExact(o.asking_price)}</div>
+          <div class="note">${o.face_amount && o.asking_price
+            ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
+        <div><div class="label">Life expectancy</div>
+          <div class="value">${o.le_months ? `${o.le_months} mo` : '—'}</div>
+          <div class="note">${o.le_provider ? `${esc(o.le_provider)} · ` : ''}${
+            o.le_date ? `report ${fmtDate(o.le_date)}` : ''}</div></div>
+        <div><div class="label">Insured</div>
+          <div class="value" style="font-size:16px">${ageFrom(o.insured_dob) ?? '—'}${
+            o.insured_gender ? ` · ${esc(o.insured_gender)}` : ''}</div>
+          <div class="note">${o.insured_dob ? `born ${fmtDate(o.insured_dob)}` : ''}${
+            o.insured_state ? ` · ${esc(o.insured_state)}` : ''}</div></div>
+        <div><div class="label">Expected close</div>
+          <div class="value" style="font-size:16px">${o.expected_close ? fmtDate(o.expected_close) : '—'}</div></div>
+      </div>
+      <div style="padding:16px 20px">${remainingBar(o)}</div>
+
+      ${canTake && myMax > 0 ? `
+      <div class="opp-take">
+        <div class="field-row">
+          <div class="field" style="margin:0">
+            <label>Percentage you want</label>
+            <input type="number" id="takePct" step="0.01" min="0.01" max="${myMax}"
+              value="${mine ? Number(mine.pct) : ''}" placeholder="up to ${fmtPct(myMax)}">
+            ${myHeld ? `<span class="muted" style="font-size:12px">
+              You hold ${fmtPct(myHeld)}; changing this replaces it.</span>` : ''}
+          </div>
+          <div class="field" style="margin:0">
+            <label>Your cost at that share</label>
+            <div id="takeCost" style="font-size:19px;font-weight:600;padding:7px 0">—</div>
+          </div>
+          <div class="field" style="margin:0">
+            <label>Your profit at LE</label>
+            <div id="takeProfit" style="font-size:19px;font-weight:600;padding:7px 0">—</div>
+          </div>
+          <div class="field" style="margin:0">
+            <button class="primary" id="takeBtn" style="width:100%">${
+              mine && mine.status === 'Requested' ? 'Update your request' : 'Request this share'}</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:12px">
+          A request holds the percentage straight away, so what other investors see as
+          available drops immediately. It becomes an allocation once Poel Capital confirms it.
+          The IRR is not affected by how much you take — a rate has no size.
+        </div>
+        <div id="takeMsg" style="margin-top:10px"></div>
+      </div>` : ''}
+
+      ${mine ? `
+      <div class="opp-take">
+        <strong>Your request: ${fmtPct(mine.pct)} · ${esc(mine.status)}</strong>
+        <div class="muted" style="font-size:12.5px;margin-top:4px">
+          ${mine.status === 'Requested'
+            ? 'Waiting on Poel Capital to confirm. You can change or withdraw it until then.'
+            : mine.status === 'Confirmed'
+              ? 'Confirmed. This will appear in your portfolio once the policy is funded.'
+              : mine.status === 'Declined'
+                ? 'This request was declined.' : 'You withdrew this request.'}
+        </div>
+        ${mine.status === 'Requested'
+          ? '<button class="btn-sm btn-danger" id="withdrawBtn" style="margin-top:10px">Withdraw my request</button>' : ''}
+      </div>` : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Return if the insured lives to…</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">life expectancy, and two years either side</span></div>
+      <div class="card-body flush">${scenarioTable()}</div>
+      <div class="card-body">
+        <span class="muted" style="font-size:12px">
+          Life expectancy is a median, not a promise — around half of insureds outlive it, and
+          every extra month is another premium paid and another month of waiting. That is why
+          the late column is here: it is the case worth underwriting against.
+          ${a.le_from ? `The estimate runs from ${fmtDate(a.le_from)}, the date of the LE report,
+          not from today.` : ''}
+          ${projected ? 'Premiums beyond the posted schedule are continued at the same annual rate.' : ''}
+          IRR is solved on the actual date of every cash flow over a 365-day year — the same
+          convention as Excel’s XIRR.
+        </span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Premium schedule</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${o.premiums.length} posted payment${
+          o.premiums.length === 1 ? '' : 's'}</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Due</th><th class="num">Amount</th>${
+          isInvestorUser() ? '<th class="num">Your share</th>' : ''}<th>Notes</th>
+          ${staff && canEditData() ? '<th></th>' : ''}</tr></thead>
+        <tbody>${o.premiums.length === 0
+          ? `<tr><td colspan="5"><div class="empty">No schedule posted.${
+              o.annual_premium ? ` The analysis assumes ${fmtExact(o.annual_premium)} a year.` : ''}</div></td></tr>`
+          : o.premiums.map((p) => `<tr>
+              <td class="strong">${fmtDate(p.due_date)}</td>
+              <td class="num">${fmtExact(p.amount)}</td>
+              ${isInvestorUser() ? `<td class="num">${mine
+                ? fmtExact(Number(p.amount) * Number(mine.pct) / 100) : '—'}</td>` : ''}
+              <td class="secondary">${esc(p.notes || '')}</td>
+              ${staff && canEditData()
+                ? `<td><button class="btn-sm btn-danger" data-del-prem="${p.id}">Remove</button></td>` : ''}
+            </tr>`).join('')}</tbody>
+        ${o.premiums.length ? `<tfoot><tr><td>Total posted</td>
+          <td class="num">${fmtExact(o.premiums.reduce((s, p) => s + Number(p.amount), 0))}</td>
+          ${isInvestorUser() ? '<td></td>' : ''}<td></td>${staff && canEditData() ? '<td></td>' : ''}
+        </tr></tfoot>` : ''}
+      </table></div>
+    </div>
+
+    ${o.notes ? `<div class="card"><div class="card-head"><h2>Notes</h2></div>
+      <div class="card-body"><div style="font-size:14px;white-space:pre-wrap">${esc(o.notes)}</div></div></div>` : ''}
+
+    ${staff ? `
+    <div class="card">
+      <div class="card-head"><h2>Investor interest</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${fmtPct(o.taken_pct)} spoken for ·
+          ${fmtPct(o.confirmed_pct)} confirmed</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Investor</th><th class="num">Share</th><th class="num">Cost</th>
+          <th>Status</th><th>Requested</th>${canEditData() ? '<th></th>' : ''}</tr></thead>
+        <tbody>${(o.commitments || []).length === 0
+          ? '<tr><td colspan="6"><div class="empty">Nobody has asked for a piece yet.</div></td></tr>'
+          : o.commitments.map((c) => `<tr class="${['Declined', 'Withdrawn'].includes(c.status) ? 'row-muted' : ''}">
+              <td class="strong">${esc(c.investor_name)}</td>
+              <td class="num">${fmtPct(c.pct)}</td>
+              <td class="num">${fmtExact(Number(o.asking_price || 0) * Number(c.pct) / 100)}</td>
+              <td>${c.status === 'Confirmed'
+                    ? '<span class="badge inforce"><span class="dot"></span>Confirmed</span>'
+                    : c.status === 'Requested'
+                      ? '<span class="badge grace"><span class="dot"></span>Requested</span>'
+                      : `<span class="badge">${esc(c.status)}</span>`}</td>
+              <td class="muted">${new Date(c.requested_at).toLocaleDateString('en-US')}</td>
+              ${canEditData() ? `<td style="white-space:nowrap">${c.status === 'Requested'
+                ? `<button class="btn-sm primary" data-decide="${c.id}" data-to="Confirmed">Confirm</button>
+                   <button class="btn-sm" data-decide="${c.id}" data-to="Declined">Decline</button>` : ''}</td>` : ''}
+            </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12px">
+          A request holds its percentage from the moment it is made, so the availability
+          investors see is always honest. Declining one releases it back.
+          ${(o.shares || []).length
+            ? `Shared with ${o.shares.map((s) => esc(s.name)).join(', ')}.`
+            : 'Not shared with anybody yet — no investor can see this.'}
+        </span>
+      </div>
+    </div>` : ''}`;
+
+  return {
+    html,
+    after: () => {
+      $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
+      $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
+      $('#shareOppBtn')?.addEventListener('click', () => openShareDialog(o));
+      $('#fundOppBtn')?.addEventListener('click', () => openFundDialog(o));
+
+      document.querySelectorAll('[data-del-prem]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          await api(`/opportunity-premiums/${b.dataset.delPrem}`, { method: 'DELETE' });
+          toast('Payment removed'); render();
+        }));
+
+      document.querySelectorAll('[data-decide]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          try {
+            await api(`/opportunity-commitments/${b.dataset.decide}`,
+              { method: 'PUT', body: { status: b.dataset.to } });
+            toast(b.dataset.to === 'Confirmed' ? 'Allocation confirmed' : 'Request declined');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
+
+      // Live cost as the investor types a percentage.
+      const pctEl = $('#takePct');
+      if (pctEl) {
+        const base = a.base;
+        const recalc = () => {
+          const pct = Number(pctEl.value);
+          const ok = pct > 0 && pct <= myMax + 1e-9;
+          $('#takeCost').textContent = ok
+            ? fmtExact(Number(o.asking_price || 0) * pct / 100) : '—';
+          $('#takeProfit').textContent = ok && base ? fmtExact(base.profit * pct / 100) : '—';
+          $('#takeMsg').innerHTML = pct > myMax + 1e-9
+            ? `<div class="error-box">Only ${fmtPct(myMax)} is available to you${
+                myHeld ? `, including the ${fmtPct(myHeld)} you already hold` : ''}.</div>` : '';
+        };
+        pctEl.addEventListener('input', recalc);
+        recalc();
+
+        $('#takeBtn').addEventListener('click', async () => {
+          const pct = Number(pctEl.value);
+          if (!pct || pct <= 0) { $('#takeMsg').innerHTML = '<div class="error-box">Enter a percentage.</div>'; return; }
+          try {
+            await api(`/opportunities/${o.id}/commit`, { method: 'POST', body: { pct } });
+            toast(`Requested ${fmtPct(pct)}`);
+            refreshOppCount();
+            render();
+          } catch (err) {
+            $('#takeMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+          }
+        });
+      }
+
+      $('#withdrawBtn')?.addEventListener('click', async () => {
+        if (!confirm('Withdraw your request for this opportunity?')) return;
+        try {
+          await api(`/opportunities/${o.id}/commit`, { method: 'DELETE' });
+          toast('Request withdrawn');
+          refreshOppCount();
+          render();
+        } catch (err) { alert(err.message); }
+      });
+    },
+  };
+}
+
+/* --------------------------- opportunity dialogs --------------------- */
+
+async function openOpportunityDialog(o) {
+  if (!state.funds.length) { try { state.funds = await api('/funds'); } catch { /* scoped out */ } }
+  const isNew = !o?.id;
+  openDialog(isNew ? 'New opportunity' : `Edit ${oppName(o)}`, `
+    <div class="field-row">
+      ${inputField('Policy number', 'policy_number', o?.policy_number)}
+      ${inputField('Carrier', 'carrier_name', o?.carrier_name)}
+      ${selectField('Product type', 'product_type', o?.product_type || '', PRODUCT_TYPES)}
+    </div>
+    <div class="field-row">
+      ${inputField('Insured last name *', 'insured_last_name', o?.insured_last_name, 'text', 'required')}
+      ${inputField('First name', 'insured_first_name', o?.insured_first_name)}
+      ${inputField('Date of birth', 'insured_dob', dateInput(o?.insured_dob), 'date')}
+    </div>
+    <div class="field-row">
+      ${selectField('Gender', 'insured_gender', o?.insured_gender || '', ['', 'M', 'F', 'Joint'])}
+      ${inputField('State', 'insured_state', o?.insured_state)}
+      ${inputField('Life expectancy (months)', 'le_months', o?.le_months, 'number')}
+    </div>
+    <div class="field-row">
+      ${inputField('LE provider', 'le_provider', o?.le_provider)}
+      ${inputField('LE report date', 'le_date', dateInput(o?.le_date), 'date')}
+      ${inputField('Death benefit', 'face_amount', o?.face_amount, 'number', 'step=0.01')}
+    </div>
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      Life expectancy is counted from the report date, not from today — an estimate written
+      two years ago has already used two years of itself.</span></div>
+    <div class="field-row">
+      ${inputField('Asking price', 'asking_price', o?.asking_price, 'number', 'step=0.01')}
+      ${inputField('Annual premium', 'annual_premium', o?.annual_premium, 'number', 'step=0.01')}
+      <div class="field"><label>Owner entity</label>
+        <select name="fund_id">
+          <option value="">—</option>
+          ${state.funds.map((f) => `<option value="${f.id}" ${
+            Number(o?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
+        </select></div>
+    </div>
+    <div class="field-row">
+      ${inputField('Expected close', 'expected_close', dateInput(o?.expected_close), 'date')}
+      ${inputField('Offer closes on', 'offer_closes_on', dateInput(o?.offer_closes_on), 'date')}
+      ${isNew ? '' : selectField('Status', 'status', o?.status || 'Open', OPP_STATUSES)}
+    </div>
+    <div class="field"><label>Notes for investors</label>
+      <textarea name="notes" rows="3">${esc(o?.notes || '')}</textarea></div>
+  `, async (v) => {
+    if (v.fund_id === '') delete v.fund_id;
+    if (isNew) {
+      const made = await api('/opportunities', { method: 'POST', body: v });
+      toast('Opportunity created');
+      go(`#/opportunity/${made.id}`);
+    } else {
+      await api(`/opportunities/${o.id}`, { method: 'PUT', body: v });
+      toast('Opportunity updated');
+    }
+  }, isNew ? 'Create' : 'Save');
+}
+
+function openScheduleDialog(o) {
+  openDialog('Lay out the premium schedule', `
+    <div class="field-row">
+      ${inputField('First payment due', 'start_date',
+        dateInput(o.premiums[0]?.due_date) || dateInput(o.expected_close), 'date', 'required')}
+      ${inputField('Annual amount', 'amount', o.annual_premium, 'number', 'step=0.01 required')}
+    </div>
+    <div class="field-row">
+      ${inputField('Number of years', 'years', 15, 'number', 'min=1 max=40')}
+      ${inputField('Yearly increase (%)', 'growth_pct', 5, 'number', 'step=0.1')}
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-family:var(--font);font-size:13.5px;letter-spacing:0;color:var(--text-primary)">
+      <input type="checkbox" name="replace" checked style="width:auto;margin:0"> Replace the existing schedule
+    </label>
+    <span class="muted" style="font-size:12px">
+      Cost of insurance on a universal life policy rises with age, so a flat premium
+      understates the later years. The increase above is applied compounding. Individual
+      payments can be corrected afterwards.
+    </span>
+  `, async (v) => {
+    await api(`/opportunities/${o.id}/premium-schedule`, { method: 'POST', body: {
+      start_date: v.start_date, amount: v.amount, years: v.years,
+      growth_pct: v.growth_pct, replace: v.replace === 'on' } });
+    toast('Schedule posted');
+  }, 'Post schedule');
+}
+
+async function openShareDialog(o) {
+  const investors = await api('/investors');
+  const current = new Set((o.shares || []).map((s) => s.investor_id));
+  openDialog(`Share ${oppName(o)}`, `
+    <div class="field">
+      <label>Investors who can see this</label>
+      <select name="investor_ids" multiple size="${Math.min(12, Math.max(4, investors.length))}">
+        ${investors.map((i) => `<option value="${i.id}" ${current.has(i.id) ? 'selected' : ''}
+          >${esc(i.name)}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">
+        Hold ⌘ or Ctrl to pick several. An investor sees nothing that is not selected here,
+        and the count beside "Opportunities" in their menu is what they will notice first.
+        Somebody who has already asked for a piece cannot be removed until their request
+        is declined.</span>
+    </div>
+  `, async (v) => {
+    const res = await api(`/opportunities/${o.id}/shares`, { method: 'PUT', body: {
+      investor_ids: v.investor_ids || [] } });
+    toast(`Shared with ${res.shared_with} investor${res.shared_with === 1 ? '' : 's'}`);
+  }, 'Save');
+}
+
+function openFundDialog(o) {
+  const confirmed = (o.commitments || []).filter((c) => c.status === 'Confirmed');
+  const pct = confirmed.reduce((s, c) => s + Number(c.pct), 0);
+  openDialog(`Fund ${oppName(o)}`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      This creates the policy in the portfolio, records
+      <strong>${fmtExact(o.asking_price)}</strong> as its acquisition cost, and writes the
+      cap table from the ${confirmed.length} confirmed allocation${confirmed.length === 1 ? '' : 's'}
+      (${fmtPct(pct)} of the policy).
+    </p>
+    ${confirmed.length === 0 ? `<div class="error-box" style="margin-bottom:14px">
+      Nothing has been confirmed yet. The policy will be created with an empty cap table.</div>` : ''}
+    ${!o.policy_number || !o.carrier_name ? `<div class="error-box" style="margin-bottom:14px">
+      A policy number and carrier are required before funding.</div>` : ''}
+    ${inputField('Acquisition date', 'acquisition_date',
+      dateInput(o.expected_close) || today(), 'date')}
+    <span class="muted" style="font-size:12px">
+      Requests still waiting on a decision are not carried over — confirm them first if they
+      should be. The opportunity stays on file, marked Funded, linked to the new policy.
+    </span>
+  `, async (v) => {
+    const res = await api(`/opportunities/${o.id}/fund`, { method: 'POST', body: v });
+    toast(`Policy created with ${res.allocations} allocation${res.allocations === 1 ? '' : 's'}`);
+    go(`#/policy/${res.policy_id}`);
+  }, 'Create the policy');
+}
+
 /* ---------------------------- maturities ----------------------------- */
 
 /**
@@ -2138,8 +2739,8 @@ function openInvestorDialog(inv) {
 /* ------------------------------ import ------------------------------- */
 
 const IMPORT_TYPES = [
-  ['master', 'Everything — one file (recommended)',
-   'A full data dump: policies, insureds, additional lives, value history and the whole transaction ledger in a single CSV. Each row carries a "Record Type" column saying what it is. Rows are loaded in dependency order, so a transaction can sit above the policy it belongs to and still land.'],
+  ['master', 'Everything — full data dump (recommended)',
+   'Drop in as many files as you like, CSV or Excel. Every sheet of a workbook is read, each row is worked out for what it is, and the whole lot is loaded in dependency order — so a transaction can sit in a different file from the policy it belongs to and still land.'],
   ['policies', 'Policies (and current values)',
    'Your monthly CRM export. Creates or updates policies, and records a value snapshot from any AV / CSV / COI columns.'],
   ['values', 'Value snapshots only',
@@ -2151,7 +2752,7 @@ const IMPORT_TYPES = [
 function importView() {
   const html = `
     <div class="page-head"><div><h1>Import data</h1>
-      <div class="sub">Upload a CSV. Column names are matched automatically — "Policy #", "Basic Face", "AV", "CSV", "COI" and the rest of your export headers are all recognised.</div></div></div>
+      <div class="sub">Upload CSV files or Excel workbooks — as many at once as you like. Column names are matched automatically: "Policy #", "Basic Face", "AV", "CSV", "COI" and the rest of your export headers are all recognised.</div></div></div>
 
     <div class="card">
       <div class="card-body">
@@ -2181,9 +2782,12 @@ function importView() {
         </div>
 
         <div class="dropzone" id="dropzone">
-          <div style="font-weight:600;margin-bottom:4px">Drop a CSV here, or click to choose a file</div>
-          <div class="muted" style="font-size:12.5px">Up to 5 MB · 25,000 rows</div>
-          <input type="file" id="fileInput" accept=".csv,text/csv" style="display:none">
+          <div style="font-weight:600;margin-bottom:4px">Drop files here, or click to choose</div>
+          <div class="muted" style="font-size:12.5px">
+            CSV or Excel · up to 20 files · 5 MB each · 25,000 rows in total</div>
+          <input type="file" id="fileInput" multiple
+            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            style="display:none">
         </div>
 
         <div style="margin-top:10px">
@@ -2212,15 +2816,15 @@ function importView() {
       dz.addEventListener('dragleave', () => dz.classList.remove('over'));
       dz.addEventListener('drop', (e) => {
         e.preventDefault(); dz.classList.remove('over');
-        if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+        if (e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]);
       });
       fi.addEventListener('change', () => {
-        const f = fi.files[0];
-        // Clearing the input means choosing the SAME file again still fires a
+        const chosen = [...fi.files];
+        // Clearing the input means choosing the SAME files again still fires a
         // change event — otherwise a second run after fixing something in the
         // spreadsheet appears to do nothing at all.
         fi.value = '';
-        if (f) handleFile(f);
+        if (chosen.length) handleFiles(chosen);
       });
 
       document.querySelectorAll('[data-template]').forEach((a) =>
@@ -2232,31 +2836,55 @@ function importView() {
   };
 }
 
-async function handleFile(file) {
+async function handleFiles(files) {
   const type = $('#importType').value;
   const out = $('#importResult');
-  out.innerHTML = '<div class="card"><div class="card-body"><span class="spin"></span> Reading file…</div></div>';
+  const label = files.length === 1 ? esc(files[0].name) : `${files.length} files`;
+  out.innerHTML = `<div class="card"><div class="card-body"><span class="spin"></span> Reading ${label}…</div></div>`;
+
+  const build = () => {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    fd.append('type', type);
+    return fd;
+  };
+
+  // A row's origin is a file, a tab and a line — printing only the line
+  // number would be useless once more than one file is in play.
+  const origin = (e) => [e.file, e.sheet, e.line ? `line ${e.line}` : null]
+    .filter(Boolean).map(esc).join(' · ');
 
   try {
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('type', type);
-    const preview = await api('/import/preview', { method: 'POST', body: fd });
+    const preview = await api('/import/preview', { method: 'POST', body: build() });
 
     out.innerHTML = `
       <div class="card">
-        <div class="card-head"><h2>Preview — ${esc(file.name)}</h2><div class="spacer"></div>
+        <div class="card-head"><h2>Preview — ${label}</h2><div class="spacer"></div>
           <span class="muted">${preview.rowCount} rows</span></div>
         <div class="card-body">
+          ${preview.sources?.length > 1 || preview.sources?.[0]?.sheet ? `
+          <div style="margin-bottom:14px">
+            <label>Files and sheets found</label>
+            <div class="table-wrap"><table class="data">
+              <thead><tr><th>File</th><th>Sheet</th><th class="num">Rows</th><th></th></tr></thead>
+              <tbody>${preview.sources.map((s) => `<tr>
+                <td class="strong">${esc(s.file)}</td>
+                <td>${s.sheet ? esc(s.sheet) : '<span class="muted">—</span>'}</td>
+                <td class="num">${s.rows}</td>
+                <td class="secondary">${s.note ? esc(s.note) : ''}</td>
+              </tr>`).join('')}</tbody>
+            </table></div>
+          </div>` : ''}
+
           ${preview.byType ? `
           <div style="margin-bottom:14px">
             <div style="margin-bottom:8px"><strong>What each row was read as</strong>
               <span class="muted" style="font-size:12px">${preview.declared
                 ? '— from your Record Type column'
-                : '— inferred, because the file has no Record Type column'}</span></div>
+                : '— worked out from the shape of each row'}</span></div>
             <div class="kpi-row" style="margin:0">
-              ${[['policy','Policies'],['insured','Insured updates'],['life','Additional lives'],
-                 ['value','Value snapshots'],['transaction','Transactions']].map(([k,l]) => `
+              ${[['policy', 'Policies'], ['insured', 'Insured updates'], ['life', 'Additional lives'],
+                 ['value', 'Value snapshots'], ['transaction', 'Transactions']].map(([k, l]) => `
                 <div class="stat"><div class="label">${l}</div>
                   <div class="value">${preview.byType[k]}</div></div>`).join('')}
               ${preview.byType.unclassified ? `<div class="stat">
@@ -2269,7 +2897,7 @@ async function handleFile(file) {
                 cannot be classified and will be skipped:</strong>
                 <ul style="margin:8px 0 0;padding-left:20px">
                   ${preview.problems.slice(0, 8).map((pr) =>
-                    `<li>Line ${pr.line} — ${esc(pr.message)}</li>`).join('')}
+                    `<li>${origin(pr)} — ${esc(pr.message)}</li>`).join('')}
                 </ul>
               </div>` : ''}
           </div>` : ''}
@@ -2299,16 +2927,14 @@ async function handleFile(file) {
     $('#runImportBtn').addEventListener('click', async (e) => {
       e.target.disabled = true;
       e.target.innerHTML = '<span class="spin"></span> Importing…';
-      const fd2 = new FormData();
-      fd2.append('file', file);
-      fd2.append('type', type);
+      const fd2 = build();
       fd2.append('asOfDate', $('#asOfDate').value);
       fd2.append('allowDuplicates', $('#allowDupes').checked ? 'true' : 'false');
       try {
         const res = await api('/import/run', { method: 'POST', body: fd2 });
         out.innerHTML = `
           <div class="card"><div class="card-body">
-            <div class="ok-box">Imported ${res.rowCount} rows from ${esc(file.name)}</div>
+            <div class="ok-box">Imported ${res.rowCount} rows from ${label}</div>
             <dl class="kv">
               <dt>Records created</dt><dd>${res.created}</dd>
               <dt>Records updated</dt><dd>${res.updated}</dd>
@@ -2328,9 +2954,9 @@ async function handleFile(file) {
             ${res.errors.length ? `<div style="margin-top:14px">
               <label>Errors</label>
               <div class="table-wrap"><table class="data">
-                <thead><tr><th>Line</th><th>Problem</th></tr></thead>
+                <thead><tr><th>Where</th><th>Problem</th></tr></thead>
                 <tbody>${res.errors.slice(0, 60).map((er) =>
-                  `<tr><td>${er.line}</td><td>${esc(er.message)}</td></tr>`).join('')}</tbody>
+                  `<tr><td>${origin(er)}</td><td>${esc(er.message)}</td></tr>`).join('')}</tbody>
               </table></div></div>` : ''}
             <div style="margin-top:14px"><a class="btn btn-primary" href="#/policies">View policies</a></div>
           </div></div>`;
@@ -2344,6 +2970,7 @@ async function handleFile(file) {
       <div class="error-box">${esc(err.message)}</div></div></div>`;
   }
 }
+
 
 /* ------------------------------ settings ----------------------------- */
 
@@ -2644,6 +3271,8 @@ const VIEWS = {
   policies: policiesView,
   policy: policyView,
   servicing: servicingView,
+  opportunities: opportunitiesView,
+  opportunity: opportunityView,
   maturities: maturitiesView,
   insureds: insuredsView,
   investors: investorsView,
@@ -2665,6 +3294,7 @@ async function render() {
   const view = VIEWS[state.route] || dashboardView;
   app.innerHTML = shell('<div class="empty"><span class="spin"></span></div>');
   wireShell();
+  refreshOppCount();
 
   try {
     const out = await view();

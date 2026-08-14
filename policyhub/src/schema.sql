@@ -391,3 +391,99 @@ BEGIN
     PERFORM apply_policy_maturity(r.id);
   END LOOP;
 END $$;
+
+-- ---------------------------------------------------------------------
+--  Opportunities
+--
+--  A policy being offered, not one that is owned. Deliberately its own
+--  table rather than a row in `policies`: a deal that may never close
+--  must not reach the dashboard, the IRR reports or the maturities
+--  register, and keeping it separate means no query has to remember to
+--  exclude it. On funding it is converted into a real policy.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS opportunities (
+  id                 SERIAL PRIMARY KEY,
+  policy_number      TEXT NOT NULL DEFAULT '',
+  carrier_name       TEXT NOT NULL DEFAULT '',
+  product_type       TEXT NOT NULL DEFAULT '',
+  face_amount        NUMERIC(16,2),
+
+  -- The insured is held here rather than in `insureds`: these are people
+  -- whose policies we do not own, and they should not appear in the
+  -- insureds directory unless and until the deal closes.
+  insured_last_name  TEXT NOT NULL DEFAULT '',
+  insured_first_name TEXT NOT NULL DEFAULT '',
+  insured_dob        DATE,
+  insured_gender     TEXT,
+  insured_state      TEXT,
+  le_months          INTEGER,
+  le_provider        TEXT NOT NULL DEFAULT '',
+  le_date            DATE,
+
+  asking_price       NUMERIC(16,2),        -- the price for the whole policy
+  annual_premium     NUMERIC(16,2),        -- used when no schedule is posted
+  expected_close     DATE,                 -- when the money would go out
+  offer_closes_on    DATE,                 -- when the offer expires
+
+  fund_id            INTEGER REFERENCES funds(id) ON DELETE SET NULL,
+  status             TEXT NOT NULL DEFAULT 'Open',  -- Open | Closed | Withdrawn | Funded
+  policy_id          INTEGER REFERENCES policies(id) ON DELETE SET NULL,
+  notes              TEXT NOT NULL DEFAULT '',
+  created_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_opportunities_status ON opportunities (status);
+CREATE INDEX IF NOT EXISTS idx_opportunities_fund ON opportunities (fund_id);
+
+-- The premium schedule as offered. Beyond its last row the projection
+-- continues at the same annual rate, which the analysis states on its face.
+CREATE TABLE IF NOT EXISTS opportunity_premiums (
+  id             SERIAL PRIMARY KEY,
+  opportunity_id INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  due_date       DATE NOT NULL,
+  amount         NUMERIC(16,2) NOT NULL,
+  notes          TEXT NOT NULL DEFAULT '',
+  UNIQUE (opportunity_id, due_date)
+);
+CREATE INDEX IF NOT EXISTS idx_opp_premiums ON opportunity_premiums (opportunity_id, due_date);
+
+-- Who has been shown it. An investor sees nothing that is not listed here.
+CREATE TABLE IF NOT EXISTS opportunity_shares (
+  opportunity_id INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  investor_id    INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  shared_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  shared_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  PRIMARY KEY (opportunity_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opp_shares_investor ON opportunity_shares (investor_id);
+
+-- What an investor has asked for. A request holds the percentage from the
+-- moment it is made — that is what makes the remaining figure honest — but
+-- it is not an allocation until somebody confirms it.
+CREATE TABLE IF NOT EXISTS opportunity_commitments (
+  id             SERIAL PRIMARY KEY,
+  opportunity_id INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  investor_id    INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  pct            NUMERIC(9,6) NOT NULL CHECK (pct > 0 AND pct <= 100),
+  status         TEXT NOT NULL DEFAULT 'Requested',  -- Requested | Confirmed | Declined | Withdrawn
+  requested_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at     TIMESTAMPTZ,
+  decided_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  notes          TEXT NOT NULL DEFAULT '',
+  UNIQUE (opportunity_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opp_commit ON opportunity_commitments (opportunity_id, status);
+CREATE INDEX IF NOT EXISTS idx_opp_commit_investor ON opportunity_commitments (investor_id);
+
+-- Percentage spoken for: requests count, because a request holds the space
+-- until it is decided. Declined and withdrawn ones release it.
+CREATE OR REPLACE VIEW opportunity_taken AS
+SELECT o.id AS opportunity_id,
+       COALESCE(SUM(c.pct) FILTER (WHERE c.status IN ('Requested','Confirmed')), 0) AS taken_pct,
+       COALESCE(SUM(c.pct) FILTER (WHERE c.status = 'Confirmed'), 0)                AS confirmed_pct,
+       COALESCE(SUM(c.pct) FILTER (WHERE c.status = 'Requested'), 0)                AS requested_pct,
+       COUNT(*) FILTER (WHERE c.status IN ('Requested','Confirmed'))::int           AS investor_count
+  FROM opportunities o
+  LEFT JOIN opportunity_commitments c ON c.opportunity_id = o.id
+ GROUP BY o.id;

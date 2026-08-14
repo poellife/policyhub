@@ -652,3 +652,76 @@ table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-n
   .card { border: none !important; }
 }
 
+
+/* --------------------------- opportunities ---------------------------
+   The only place in the interface that is deliberately loud. A live
+   offer with a deadline and a shrinking remainder is genuinely urgent,
+   and the design system's restraint would bury it. The emphasis is
+   earned by the data — a count, a deadline, a bar that is filling —
+   never by decoration.
+   -------------------------------------------------------------------- */
+
+.nav a.has-badge { color: var(--text-primary); font-weight: 600; }
+.nav-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; margin-left: 7px; padding: 0 5px;
+  border-radius: var(--pill);
+  background: var(--accent); color: var(--accent-ink);
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0; vertical-align: middle;
+}
+
+.opp-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+/* A live offer gets a heavier left edge; a closed one does not. */
+.opp-card.live { border-left: 3px solid var(--accent); }
+.opp-card.urgent { border-left-color: var(--serious); }
+.opp-card.gone { opacity: .62; }
+
+.opp-head { display: flex; align-items: flex-start; gap: 16px; padding: 18px 20px 14px; flex-wrap: wrap; }
+.opp-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 3px; }
+.opp-sub { color: var(--text-muted); font-size: 13px; }
+.opp-head .spacer { flex: 1; }
+
+.opp-figures {
+  display: grid; gap: 1px; background: var(--border);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+}
+.opp-figures > div { background: var(--surface-1); padding: 13px 20px; }
+.opp-figures .label {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.09em; color: var(--text-muted); margin-bottom: 4px;
+}
+.opp-figures .value { font-size: 19px; font-weight: 600; letter-spacing: -0.02em; }
+.opp-figures .note { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+
+/* Taken versus remaining. One hue, two shades — the same ramp as the
+   charts, so a filling bar reads the same way a bar chart does. */
+.opp-bar { height: 8px; background: var(--grid); border-radius: var(--pill); overflow: hidden; }
+.opp-bar > span { display: block; height: 100%; background: var(--series-1); border-radius: var(--pill); }
+.opp-bar.urgent > span { background: var(--serious); }
+.opp-remaining { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+.opp-remaining strong { font-size: 17px; letter-spacing: -0.02em; }
+.opp-remaining .muted { font-size: 12.5px; }
+
+.opp-deadline {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.08em; padding: 4px 10px; border-radius: var(--pill);
+  border: 1px solid var(--border-strong); color: var(--text-secondary);
+}
+.opp-deadline.soon { border-color: var(--serious); color: var(--serious); font-weight: 600; }
+.opp-deadline.closed { border-color: var(--border); color: var(--text-muted); }
+
+.opp-take { padding: 16px 20px; border-top: 1px solid var(--border); background: var(--sunken); }
+.opp-take .field-row { align-items: flex-end; }
+
+.scenario-table th.at-le, .scenario-table td.at-le {
+  background: var(--sunken); font-weight: 600;
+}

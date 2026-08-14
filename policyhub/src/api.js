@@ -3,7 +3,8 @@ import express from 'express';
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
 import { analyzeFlows, ledgerFlows, today } from '../public/irr.js';
-import { q, audit } from './db.js';
+import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
+import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
 
@@ -695,6 +696,471 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     scopedToInvestor: scope !== null,
   });
 }));
+
+
+/* ------------------------------------------------------------------ *
+ * Opportunities
+ *
+ * A policy being offered rather than owned. Managers and above create
+ * them, choose which investors see each one, and confirm the requests
+ * that come back. An investor sees only what has been shared with them,
+ * how much is left, and what the return looks like if the insured lives
+ * two years past life expectancy.
+ * ------------------------------------------------------------------ */
+
+const oppEdit = requireRole('admin', 'editor', 'manager');
+
+/** The entity filter for opportunities, mirroring the policy rules. */
+const oppFundScope = (req) => (isManager(req) ? (req.user.fundIds?.length ? req.user.fundIds : [-1]) : null);
+
+/**
+ * Can this caller see this opportunity at all?
+ * Investors: only if it has been shared with them and is still open.
+ * Managers: only inside their entities. Everyone else: yes.
+ */
+async function oppVisible(req, id) {
+  const { rows } = await q(
+    `SELECT o.id, o.fund_id, o.status,
+            EXISTS (SELECT 1 FROM opportunity_shares s
+                     WHERE s.opportunity_id = o.id AND s.investor_id = $2) AS shared
+       FROM opportunities o WHERE o.id = $1`,
+    [id, scopeId(req) ?? -1]
+  );
+  const o = rows[0];
+  if (!o) return null;
+  if (isInvestor(req)) return o.shared && o.status === 'Open' ? o : null;
+  const funds = oppFundScope(req);
+  if (funds && !funds.includes(o.fund_id)) return null;
+  return o;
+}
+
+const OPP_FIELDS = {
+  policy_number: str, carrier_name: str, product_type: str, face_amount: num,
+  insured_last_name: str, insured_first_name: str, insured_dob: date,
+  insured_gender: str, insured_state: str,
+  le_months: int, le_provider: str, le_date: date,
+  asking_price: num, annual_premium: num, expected_close: date, offer_closes_on: date,
+  fund_id: int, status: str, notes: str,
+};
+
+/** Everything an opportunity carries, with its analysis. */
+async function loadOpportunity(req, id) {
+  const { rows } = await q(
+    `SELECT o.*, f.code AS fund_code,
+            t.taken_pct, t.confirmed_pct, t.requested_pct, t.investor_count
+       FROM opportunities o
+       LEFT JOIN funds f ON f.id = o.fund_id
+       LEFT JOIN opportunity_taken t ON t.opportunity_id = o.id
+      WHERE o.id = $1`, [id]);
+  const o = rows[0];
+  if (!o) return null;
+
+  const [prem, shares, commits] = await Promise.all([
+    q('SELECT * FROM opportunity_premiums WHERE opportunity_id = $1 ORDER BY due_date', [id]),
+    q(`SELECT s.investor_id, i.name FROM opportunity_shares s
+         JOIN investors i ON i.id = s.investor_id
+        WHERE s.opportunity_id = $1 ORDER BY i.name`, [id]),
+    q(`SELECT c.*, i.name AS investor_name FROM opportunity_commitments c
+         JOIN investors i ON i.id = c.investor_id
+        WHERE c.opportunity_id = $1 ORDER BY c.requested_at`, [id]),
+  ]);
+
+  o.premiums = prem.rows;
+  o.taken_pct = Number(o.taken_pct) || 0;
+  o.confirmed_pct = Number(o.confirmed_pct) || 0;
+  o.remaining_pct = Math.max(0, 100 - o.taken_pct);
+
+  const me = scopeId(req);
+  if (me === null) {
+    o.shares = shares.rows;
+    o.commitments = commits.rows;
+  } else {
+    // An investor sees their own line and nothing about anybody else —
+    // the same rule the policy cap table follows.
+    o.shares = undefined;
+    o.commitments = commits.rows.filter((c) => c.investor_id === me)
+      .map((c) => ({ id: c.id, pct: Number(c.pct), status: c.status,
+                     requested_at: c.requested_at, notes: c.notes }));
+    o.my_commitment = o.commitments[0] || null;
+  }
+
+  const share = me === null ? 1 : (Number(o.my_commitment?.pct) || 0) / 100;
+  o.analysis = analyseOpportunity(o, 1);
+  // Alongside the whole-policy figures, what their own slice would cost.
+  o.my_analysis = share > 0 ? analyseOpportunity(o, share) : null;
+  return o;
+}
+
+router.get('/opportunities', wrap(async (req, res) => {
+  const me = scopeId(req);
+  const funds = oppFundScope(req);
+  const { rows } = await q(
+    `SELECT o.id, o.policy_number, o.carrier_name, o.product_type, o.face_amount,
+            o.insured_last_name, o.insured_first_name, o.insured_dob, o.insured_gender,
+            o.insured_state, o.le_months, o.le_date, o.asking_price, o.annual_premium,
+            o.expected_close, o.offer_closes_on, o.status, o.fund_id, o.notes,
+            o.created_at, f.code AS fund_code,
+            COALESCE(t.taken_pct, 0)      AS taken_pct,
+            COALESCE(t.confirmed_pct, 0)  AS confirmed_pct,
+            (SELECT COUNT(*)::int FROM opportunity_shares s WHERE s.opportunity_id = o.id) AS shared_with,
+            (SELECT c.pct FROM opportunity_commitments c
+              WHERE c.opportunity_id = o.id AND c.investor_id = $1
+                AND c.status IN ('Requested','Confirmed')) AS my_pct,
+            (SELECT c.status FROM opportunity_commitments c
+              WHERE c.opportunity_id = o.id AND c.investor_id = $1) AS my_status
+       FROM opportunities o
+       LEFT JOIN funds f ON f.id = o.fund_id
+       LEFT JOIN opportunity_taken t ON t.opportunity_id = o.id
+      WHERE ($1::int IS NULL OR (o.status = 'Open' AND EXISTS (
+               SELECT 1 FROM opportunity_shares s
+                WHERE s.opportunity_id = o.id AND s.investor_id = $1)))
+        AND ($2::int[] IS NULL OR o.fund_id = ANY($2))
+      ORDER BY (o.status = 'Open') DESC, o.offer_closes_on NULLS LAST, o.created_at DESC`,
+    [me, funds]
+  );
+
+  // Pull every schedule in one query: an IRR computed from the stated
+  // annual premium would not match the one on the detail page, and two
+  // different numbers for the same deal is worse than none.
+  const { rows: prem } = rows.length
+    ? await q(`SELECT opportunity_id, due_date, amount FROM opportunity_premiums
+                WHERE opportunity_id = ANY($1) ORDER BY due_date`, [rows.map((r) => r.id)])
+    : { rows: [] };
+  const schedules = new Map();
+  for (const p of prem) {
+    if (!schedules.has(p.opportunity_id)) schedules.set(p.opportunity_id, []);
+    schedules.get(p.opportunity_id).push(p);
+  }
+
+  const list = rows.map((o) => {
+    const taken = Number(o.taken_pct) || 0;
+    const withPremiums = { ...o, premiums: schedules.get(o.id) || [] };
+    const a = analyseOpportunity(withPremiums, 1);
+    return {
+      ...o,
+      taken_pct: taken,
+      remaining_pct: Math.max(0, 100 - taken),
+      irr_at_le: a.base?.irr ?? null,
+      matures_on: a.base?.matures_on ?? null,
+      shared_with: me === null ? o.shared_with : undefined,
+    };
+  });
+  res.json(list);
+}));
+
+/** Just the count, for the badge in the menu. */
+router.get('/opportunities/summary', wrap(async (req, res) => {
+  const me = scopeId(req);
+  const funds = oppFundScope(req);
+  const { rows } = await q(
+    `SELECT COUNT(*)::int AS open,
+            COUNT(*) FILTER (WHERE c.id IS NULL)::int AS undecided
+       FROM opportunities o
+       LEFT JOIN opportunity_commitments c
+              ON c.opportunity_id = o.id AND c.investor_id = $1
+      WHERE o.status = 'Open'
+        AND ($1::int IS NULL OR EXISTS (SELECT 1 FROM opportunity_shares s
+              WHERE s.opportunity_id = o.id AND s.investor_id = $1))
+        AND ($2::int[] IS NULL OR o.fund_id = ANY($2))`,
+    [me, funds]
+  );
+  // For an investor the badge counts what they have not answered yet; for
+  // staff it counts what is live.
+  res.json({ open: rows[0].open, undecided: me === null ? rows[0].open : rows[0].undecided });
+}));
+
+router.get('/opportunities/:id', wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const o = await loadOpportunity(req, req.params.id);
+  if (!o) return res.status(404).json({ error: 'Opportunity not found' });
+  res.json(o);
+}));
+
+router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => {
+  const funds = oppFundScope(req);
+  const fundId = int(req.body.fund_id);
+  if (funds && !funds.includes(fundId))
+    return res.status(403).json({ error: 'Choose one of your own owner entities' });
+  if (!str(req.body.insured_last_name) && !str(req.body.policy_number))
+    return res.status(400).json({ error: 'A policy number or an insured last name is required' });
+
+  const { cols, vals } = buildSet(OPP_FIELDS, req.body);
+  cols.push('created_by'); vals.push(req.user.uid);
+  const ph = cols.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await q(
+    `INSERT INTO opportunities (${cols.join(',')}) VALUES (${ph}) RETURNING *`, vals);
+  await audit(req.user.uid, 'opportunity', rows[0].id, 'create',
+    `${rows[0].policy_number || rows[0].insured_last_name} · ${rows[0].carrier_name}`);
+  res.status(201).json(rows[0]);
+}));
+
+router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const funds = oppFundScope(req);
+  if (funds && 'fund_id' in req.body && !funds.includes(int(req.body.fund_id)))
+    return res.status(403).json({ error: 'That owner entity is not one of yours' });
+
+  const { sets, vals, next } = buildSet(OPP_FIELDS, req.body);
+  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+  const { rows } = await q(
+    `UPDATE opportunities SET ${sets.join(',')}, updated_at = now() WHERE id = $${next} RETURNING *`,
+    [...vals, req.params.id]);
+  await audit(req.user.uid, 'opportunity', rows[0].id, 'update', sets.join(','));
+  res.json(rows[0]);
+}));
+
+router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const { rows } = await q('SELECT * FROM opportunities WHERE id = $1', [req.params.id]);
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'delete',
+      `${rows[0].policy_number || rows[0].insured_last_name} · ${rows[0].carrier_name}`);
+    await q('DELETE FROM opportunities WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  }));
+
+/* ------------------------- premium schedule ------------------------- */
+
+router.post('/opportunities/:id/premiums', blockInvestors, oppEdit, wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const due = date(req.body.due_date);
+  const amount = num(req.body.amount);
+  if (!due) return res.status(400).json({ error: 'A due date is required' });
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'An amount is required' });
+  const { rows } = await q(
+    `INSERT INTO opportunity_premiums (opportunity_id, due_date, amount, notes)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (opportunity_id, due_date) DO UPDATE SET amount = EXCLUDED.amount
+     RETURNING *`,
+    [req.params.id, due, amount, str(req.body.notes)]);
+  res.status(201).json(rows[0]);
+}));
+
+/** Lay out a whole schedule at once — the usual way one is entered. */
+router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const start = date(req.body.start_date);
+  const amount = num(req.body.amount);
+  const years = Math.min(40, Math.max(1, int(req.body.years) || 10));
+  const growth = Number(req.body.growth_pct) || 0;
+  if (!start || !amount) return res.status(400).json({ error: 'A start date and amount are required' });
+  if (req.body.replace) await q('DELETE FROM opportunity_premiums WHERE opportunity_id = $1', [req.params.id]);
+
+  let written = 0;
+  for (let n = 0; n < years; n++) {
+    const due = addMonths(start, 12 * n);
+    const amt = Math.round(amount * (1 + growth / 100) ** n * 100) / 100;
+    await q(
+      `INSERT INTO opportunity_premiums (opportunity_id, due_date, amount)
+       VALUES ($1,$2,$3) ON CONFLICT (opportunity_id, due_date) DO UPDATE SET amount = EXCLUDED.amount`,
+      [req.params.id, due, amt]);
+    written++;
+  }
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+    `premium schedule: ${written} years from ${start}`);
+  res.json({ ok: true, written });
+}));
+
+router.delete('/opportunity-premiums/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
+  const { rows } = await q('SELECT opportunity_id FROM opportunity_premiums WHERE id = $1', [req.params.id]);
+  if (!rows[0] || !(await oppVisible(req, rows[0].opportunity_id)))
+    return res.status(404).json({ error: 'Not found' });
+  await q('DELETE FROM opportunity_premiums WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+/* ---------------------------- sharing ------------------------------- */
+
+/** Replace the list of investors who can see this. */
+router.put('/opportunities/:id/shares', blockInvestors, oppEdit, wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const ids = (Array.isArray(req.body.investor_ids) ? req.body.investor_ids : [])
+    .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+
+  // Someone who has already asked for a piece cannot be un-shared out from
+  // under their own request; that would leave a commitment nobody can see.
+  const { rows: held } = await q(
+    `SELECT investor_id FROM opportunity_commitments
+      WHERE opportunity_id = $1 AND status IN ('Requested','Confirmed')`, [req.params.id]);
+  const locked = held.map((r) => r.investor_id);
+  const missing = locked.filter((id) => !ids.includes(id));
+  if (missing.length)
+    return res.status(400).json({
+      error: 'Those investors have already asked for a piece — decline their request before removing them.' });
+
+  await q('DELETE FROM opportunity_shares WHERE opportunity_id = $1 AND investor_id <> ALL($2)',
+    [req.params.id, ids.length ? ids : [-1]]);
+  for (const id of ids)
+    await q(`INSERT INTO opportunity_shares (opportunity_id, investor_id, shared_by)
+             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [req.params.id, id, req.user.uid]);
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+    `shared with ${ids.length} investor(s)`);
+  res.json({ ok: true, shared_with: ids.length });
+}));
+
+/* --------------------------- commitments ---------------------------- */
+
+/**
+ * An investor asks for a percentage.
+ *
+ * Taken inside a transaction that locks the opportunity row: two people
+ * clicking at the same moment must not between them take 130% of a policy.
+ */
+router.post('/opportunities/:id/commit', wrap(async (req, res) => {
+  const me = scopeId(req);
+  if (me === null)
+    return res.status(403).json({ error: 'Only an investor account can take a share' });
+  const pct = num(req.body.pct);
+  if (!pct || pct <= 0) return res.status(400).json({ error: 'Enter the percentage you want' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: lock } = await client.query(
+      `SELECT o.id, o.status, o.offer_closes_on
+         FROM opportunities o WHERE o.id = $1 FOR UPDATE`, [req.params.id]);
+    const o = lock[0];
+    if (!o) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Opportunity not found' }); }
+
+    const { rows: sh } = await client.query(
+      'SELECT 1 FROM opportunity_shares WHERE opportunity_id = $1 AND investor_id = $2',
+      [o.id, me]);
+    if (!sh[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Opportunity not found' }); }
+    if (o.status !== 'Open') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This opportunity is no longer open' });
+    }
+    if (o.offer_closes_on && String(o.offer_closes_on).slice(0, 10) < today()) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'The offer period for this opportunity has closed' });
+    }
+
+    const { rows: sum } = await client.query(
+      `SELECT COALESCE(SUM(pct),0) AS taken FROM opportunity_commitments
+        WHERE opportunity_id = $1 AND status IN ('Requested','Confirmed') AND investor_id <> $2`,
+      [o.id, me]);
+    const remaining = 100 - Number(sum[0].taken);
+    if (pct > remaining + 1e-9) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: remaining <= 0
+          ? 'This opportunity has just been fully spoken for.'
+          : `Only ${remaining.toFixed(remaining % 1 ? 4 : 0)}% is still available.`,
+        remaining_pct: Math.max(0, remaining),
+      });
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO opportunity_commitments (opportunity_id, investor_id, pct, notes)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (opportunity_id, investor_id) DO UPDATE
+         SET pct = EXCLUDED.pct, status = 'Requested', notes = EXCLUDED.notes,
+             requested_at = now(), decided_at = NULL, decided_by = NULL
+       RETURNING *`,
+      [o.id, me, pct, str(req.body.notes)]);
+    await client.query('COMMIT');
+    await audit(req.user.uid, 'opportunity', o.id, 'update', `investor ${me} requested ${pct}%`);
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}));
+
+/** An investor changes their mind before it is confirmed. */
+router.delete('/opportunities/:id/commit', wrap(async (req, res) => {
+  const me = scopeId(req);
+  if (me === null) return res.status(403).json({ error: 'Not an investor account' });
+  const { rows } = await q(
+    `UPDATE opportunity_commitments SET status = 'Withdrawn', decided_at = now()
+      WHERE opportunity_id = $1 AND investor_id = $2 AND status = 'Requested'
+      RETURNING id`, [req.params.id, me]);
+  if (!rows[0])
+    return res.status(409).json({ error: 'That request has already been decided — speak to your manager.' });
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update', `investor ${me} withdrew`);
+  res.json({ ok: true });
+}));
+
+/** A manager confirms or declines a request. */
+router.put('/opportunity-commitments/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
+  const decision = str(req.body.status);
+  if (!['Confirmed', 'Declined'].includes(decision))
+    return res.status(400).json({ error: 'Decision must be Confirmed or Declined' });
+  const { rows: cur } = await q(
+    'SELECT * FROM opportunity_commitments WHERE id = $1', [req.params.id]);
+  if (!cur[0] || !(await oppVisible(req, cur[0].opportunity_id)))
+    return res.status(404).json({ error: 'Not found' });
+
+  const { rows } = await q(
+    `UPDATE opportunity_commitments
+        SET status = $1, decided_at = now(), decided_by = $2, notes = COALESCE(NULLIF($3,''), notes)
+      WHERE id = $4 RETURNING *`,
+    [decision, req.user.uid, str(req.body.notes), req.params.id]);
+  await audit(req.user.uid, 'opportunity', cur[0].opportunity_id, 'update',
+    `${decision.toLowerCase()} ${cur[0].pct}% for investor ${cur[0].investor_id}`);
+  res.json(rows[0]);
+}));
+
+/**
+ * Turn a closed deal into a real policy.
+ *
+ * Creates the policy and its insured, seeds the ledger with the purchase
+ * price, and writes the cap table from the confirmed commitments — so the
+ * book of record starts out matching what was actually agreed, with no
+ * re-keying.
+ */
+router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const o = await loadOpportunity(req, req.params.id);
+    if (o.policy_id) return res.status(409).json({ error: 'This opportunity has already been funded' });
+    if (!str(o.policy_number) || !str(o.carrier_name))
+      return res.status(400).json({ error: 'A policy number and carrier are needed before funding' });
+
+    const insuredId = await resolveInsured({
+      insured_last_name: o.insured_last_name, insured_first_name: o.insured_first_name,
+      dob: o.insured_dob, gender: o.insured_gender, state: o.insured_state,
+      le_months: o.le_months, le_provider: o.le_provider, le_date: o.le_date,
+    });
+    const acquired = date(req.body.acquisition_date) || o.expected_close || today();
+
+    const { rows: pol } = await q(
+      `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
+                             insured_id, fund_id, status, premium_required, premium_mode,
+                             acquisition_date, acquisition_cost, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10) RETURNING id, policy_number`,
+      [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
+       o.annual_premium, acquired, o.asking_price, o.notes]);
+    const policyId = pol[0].id;
+
+    if (Number(o.asking_price))
+      await q(`INSERT INTO transactions (policy_id, txn_date, txn_type, amount, remarks, source)
+               VALUES ($1,$2,'Acquisition Cost',$3,'Funded from opportunity','app')`,
+        [policyId, acquired, o.asking_price]);
+
+    let allocated = 0;
+    for (const c of o.commitments.filter((x) => x.status === 'Confirmed')) {
+      await q(`INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
+               VALUES ($1,$2,$3,$4,'From opportunity') ON CONFLICT DO NOTHING`,
+        [policyId, c.investor_id, c.pct, acquired]);
+      allocated++;
+    }
+
+    await q(`UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
+              WHERE id = $2`, [policyId, req.params.id]);
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `funded as policy ${pol[0].policy_number} with ${allocated} allocation(s)`);
+    res.status(201).json({ policy_id: policyId, allocations: allocated });
+  }));
 
 /* ------------------------------------------------------------------ *
  * internal rate of return

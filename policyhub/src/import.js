@@ -1,6 +1,7 @@
 import { parse } from 'csv-parse/sync';
 import { q, audit } from './db.js';
 import { resolveInsured, resolveFund, date, num, int, str } from './api.js';
+import { readWorkbook, sheetToObjects, isXlsx } from './xlsx.js';
 
 /* ------------------------------------------------------------------ *
  * Header normalisation & aliases
@@ -82,7 +83,8 @@ function mapRow(raw) {
 /** Well beyond any real file, and low enough to bound one request's memory. */
 export const MAX_ROWS = 25000;
 
-export function parseCsv(buffer) {
+/** Header-keyed rows, before alias mapping — the master reader needs both. */
+export function parseCsvRaw(buffer) {
   const text = buffer.toString('utf8').replace(/^﻿/, '');
   const records = parse(text, {
     columns: true,
@@ -99,7 +101,11 @@ export function parseCsv(buffer) {
     e.status = 400;
     throw e;
   }
-  return records.map(mapRow);
+  return records;
+}
+
+export function parseCsv(buffer) {
+  return parseCsvRaw(buffer).map(mapRow);
 }
 
 /* ------------------------------------------------------------------ *
@@ -388,6 +394,110 @@ async function importTransactions(rows, opts = {}) {
  * transaction can appear above the policy it belongs to and still land.
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Reading whatever was uploaded
+ *
+ * A CSV is one table. A workbook is several, and the sheets carry meaning
+ * of their own — a tab called "2975464 Premiums" is that policy's ledger,
+ * even though not one row inside it names the policy.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A premium-history tab, as people actually keep them: a date column, an
+ * amount column, and nothing else. No policy number (it is the tab name)
+ * and no transaction type (they are all premiums).
+ *
+ * Recognising this shape is the difference between "one file, technically"
+ * and a file somebody can actually export from what they already have.
+ */
+function looksLikePremiumHistory(rows) {
+  if (!rows.length) return false;
+  const dated = rows.filter((r) => r.txn_date !== undefined).length;
+  if (dated < Math.max(2, rows.length * 0.6)) return false;
+  const hasAmount = rows.some((r) => r.amount !== undefined);
+  const hasPremium = rows.some((r) => r.premium_required !== undefined);
+  // Identity columns would make it a policy sheet, not a ledger.
+  const identity = rows.some((r) =>
+    r.carrier_name !== undefined || r.face_amount !== undefined || r.dob !== undefined);
+  return !identity && (hasAmount || hasPremium);
+}
+
+/** Pull a policy number out of a sheet name like "2975464 Premiums". */
+function policyNumberFromSheet(name) {
+  const cleaned = String(name || '')
+    .replace(/\b(premium|premiums|history|ledger|payments|transactions|txns|values|value)\b/gi, '')
+    .replace(/[()\-–—]+$/g, '')
+    .trim();
+  const token = cleaned.split(/\s+/).filter(Boolean).pop();
+  return token && /[0-9]/.test(token) ? token : (cleaned || null);
+}
+
+/**
+ * Everything uploaded, flattened into rows that remember where they came
+ * from. With several files and several tabs, "line 12" on its own is not
+ * an error message anybody can act on.
+ */
+export function readUploads(files) {
+  const entries = [];
+  const sources = [];
+  let declared = false;
+
+  for (const f of files) {
+    const name = f.originalname || f.name || 'upload';
+    const tables = isXlsx(name)
+      ? readWorkbook(f.buffer).map((s) => ({ sheet: s.name, ...sheetToObjects(s.rows) }))
+      : [{ sheet: null, objects: parseCsvWithLines(f.buffer) }];
+
+    for (const table of tables) {
+      const mapped = table.objects.map(({ obj, line }) => ({ row: mapRow(obj), line }));
+      // Whether the person labelled their rows has to be judged before any
+      // are labelled on their behalf below.
+      if (mapped.some((m) => str(m.row.record_type) !== '')) declared = true;
+      if (!mapped.length) {
+        sources.push({ file: name, sheet: table.sheet, rows: 0, note: 'no data rows' });
+        continue;
+      }
+
+      // A ledger tab named after its policy: give every row that number and
+      // the type they all share, then say so in the preview.
+      let note = null;
+      const bareRows = mapped.map((m) => m.row);
+      if (table.sheet && !bareRows.some((r) => str(r.policy_number)) && looksLikePremiumHistory(bareRows)) {
+        const pn = policyNumberFromSheet(table.sheet);
+        if (pn) {
+          // Spreadsheets end in a Total line. It is a footer, not a payment,
+          // and the date column holds the word "Total" rather than a date.
+          const footers = [];
+          for (let i = mapped.length - 1; i >= 0; i--) {
+            if (date(mapped[i].row.txn_date)) break;
+            footers.push(...mapped.splice(i, 1));
+          }
+          for (const { row } of mapped) {
+            row.policy_number = pn;
+            if (row.amount === undefined && row.premium_required !== undefined) {
+              row.amount = row.premium_required;
+              delete row.premium_required;
+            }
+            if (row.txn_type === undefined) row.txn_type = 'Premium Payment';
+            row.record_type = row.record_type || 'Transaction';
+          }
+          note = `read as premium history for policy "${pn}"`
+            + (footers.length ? `, ${footers.length} total row${footers.length === 1 ? '' : 's'} ignored` : '');
+        }
+      }
+
+      sources.push({ file: name, sheet: table.sheet, rows: mapped.length, note });
+      for (const m of mapped) entries.push({ ...m, file: name, sheet: table.sheet });
+    }
+  }
+  return { entries, sources, declared };
+}
+
+/** CSV rows with their real line numbers (header is line 1). */
+function parseCsvWithLines(buffer) {
+  return parseCsvRaw(buffer).map((obj, i) => ({ obj, line: i + 2 }));
+}
+
 const RECORD_TYPES = {
   policy: 'policy', policies: 'policy', p: 'policy',
   insured: 'insured', insureds: 'insured', person: 'insured', life: 'life',
@@ -498,7 +608,7 @@ async function importLifeRow(row, allowedFunds) {
  * values, then the ledger. Original line numbers travel with every row so an
  * error points at the line in the file the person is looking at.
  */
-async function importMaster(rows, opts, user) {
+async function importMaster(entries, opts, user) {
   const allowedFunds = opts.fundScope || null;
   const result = {
     created: 0, updated: 0, values: 0, skipped: 0, errors: [],
@@ -506,17 +616,22 @@ async function importMaster(rows, opts, user) {
   };
 
   const buckets = { policy: [], insured: [], life: [], value: [], transaction: [] };
-  rows.forEach((row, i) => {
-    const line = i + 2;
-    const { type, error } = classifyRow(row);
+  for (const entry of entries) {
+    const { type, error } = classifyRow(entry.row);
     if (error) {
-      result.errors.push({ line, message: error });
+      result.errors.push({ ...where(entry), message: error });
       result.byType.unclassified++;
-      return;
+      continue;
     }
-    buckets[type].push({ row, line });
+    buckets[type].push(entry);
     result.byType[type]++;
-  });
+  }
+
+  // Errors come back from the sub-importers numbered from 2; map each one
+  // to the file, sheet and line the person is actually looking at.
+  const relocate = (subErrors, bucket) => subErrors.map((e) => ({
+    ...where(bucket[e.line - 2] || {}), message: e.message,
+  }));
 
   // 1. Policies first — everything else hangs off them.
   if (buckets.policy.length) {
@@ -524,19 +639,17 @@ async function importMaster(rows, opts, user) {
     result.created += sub.created;
     result.updated += sub.updated;
     result.values += sub.values;
-    // importPolicies numbers its own rows from 2; map back to the real lines.
-    for (const e of sub.errors)
-      result.errors.push({ line: buckets.policy[e.line - 2]?.line ?? e.line, message: e.message });
+    result.errors.push(...relocate(sub.errors, buckets.policy));
   }
 
   // 2. Person-level detail, 3. additional lives.
   for (const [kind, fn] of [['insured', importInsuredRow], ['life', importLifeRow]]) {
-    for (const { row, line } of buckets[kind]) {
+    for (const entry of buckets[kind]) {
       try {
-        await fn(row, allowedFunds);
+        await fn(entry.row, allowedFunds);
         result.updated++;
       } catch (e) {
-        result.errors.push({ line, message: e.message });
+        result.errors.push({ ...where(entry), message: e.message });
       }
     }
   }
@@ -545,8 +658,7 @@ async function importMaster(rows, opts, user) {
   if (buckets.value.length) {
     const sub = await importValues(buckets.value.map((b) => b.row), opts);
     result.values += sub.values;
-    for (const e of sub.errors)
-      result.errors.push({ line: buckets.value[e.line - 2]?.line ?? e.line, message: e.message });
+    result.errors.push(...relocate(sub.errors, buckets.value));
   }
 
   // 5. The ledger.
@@ -554,67 +666,108 @@ async function importMaster(rows, opts, user) {
     const sub = await importTransactions(buckets.transaction.map((b) => b.row), opts);
     result.created += sub.created;
     result.skipped += sub.skipped || 0;
-    for (const e of sub.errors)
-      result.errors.push({ line: buckets.transaction[e.line - 2]?.line ?? e.line, message: e.message });
+    result.errors.push(...relocate(sub.errors, buckets.transaction));
   }
 
-  result.errors.sort((a, b) => a.line - b.line);
+  result.errors.sort((a, b) =>
+    String(a.file).localeCompare(String(b.file)) || String(a.sheet).localeCompare(String(b.sheet))
+    || (a.line - b.line));
   return result;
 }
 
-export function previewCsv(buffer, type) {
-  const rows = parseCsv(buffer);
-  const recognised = new Set();
-  const unrecognised = new Set();
-  const known = new Set([
-    ...Object.values(ALIASES),
-    'policy_number', 'insured_name', 'carrier_name', 'as_of_date',
-  ]);
-  for (const r of rows.slice(0, 50)) {
-    for (const k of Object.keys(r)) (known.has(k) ? recognised : unrecognised).add(k);
+/** Where a row came from, for an error message somebody can act on. */
+const where = (entry) => ({
+  line: entry.line ?? 0,
+  file: entry.file ?? null,
+  sheet: entry.sheet ?? null,
+});
+
+/**
+ * What is in the upload, before anything is written.
+ *
+ * Reports every file and sheet found, what each row was taken to be, and
+ * anything it could not classify — with the file, tab and line number, so
+ * "line 12" is never left to mean twelve of what.
+ */
+export function previewUpload(files, type) {
+  const { entries, sources, declared } = readUploads(files);
+  if (entries.length > MAX_ROWS) {
+    const e = new Error(
+      `That is ${entries.length.toLocaleString('en-US')} rows across ${files.length} file(s), ` +
+      `more than the ${MAX_ROWS.toLocaleString('en-US')} this will read at once. Split it and import in parts.`);
+    e.status = 400;
+    throw e;
   }
+
+  const known = new Set([...Object.values(ALIASES),
+    'policy_number', 'insured_name', 'carrier_name', 'as_of_date']);
+  const recognised = new Set(), unrecognised = new Set();
+  for (const { row } of entries.slice(0, 400))
+    for (const k of Object.keys(row)) (known.has(k) ? recognised : unrecognised).add(k);
+
   const out = {
     type,
-    rowCount: rows.length,
+    rowCount: entries.length,
+    fileCount: files.length,
+    sources,
     recognised: [...recognised],
     unrecognised: [...unrecognised],
-    sample: rows.slice(0, 8),
+    sample: entries.slice(0, 8).map((e) => e.row),
   };
 
-  // For a mixed file, say what each row was taken to be BEFORE anything is
-  // written. Getting this wrong silently is the whole risk of one-file import.
   if (type === 'master') {
     const byType = { policy: 0, insured: 0, life: 0, value: 0, transaction: 0, unclassified: 0 };
     const problems = [];
-    rows.forEach((r, i) => {
-      const { type: t2, error } = classifyRow(r);
+    for (const entry of entries) {
+      const { type: t2, error } = classifyRow(entry.row);
       if (error) {
         byType.unclassified++;
-        if (problems.length < 20) problems.push({ line: i + 2, message: error });
+        if (problems.length < 20) problems.push({ ...where(entry), message: error });
       } else byType[t2]++;
-    });
+    }
     out.byType = byType;
     out.problems = problems;
-    out.declared = rows.some((r) => str(r.record_type) !== '');
+    out.declared = declared;
   }
   return out;
 }
 
-export async function runImport(buffer, type, opts, user) {
-  const rows = parseCsv(buffer);
-  if (!rows.length) return { created: 0, updated: 0, values: 0, errors: [{ line: 1, message: 'File is empty' }] };
+/** Kept for the single-file callers and the existing tests. */
+export const previewCsv = (buffer, type) =>
+  previewUpload([{ originalname: 'upload.csv', buffer }], type);
+
+export async function runImport(files, type, opts, user) {
+  const list = Array.isArray(files) ? files : [{ originalname: 'upload.csv', buffer: files }];
+  const { entries } = readUploads(list);
+  if (!entries.length)
+    return { created: 0, updated: 0, values: 0, skipped: 0, rowCount: 0,
+             errors: [{ line: 1, message: 'Nothing to import — no data rows found' }] };
+  if (entries.length > MAX_ROWS) {
+    const e = new Error(
+      `That is ${entries.length.toLocaleString('en-US')} rows, more than the ` +
+      `${MAX_ROWS.toLocaleString('en-US')} this will read at once. Split it and import in parts.`);
+    e.status = 400;
+    throw e;
+  }
 
   let result;
-  if (type === 'master') result = await importMaster(rows, opts, user);
-  else if (type === 'values') result = await importValues(rows, opts);
-  else if (type === 'transactions') result = await importTransactions(rows, opts);
-  else result = await importPolicies(rows, opts, user);
+  if (type === 'master') {
+    result = await importMaster(entries, opts, user);
+  } else {
+    // The single-purpose importers take plain rows; carry the provenance
+    // back onto their errors afterwards.
+    const rows = entries.map((e) => e.row);
+    if (type === 'values') result = await importValues(rows, opts);
+    else if (type === 'transactions') result = await importTransactions(rows, opts);
+    else result = await importPolicies(rows, opts, user);
+    result.errors = result.errors.map((e) => ({ ...where(entries[e.line - 2] || {}), message: e.message }));
+  }
 
-  result.rowCount = rows.length;
+  result.rowCount = entries.length;
   result.skipped = result.skipped || 0;
   await audit(user?.uid, 'import', null, 'import',
-    `${type}: ${result.created} created, ${result.updated} updated, ${result.values} value rows, ` +
-    `${result.skipped} duplicates skipped, ${result.errors.length} errors`);
+    `${type}: ${list.length} file(s), ${result.created} created, ${result.updated} updated, ` +
+    `${result.values} value rows, ${result.skipped} duplicates skipped, ${result.errors.length} errors`);
   return result;
 }
 

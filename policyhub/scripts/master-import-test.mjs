@@ -10,7 +10,12 @@
 
    Idempotent: fixtures use a fixed prefix and are removed first.
    ===================================================================== */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BASE, ADMIN, MANAGER1, login } from './test-config.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const PREFIX = 'MSTR';
 const fails = [];
@@ -27,14 +32,18 @@ const api = (path, opts = {}) => fetch(`${BASE}/api${path}`, {
 });
 const json = async (r) => { try { return await r.json(); } catch { return null; } };
 
-const send = async (csv, { type = 'master', run = true, who = cookie, extra = {} } = {}) => {
+/** Send one CSV string, or a list of {name, body} parts. */
+const send = async (input, { type = 'master', run = true, who = cookie, extra = {} } = {}) => {
+  const parts = typeof input === 'string'
+    ? [{ name: 'master.csv', body: input }] : input;
   const fd = new FormData();
-  fd.append('file', new Blob([csv], { type: 'text/csv' }), 'master.csv');
+  for (const part of parts) fd.append('files', new Blob([part.body]), part.name);
   fd.append('type', type);
   for (const [k, v] of Object.entries(extra)) fd.append(k, v);
   return json(await fetch(`${BASE}/api/import/${run ? 'run' : 'preview'}`,
     { method: 'POST', headers: { Cookie: who }, body: fd }));
 };
+const file = (name) => ({ name, body: fs.readFileSync(path.join(here, '..', 'demo', name)) });
 
 const wipe = async () => {
   for (const status of ['', 'Inforce', 'Matured', 'Lapsed']) {
@@ -230,6 +239,125 @@ check('the transactions importer is unaffected',
   (await send(piecewise, { type: 'transactions' })).created === 1);
 check('and it now skips duplicates too',
   (await send(piecewise, { type: 'transactions' })).skipped === 1);
+
+
+/* ==================================================================== *
+ * An Excel workbook, and several files at once
+ * ==================================================================== */
+console.log('\nA WORKBOOK IS READ TAB BY TAB');
+const wipeWb = async () => {
+  for (const status of ['', 'Inforce', 'Matured']) {
+    for (const p of ((await json(await api(`/policies?status=${status}`))) || [])
+      .filter((x) => x.policy_number.startsWith('WB-'))) {
+      const d = await json(await api(`/policies/${p.id}`));
+      for (const id of [d?.insured_id, ...(d?.additionalInsureds || []).map((x) => x.id)].filter(Boolean))
+        await api(`/insureds/${id}`, { method: 'PUT', body: { date_of_death: null } });
+      await api(`/policies/${p.id}`, { method: 'DELETE', body: { confirm: p.policy_number } });
+    }
+  }
+};
+await wipeWb();
+
+const wbPreview = await send([file('sample-workbook.xlsx')], { run: false });
+const sheetNames = wbPreview.sources.map((s) => s.sheet);
+check('every visible sheet is found',
+  ['Policies', 'Values', 'Lives', 'WB-1001 Premiums', 'WB-1002 Premiums']
+    .every((n) => sheetNames.includes(n)), sheetNames.join(' | '));
+check('the hidden working tab is left out', !sheetNames.includes('Working notes'));
+check('a title row above the header does not become the header',
+  wbPreview.recognised.includes('policy_number') && wbPreview.recognised.includes('carrier_name'));
+check('a premium tab is attributed to its policy',
+  wbPreview.sources.filter((s) => /read as premium history/.test(s.note || '')).length === 2,
+  wbPreview.sources.map((s) => s.note).filter(Boolean).join(' / '));
+check('and its Total footer row is left out, not treated as a payment',
+  wbPreview.sources.filter((s) => /total row/.test(s.note || '')).length === 2,
+  wbPreview.sources.map((s) => s.note).filter(Boolean).join(' / '));
+check('and everything classifies', wbPreview.byType.unclassified === 0,
+  JSON.stringify(wbPreview.byType));
+check('the types were inferred, not declared', wbPreview.declared === false);
+
+const wbRun = await send([file('sample-workbook.xlsx')]);
+check('the workbook imports without error', wbRun.errors.length === 0,
+  wbRun.errors.slice(0, 3).map((e) => `${e.sheet} line ${e.line}: ${e.message}`).join(' | '));
+
+const wbAll = await json(await api('/policies?status='));
+const wb1 = wbAll.find((p) => p.policy_number === 'WB-1001');
+const wb2 = wbAll.find((p) => p.policy_number === 'WB-1002');
+check('both policies exist', !!wb1 && !!wb2);
+
+const wb1d = await json(await api(`/policies/${wb1.id}`));
+check('Excel dates survive as real dates', wb1d.insured_dob === '1937-08-11', wb1d.insured_dob);
+check('the acquisition date came through', wb1d.acquisition_date === '2019-04-09', wb1d.acquisition_date);
+check('the value tab landed', wb1d.values.length === 3, `${wb1d.values.length} snapshots`);
+check('to the cent', wb1d.values.some((v) => Number(v.account_value) === 21150.75));
+const wb1prem = wb1d.transactions.filter((t) => t.txn_type === 'Premium Payment');
+check('the premium tab became six ledger rows', wb1prem.length === 6, `${wb1prem.length}`);
+check('with the right dates', wb1prem.some((t) => t.txn_date === '2023-04-10'));
+check('a trailing Total row is not imported as a payment',
+  !wb1d.transactions.some((t) => String(t.remarks).toLowerCase().includes('total')
+    || Number(t.amount) > 200000 && t.txn_type === 'Premium Payment'),
+  wb1prem.map((t) => t.amount).join(','));
+
+const wb2d = await json(await api(`/policies/${wb2.id}`));
+check('the survivorship life attached', (wb2d.additionalInsureds || []).length === 1);
+check('its own premium tab landed too',
+  wb2d.transactions.filter((t) => t.txn_type === 'Premium Payment').length === 7);
+
+const wbIrr = await json(await api(`/policies/${wb1.id}/irr`));
+check('an IRR falls out immediately', wbIrr.result.irr !== null,
+  `${(wbIrr.result.irr * 100).toFixed(2)}% on $${wbIrr.result.invested.toLocaleString('en-US')}`);
+check('capital invested is acquisition plus every premium',
+  Math.abs(wbIrr.result.invested - (295000 + 26500 + 26500 + 27200 + 28100 + 29000 + 30150)) < 0.01,
+  String(wbIrr.result.invested));
+
+console.log('\nSEVERAL FILES IN ONE GO');
+await wipeWb();
+const multi = await send([
+  file('sample-workbook.xlsx'),
+  { name: 'extra-lives.csv', body:
+    'Record Type,Policy Number,Last Name,First Name,DOB,Role\nLife,WB-1001,Harkness,Paul,03/03/1939,Joint\n' },
+  { name: 'extra-ledger.csv', body:
+    'Policy Number,Transaction Date,Transaction Type,Amount\nWB-1001,06/15/2025,Fee,900\nWB-1002,07/01/2025,Servicing,1500\n' },
+]);
+check('all three files import together', multi.errors.length === 0,
+  multi.errors.slice(0, 3).map((e) => `${e.file}: ${e.message}`).join(' | '));
+const after1 = await json(await api(`/policies/${
+  (await json(await api('/policies?status='))).find((p) => p.policy_number === 'WB-1001').id}`));
+check('rows from a separate CSV attached to a policy from the workbook',
+  after1.transactions.some((t) => t.txn_type === 'Fee' && Number(t.amount) === 900));
+check('and so did the extra life from a third file',
+  (after1.additionalInsureds || []).length === 1);
+
+console.log('\nERRORS NAME THE FILE AND THE TAB');
+const badMulti = await send([
+  { name: 'good.csv', body: 'Policy Number,Carrier Name,Last Name,Basic Face,Owner\nWB-1003,Sample Life,Orphan,500000,LCG1\n' },
+  { name: 'bad.csv', body: 'Policy Number,Transaction Date,Transaction Type,Amount\nNOPE-1,01/01/2024,Fee,10\n' },
+]);
+check('the good file still imports', badMulti.created >= 1);
+check('the error names its file', badMulti.errors[0]?.file === 'bad.csv',
+  JSON.stringify(badMulti.errors[0]));
+check('and its line', badMulti.errors[0]?.line === 2);
+
+const wbErr = await send([file('sample-workbook.xlsx'),
+  { name: 'x.csv', body: 'Policy Number,Notes\nWB-1001,nothing useful\n' }], { run: false });
+check('an unclassifiable row names its file too',
+  wbErr.problems[0]?.file === 'x.csv' && wbErr.problems[0]?.line === 2,
+  JSON.stringify(wbErr.problems[0]));
+
+console.log('\nRE-IMPORTING THE WHOLE DUMP IS STILL SAFE');
+const wb1Now = (await json(await api('/policies?status='))).find((p) => p.policy_number === 'WB-1001');
+const before2 = (await json(await api(`/policies/${wb1Now.id}`))).transactions.length;
+const rerun = await send([file('sample-workbook.xlsx')]);
+const after2 = (await json(await api(`/policies/${wb1Now.id}`))).transactions.length;
+check('no ledger rows are duplicated', after2 === before2, `${before2} → ${after2}`);
+check('and the skips are reported', rerun.skipped >= 6, `${rerun.skipped}`);
+
+await wipeWb();
+for (const status of ['', 'Inforce']) {
+  for (const p of ((await json(await api(`/policies?status=${status}`))) || [])
+    .filter((x) => x.policy_number === 'WB-1003'))
+    await api(`/policies/${p.id}`, { method: 'DELETE', body: { confirm: p.policy_number } });
+}
 
 await wipe();
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL MASTER IMPORT CHECKS PASSED');

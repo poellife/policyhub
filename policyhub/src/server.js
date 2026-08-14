@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import { initDb, explainDbError } from './db.js';
 import api, { wrap } from './api.js';
 import { authenticate, requireRole } from './auth.js';
-import { previewCsv, runImport, TEMPLATES } from './import.js';
+import { previewUpload, runImport, TEMPLATES } from './import.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -41,13 +41,16 @@ app.get('/api/health', (req, res) =>
 app.use('/api', api);
 
 /* ------------------------- CSV import routes ------------------------ */
-// 5 MB is roughly 40,000 policy rows — far more than this book will ever hold,
-// and small enough that a handful of concurrent uploads cannot exhaust a
-// 512 MB instance. multer buffers in memory, so this cap is the memory cap.
+// 5 MB a file, up to 20 files — a whole data dump can arrive in one go, while
+// no single request can exhaust a 512 MB instance. multer buffers in memory,
+// so these caps are the memory cap.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 8 },
+  limits: { fileSize: 5 * 1024 * 1024, files: 20, fields: 8 },
 });
+// Accept the field under either name so a single-file client still works.
+const files = upload.fields([{ name: 'file', maxCount: 20 }, { name: 'files', maxCount: 20 }]);
+const uploaded = (req) => [...(req.files?.file || []), ...(req.files?.files || [])];
 
 const canImport = requireRole('admin', 'editor', 'manager');
 
@@ -66,18 +69,20 @@ const oneAtATime = (req, res, next) => {
   next();
 };
 
-app.post('/api/import/preview', authenticate, canImport, oneAtATime, upload.single('file'),
+app.post('/api/import/preview', authenticate, canImport, oneAtATime, files,
   wrap(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    res.json(previewCsv(req.file.buffer, req.body.type || 'policies'));
+    const list = uploaded(req);
+    if (!list.length) return res.status(400).json({ error: 'No file uploaded' });
+    res.json(previewUpload(list, req.body.type || 'policies'));
   })
 );
 
-app.post('/api/import/run', authenticate, canImport, oneAtATime, upload.single('file'),
+app.post('/api/import/run', authenticate, canImport, oneAtATime, files,
   wrap(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const list = uploaded(req);
+    if (!list.length) return res.status(400).json({ error: 'No file uploaded' });
     const result = await runImport(
-      req.file.buffer,
+      list,
       req.body.type || 'policies',
       // A manager's import is confined to their own entities.
       { asOfDate: req.body.asOfDate,
@@ -117,8 +122,10 @@ app.use((err, req, res, _next) => {
   if (err.code === '23505') return res.status(409).json({ error: 'That record already exists' });
   if (err.code === '23503') return res.status(409).json({ error: 'Another record still refers to this one' });
   if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File is too large (5 MB max)' });
-  if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE')
-    return res.status(400).json({ error: 'Upload one file at a time' });
+  if (err.code === 'LIMIT_FILE_COUNT')
+    return res.status(400).json({ error: 'Too many files at once — 20 is the limit' });
+  if (err.code === 'LIMIT_UNEXPECTED_FILE')
+    return res.status(400).json({ error: 'Unexpected upload field' });
   // Deliberate, user-facing failures raised by the app itself.
   if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.message });
 
