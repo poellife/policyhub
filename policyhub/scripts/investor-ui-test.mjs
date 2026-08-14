@@ -23,7 +23,13 @@ check('staff nav has Investors + Import', staffNav.includes('Investors') && staf
 await staff.goto(`${BASE}/#/investors`);
 await staff.waitForFunction(()=>document.querySelector('h1')?.textContent==='Investors');
 await staff.waitForTimeout(600);
-check('investors directory lists all three', (await staff.locator('table.data tbody tr').count())===3);
+// Count against the API rather than a fixed number: the fixture book grows
+// as suites add investors, and a screen that lists every one of them is what
+// is actually being checked.
+const allInvestors = await staff.evaluate(() => fetch('/api/investors').then((r) => r.json()));
+check('investors directory lists every investor',
+  (await staff.locator('table.data tbody tr').count()) === allInvestors.length,
+  `${await staff.locator('table.data tbody tr').count()} rows for ${allInvestors.length} investors`);
 await staff.screenshot({path:`${S}/i1-investors.png`,fullPage:true});
 
 await staff.click('table.data tbody tr:first-child');

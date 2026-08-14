@@ -30,6 +30,13 @@ const inv2c = await login(INVESTOR2.email, INVESTOR2.password);
 const me1 = (await json(await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: inv1c } }))).investor.id;
 const me2 = (await json(await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: inv2c } }))).investor.id;
 const funds = await json(await api('/funds'));
+// Read the fixture investors' names rather than hard-coding them: the seed
+// script can be re-run with different ones, and a test that fails for that
+// reason teaches nothing.
+const investors = await json(await api('/investors'));
+const nameOf = (id) => investors.find((i) => i.id === id)?.name || '\u0000';
+const [name1, name2] = [nameOf(me1), nameOf(me2)];
+const otherNames = new RegExp([name1, name2].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
 
 const wipe = async () => {
   for (const o of ((await json(await api('/opportunities'))) || [])
@@ -108,7 +115,7 @@ check('with a deadline in days', /Closes in \d day/.test(tightText), (tightText.
 check('the bar is filled to the taken share',
   Math.abs(Number((await tightCard.locator('.opp-bar > span').getAttribute('style')).match(/[\d.]+/)[0]) - 82) < 0.01);
 check('an IRR is shown on the card', /IRR AT LIFE EXPECTANCY/i.test(tightText));
-check('no co-investor is named', !/Okonkwo|Harrison|Redwood/.test(tightText));
+check('no co-investor is named', !otherNames.test(tightText));
 await inv.screenshot({ path: `${S}/oi1-list.png`, fullPage: true });
 
 console.log('\nTHE DETAIL AND THE SCENARIOS');
@@ -151,7 +158,7 @@ await inv2.goto(`${BASE}/#/opportunities`); await inv2.waitForSelector('.opp-car
 await inv2.waitForTimeout(700);
 const other = (await inv2.locator('.opp-card', { hasText: 'Openfield' }).textContent()).replace(/\s+/g, ' ');
 check('75% now reads as available to them too', /75% still available/.test(other), other.slice(0, 120));
-check('without naming who took the rest', !/Harrison/.test(other));
+check('without naming who took the rest', !new RegExp(name1.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(other));
 
 console.log('\nASKING FOR MORE THAN IS LEFT');
 // Investor 1 holds none of the tight offer, so 18% really is their ceiling.
@@ -194,17 +201,121 @@ check('and a button to create one', (await staff.locator('#newOppBtn').count()) 
 await staff.locator('.opp-card', { hasText: 'Openfield' }).locator('a.btn').first().click();
 await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(700);
 const staffDetail = (await staff.locator('.main').textContent()).replace(/\s+/g, ' ');
-check('the cap table names the investors', /Harrison Family Trust/.test(staffDetail));
+check('the cap table names the investors', staffDetail.includes(name1), name1);
 check('with their status', /Requested/.test(staffDetail));
 check('and the sharing controls are present',
   (await staff.locator('#shareOppBtn').count()) === 1 && (await staff.locator('#scheduleBtn').count()) === 1);
 await staff.screenshot({ path: `${S}/oi4-staff.png`, fullPage: true });
+
+console.log('\nENTERING THE SCHEDULE A YEAR AT A TIME');
+await staff.click('#scheduleBtn');
+await staff.waitForSelector('dialog[open] .prem-row');
+await staff.waitForTimeout(500);
+const rowCount = () => staff.locator('dialog[open] .prem-row').count();
+check('the posted schedule opens as one row per year', (await rowCount()) === 12,
+  `${await rowCount()} rows`);
+check('numbered', (await staff.locator('dialog[open] .prem-year').first().textContent()).trim() === '1');
+check('with a running total',
+  /\$/.test(await staff.locator('#premTotal').textContent()));
+
+// Type a year that no growth rate would produce — the point of the feature.
+const third = staff.locator('dialog[open] .prem-row').nth(2);
+await third.locator('.prem-amt').fill('91234.56');
+await third.locator('.prem-due').fill('2029-02-28');
+await staff.waitForTimeout(300);
+
+const before = await rowCount();
+await staff.click('#premAdd');
+await staff.waitForTimeout(300);
+check('a year can be added', (await rowCount()) === before + 1);
+const added = staff.locator('dialog[open] .prem-row').last();
+check('dated twelve months after the one above it',
+  (await added.locator('.prem-due').inputValue()) === '2038-11-15',
+  await added.locator('.prem-due').inputValue());
+
+await staff.locator('dialog[open] .prem-row').last().locator('.prem-del').click();
+await staff.waitForTimeout(300);
+check('and removed again', (await rowCount()) === before);
+
+await staff.locator('dialog[open] button[type=submit]').click();
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(1200);
+const sched = (await staff.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('the odd amount is stored to the cent', /\$91,234\.56/.test(sched),
+  sched.slice(sched.indexOf('Premium schedule'), sched.indexOf('Premium schedule') + 220));
+check('on the date it was moved to', /02\/28\/2029/.test(sched));
+await staff.screenshot({ path: `${S}/oi5-schedule.png`, fullPage: true });
+
+console.log('\nCORRECTING ONE PAYMENT');
+await staff.locator('[data-edit-prem]').first().click();
+await staff.waitForSelector('dialog[open] input[name="amount"]');
+await staff.fill('dialog[open] input[name="amount"]', '55555.55');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(1200);
+check('a single row can be corrected without reopening the grid',
+  /\$55,555\.55/.test((await staff.locator('.main').textContent()).replace(/\s+/g, ' ')));
 
 console.log('\nCONFIRMING FROM THE SCREEN');
 await staff.locator('[data-decide][data-to="Confirmed"]').first().click();
 await staff.waitForTimeout(1800);
 check('the request becomes an allocation',
   /Confirmed/.test((await staff.locator('.main').textContent())));
+
+console.log('\nTHE ONE-PAGER');
+await api(`/opportunities/${open.id}`, { method: 'PUT', body: {
+  le_provider_2: 'Polaris PUW-41491', le_months_2: 93, records_through: '2025-05-31',
+  impairments: 'Cardiovascular: CAD s/p 5 stents (2023)\nHepatic: fatty liver with ongoing ETOH',
+  mitigating: '60 lb weight loss improved OSA and labs',
+  underwriter_note: 'Mortality risk is higher than at prior underwriting.',
+  thesis: 'Discounted entry at 26% of face\nTwo independent LE reports within three months' } });
+
+await staff.goto(`${BASE}/#/opportunity/${open.id}`);
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(600);
+await staff.click('#sheetBtn');
+await staff.waitForSelector('dialog[open] input[name="share"]');
+await staff.fill('dialog[open] input[name="share"]', '10');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForSelector('.opp-sheet', { timeout: 12000 }); await staff.waitForTimeout(900);
+const sheet = (await staff.locator('.opp-sheet').textContent()).replace(/\s+/g, ' ');
+
+check('the sheet is built for the chosen participation', /10% participation offered/.test(sheet),
+  sheet.slice(0, 160));
+// 10% of a $3,000,000 benefit bought for $780,000.
+check('the cost is that share of the price', /\$78,000\.00/.test(sheet));
+check('and the benefit that share of the face', /\$1,100,000\.00|\$300,000\.00/.test(sheet));
+check('the whole-policy price is still shown for context', /\$780,000\.00 for the whole policy/.test(sheet));
+check('three maturity scenarios are on it',
+  /24 months early/.test(sheet) && /At life expectancy/.test(sheet) && /24 months late/.test(sheet));
+check('the median caveat is on the page, not buried', /half of insureds outlive it/i.test(sheet));
+check('the typed medical factors are reproduced', /CAD s\/p 5 stents/.test(sheet));
+check('so is the underwriter assessment', /higher than at prior underwriting/.test(sheet));
+check('and the investment case', /Two independent LE reports/.test(sheet));
+check('the second LE report is named beside the first',
+  /Polaris PUW-41491/.test(sheet) && /AVS/.test(sheet));
+check('every premium year is listed with its age',
+  (await staff.locator('.opp-sheet-schedule tbody tr').count()) >= 12,
+  `${await staff.locator('.opp-sheet-schedule tbody tr').count()} rows`);
+check('showing the full premium and the partner share side by side',
+  /FULL PREMIUM/i.test(sheet) && /10% SHARE/i.test(sheet));
+check('a disclaimer is on it', /not an offer to sell/i.test(sheet));
+check('and it is marked confidential', /qualified investors only/i.test(sheet));
+check('the screen furniture is hidden from print',
+  (await staff.locator('.opp-sheet .no-print').count()) === 0);
+await staff.screenshot({ path: `${S}/oi6-sheet.png`, fullPage: true });
+
+// A real trip through the print stylesheet: the layout is the deliverable.
+await staff.emulateMedia({ media: 'print' });
+await staff.pdf({ path: `${S}/oi6-sheet.pdf`, printBackground: true, format: 'Letter',
+  margin: { top: '0.5in', bottom: '0.5in', left: '0.5in', right: '0.5in' } });
+await staff.emulateMedia({ media: 'screen' });
+const pages = (await import('node:fs')).readFileSync(`${S}/oi6-sheet.pdf`).toString('latin1')
+  .split('/Type /Page').length - 1;
+check('it prints as a short document, not a sprawl', pages <= 3, `${pages} PDF pages`);
+
+await staff.goto(`${BASE}/#/opportunity/${open.id}/sheet-100`);
+await staff.waitForSelector('.opp-sheet'); await staff.waitForTimeout(700);
+const full = (await staff.locator('.opp-sheet').textContent()).replace(/\s+/g, ' ');
+check('at 100% it drops the partner-share column', !/SHARE/i.test(full.replace(/participation/gi, '')));
+check('and prices the whole policy', /\$780,000\.00/.test(full));
 
 console.log('\nERRORS');
 check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | '));

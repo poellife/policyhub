@@ -26,15 +26,28 @@ await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Policie
 await p.click('#newPolicyBtn'); await p.waitForSelector('dialog[open]');
 await p.fill('dialog input[name="policy_number"]','TEST-001');
 await p.fill('dialog input[name="carrier_name"]','Test Carrier');
-await p.fill('dialog input[name="insured_name"]','Doe, Jane');
+await p.fill('dialog input[name="insured_last_name"]','Doe');
+await p.fill('dialog input[name="insured_first_name"]','Jane');
 await p.fill('dialog input[name="dob"]','1940-05-05');
 await p.fill('dialog input[name="face_amount"]','1000000');
-await p.fill('dialog input[name="premium_required"]','12000');
 await p.click('dialog button[type=submit]');
-await p.waitForTimeout(1200);
-const rows=await p.locator('table.data tbody tr').count();
-check('manual policy creation works', rows===1, `${rows} row`);
+await p.waitForTimeout(1500);
+// Assert the policy that was just created is on the grid, rather than that it
+// is the only row: this suite is written for an empty database but is also run
+// against the shared fixture book, where a fixed count means nothing.
+const made = p.locator('table.data tbody tr', { hasText: 'TEST-001' });
+check('manual policy creation works', (await made.count())===1,
+  `${await made.count()} matching of ${await p.locator('table.data tbody tr').count()} rows`);
 await p.screenshot({path:`${S}/e3-first-policy.png`,fullPage:true});
+// Leave the book as it was found.
+await p.evaluate(async () => {
+  const list = await fetch('/api/policies?search=TEST-001').then((r) => r.json());
+  for (const x of list.filter((y) => y.policy_number === 'TEST-001'))
+    await fetch(`/api/policies/${x.id}`, { method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: 'TEST-001' }) });
+});
+
 console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
 check('no page errors', errs.length===0);
 await br.close();

@@ -741,6 +741,9 @@ const OPP_FIELDS = {
   le_months: int, le_provider: str, le_date: date,
   asking_price: num, annual_premium: num, expected_close: date, offer_closes_on: date,
   fund_id: int, status: str, notes: str,
+  // The one-pager's narrative. Free text, one bullet per line.
+  le_provider_2: str, le_months_2: int, impairments: str, mitigating: str,
+  underwriter_note: str, thesis: str, records_through: date,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -940,10 +943,61 @@ router.post('/opportunities/:id/premiums', blockInvestors, oppEdit, wrap(async (
   res.status(201).json(rows[0]);
 }));
 
-/** Lay out a whole schedule at once — the usual way one is entered. */
+/**
+ * Lay out a whole schedule at once.
+ *
+ * Two ways in. `rows` is the honest one: every year typed out individually,
+ * which is what an actual carrier illustration gives you — the amounts step
+ * up unevenly as cost of insurance rises, and no growth rate reproduces
+ * that. `start_date`/`amount`/`years` is the shortcut for when the numbers
+ * really are level, and only ever a starting point.
+ *
+ * Either way the write is all-or-nothing: the rows are validated in full
+ * before anything is deleted, so a bad amount in year nine cannot leave a
+ * half-replaced schedule behind.
+ */
 router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap(async (req, res) => {
   if (!(await oppVisible(req, req.params.id)))
     return res.status(404).json({ error: 'Opportunity not found' });
+
+  if (Array.isArray(req.body.rows)) {
+    const rows = [];
+    const seen = new Map();
+    if (req.body.rows.length > 60)
+      return res.status(400).json({ error: 'A schedule cannot run past 60 payments' });
+    for (const [i, r] of req.body.rows.entries()) {
+      const due = date(r.due_date);
+      const amount = num(r.amount);
+      if (!due) return res.status(400).json({ error: `Row ${i + 1} needs a due date` });
+      if (amount === null || amount < 0)
+        return res.status(400).json({ error: `Row ${i + 1} needs an amount of zero or more` });
+      // Two payments cannot share a due date — the table enforces it, and
+      // reporting it here names the year rather than throwing a constraint.
+      if (seen.has(due))
+        return res.status(400).json({ error: `Two payments are both dated ${due}` });
+      seen.set(due, true);
+      rows.push({ due, amount, notes: str(r.notes) });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM opportunity_premiums WHERE opportunity_id = $1', [req.params.id]);
+      for (const r of rows)
+        await client.query(
+          `INSERT INTO opportunity_premiums (opportunity_id, due_date, amount, notes)
+           VALUES ($1,$2,$3,$4)`, [req.params.id, r.due, r.amount, r.notes]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `premium schedule: ${rows.length} payment${rows.length === 1 ? '' : 's'} entered by hand`);
+    return res.json({ ok: true, written: rows.length });
+  }
+
   const start = date(req.body.start_date);
   const amount = num(req.body.amount);
   const years = Math.min(40, Math.max(1, int(req.body.years) || 10));
@@ -964,6 +1018,30 @@ router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
     `premium schedule: ${written} years from ${start}`);
   res.json({ ok: true, written });
+}));
+
+/** Correct one payment — the date, the amount, or the note against it. */
+router.put('/opportunity-premiums/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
+  const { rows } = await q('SELECT * FROM opportunity_premiums WHERE id = $1', [req.params.id]);
+  if (!rows[0] || !(await oppVisible(req, rows[0].opportunity_id)))
+    return res.status(404).json({ error: 'Not found' });
+  const due = req.body.due_date === undefined ? rows[0].due_date : date(req.body.due_date);
+  const amount = req.body.amount === undefined ? Number(rows[0].amount) : num(req.body.amount);
+  if (!due) return res.status(400).json({ error: 'A due date is required' });
+  if (amount === null || amount < 0)
+    return res.status(400).json({ error: 'An amount of zero or more is required' });
+  const clash = await q(
+    'SELECT 1 FROM opportunity_premiums WHERE opportunity_id = $1 AND due_date = $2 AND id <> $3',
+    [rows[0].opportunity_id, due, req.params.id]);
+  if (clash.rows.length)
+    return res.status(400).json({ error: 'Another payment is already dated that day' });
+  const updated = await q(
+    `UPDATE opportunity_premiums SET due_date = $1, amount = $2, notes = $3
+     WHERE id = $4 RETURNING *`,
+    [due, amount, req.body.notes === undefined ? rows[0].notes : str(req.body.notes), req.params.id]);
+  await audit(req.user.uid, 'opportunity', Number(rows[0].opportunity_id), 'update',
+    `premium ${String(rows[0].due_date).slice(0, 10)} → ${due} ${amount}`);
+  res.json(updated.rows[0]);
 }));
 
 router.delete('/opportunity-premiums/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
@@ -1131,34 +1209,72 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
       dob: o.insured_dob, gender: o.insured_gender, state: o.insured_state,
       le_months: o.le_months, le_provider: o.le_provider, le_date: o.le_date,
     });
+    // A policy number is unique across the portfolio. If one is already
+    // there, say which policy it is rather than letting the constraint
+    // surface as "that record already exists" — the usual cause is that the
+    // deal was entered by hand as well as posted as an opportunity, and the
+    // right answer is to link the two, not to guess.
+    const clash = await q(
+      'SELECT id, carrier_name FROM policies WHERE lower(policy_number) = lower($1)',
+      [str(o.policy_number)]);
+    if (clash.rows.length)
+      return res.status(409).json({
+        error: `Policy ${o.policy_number} is already in the portfolio (${
+          clash.rows[0].carrier_name || 'no carrier'}). Change the policy number on this `
+          + 'opportunity, or delete the existing policy first if it was entered by hand.',
+        policy_id: clash.rows[0].id,
+      });
+
     const acquired = date(req.body.acquisition_date) || o.expected_close || today();
 
-    const { rows: pol } = await q(
-      `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
-                             insured_id, fund_id, status, premium_required, premium_mode,
-                             acquisition_date, acquisition_cost, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10) RETURNING id, policy_number`,
-      [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
-       o.annual_premium, acquired, o.asking_price, o.notes]);
-    const policyId = pol[0].id;
+    // All of it or none of it: a half-funded deal — a policy with no
+    // acquisition cost, or a cap table with no policy behind it — is worse
+    // than a failure you can retry.
+    const client = await pool.connect();
+    let policyId; let policyNumber; let allocated = 0;
+    try {
+      await client.query('BEGIN');
+      const { rows: pol } = await client.query(
+        `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
+                               insured_id, fund_id, status, premium_required, premium_mode,
+                               acquisition_date, acquisition_cost, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10) RETURNING id, policy_number`,
+        [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
+         o.annual_premium, acquired, o.asking_price, o.notes]);
+      policyId = pol[0].id;
+      policyNumber = pol[0].policy_number;
 
-    if (Number(o.asking_price))
-      await q(`INSERT INTO transactions (policy_id, txn_date, txn_type, amount, remarks, source)
-               VALUES ($1,$2,'Acquisition Cost',$3,'Funded from opportunity','app')`,
-        [policyId, acquired, o.asking_price]);
+      if (Number(o.asking_price))
+        await client.query(
+          `INSERT INTO transactions (policy_id, txn_date, txn_type, amount, remarks, source)
+           VALUES ($1,$2,'Acquisition Cost',$3,'Funded from opportunity','app')`,
+          [policyId, acquired, o.asking_price]);
 
-    let allocated = 0;
-    for (const c of o.commitments.filter((x) => x.status === 'Confirmed')) {
-      await q(`INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
-               VALUES ($1,$2,$3,$4,'From opportunity') ON CONFLICT DO NOTHING`,
-        [policyId, c.investor_id, c.pct, acquired]);
-      allocated++;
+      for (const c of o.commitments.filter((x) => x.status === 'Confirmed')) {
+        await client.query(
+          `INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
+           VALUES ($1,$2,$3,$4,'From opportunity') ON CONFLICT DO NOTHING`,
+          [policyId, c.investor_id, c.pct, acquired]);
+        allocated++;
+      }
+
+      await client.query(
+        `UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
+          WHERE id = $2`, [policyId, req.params.id]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      if (e.code === '23505')
+        return res.status(409).json({
+          error: `Policy ${o.policy_number} was created by somebody else while this was `
+            + 'being funded. Reload the opportunity and try again.' });
+      throw e;
+    } finally {
+      client.release();
     }
 
-    await q(`UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
-              WHERE id = $2`, [policyId, req.params.id]);
     await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
-      `funded as policy ${pol[0].policy_number} with ${allocated} allocation(s)`);
+      `funded as policy ${policyNumber} with ${allocated} allocation(s)`);
     res.status(201).json({ policy_id: policyId, allocations: allocated });
   }));
 

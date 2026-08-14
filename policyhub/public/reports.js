@@ -652,6 +652,278 @@ function buildFactSheets(sheets, o) {
 
 /* ------------------------------- view -------------------------------- */
 
+/* ===================================================================== *
+ * The opportunity one-pager
+ *
+ * The document that goes out to an investor before they commit. It has to
+ * do two things at once: make the case, and be honest about the risk in
+ * the same breath — a life settlement's return is decided by a date
+ * nobody knows, and a sheet that leads with a single IRR is selling a
+ * certainty that does not exist. So the headline rate is always printed
+ * with the two-years-either-side rates beside it.
+ *
+ * Everything numeric is derived from the opportunity itself. The medical
+ * picture, the underwriter's view and the investment case are typed on
+ * the opportunity and reproduced verbatim: they are judgements, and the
+ * app should not invent them.
+ * ===================================================================== */
+
+/** Age last birthday on a given date. */
+function ageOn(dob, iso) {
+  if (!dob || !iso) return null;
+  const b = new Date(`${String(dob).slice(0, 10)}T00:00:00`);
+  const d = new Date(`${String(iso).slice(0, 10)}T00:00:00`);
+  let a = d.getFullYear() - b.getFullYear();
+  const m = d.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && d.getDate() < b.getDate())) a--;
+  return a;
+}
+
+/** One bullet per line, blanks dropped. Leading bullet characters trimmed. */
+const bullets = (text) => String(text || '')
+  .split('\n').map((l) => l.replace(/^\s*[•\-*]\s*/, '').trim()).filter(Boolean);
+
+const bulletList = (text) => {
+  const items = bullets(text);
+  return items.length
+    ? `<ul class="rpt-bullets">${items.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : '';
+};
+
+/**
+ * Consecutive years that behave the same way, so the schedule can be
+ * described in three lines instead of fifteen. A run of zeros is a premium
+ * holiday and reads as one; a run of payments is described by its range and
+ * whether it is rising, level or falling.
+ */
+function premiumRuns(rows) {
+  const runs = [];
+  rows.forEach((r, i) => {
+    const kind = Number(r.amount) === 0 ? 'zero' : 'paid';
+    const last = runs[runs.length - 1];
+    if (last && last.kind === kind) { last.to = i; last.amounts.push(Number(r.amount)); }
+    else runs.push({ kind, from: i, to: i, amounts: [Number(r.amount)] });
+  });
+  return runs;
+}
+
+function describeRuns(rows, dob) {
+  const runs = premiumRuns(rows);
+  if (!runs.length) return [];
+  const span = (r) => {
+    const years = r.from === r.to ? `Year ${r.from + 1}` : `Years ${r.from + 1}–${r.to + 1}`;
+    const a1 = ageOn(dob, rows[r.from].date);
+    const a2 = ageOn(dob, rows[r.to].date);
+    const ages = a1 == null ? '' : (a1 === a2 ? ` (age ${a1})` : ` (ages ${a1}–${a2})`);
+    return `${years}${ages}`;
+  };
+  return runs.map((r) => {
+    if (r.kind === 'zero')
+      return `${span(r)}: no premium due — ${r.amounts.length === 1 ? 'a single year' : `a ${r.amounts.length}-year`} holiday under this illustration.`;
+    const lo = Math.min(...r.amounts);
+    const hi = Math.max(...r.amounts);
+    const first = r.amounts[0];
+    const last = r.amounts[r.amounts.length - 1];
+    if (lo === hi) return `${span(r)}: level at ${fmtExact(lo)} a year.`;
+    if (last > first) return `${span(r)}: steps up from ${fmtExact(first)} to ${fmtExact(last)} as cost of insurance rises.`;
+    if (last < first) return `${span(r)}: falls from ${fmtExact(first)} to ${fmtExact(last)}.`;
+    return `${span(r)}: between ${fmtExact(lo)} and ${fmtExact(hi)} a year.`;
+  });
+}
+
+const SCENARIO_LABEL = { '-24': '24 months early', 0: 'At life expectancy', 24: '24 months late' };
+
+/**
+ * @param o    the opportunity, with `premiums` and `analysis`
+ * @param opts { share, asOf, showThesis }
+ */
+export function buildOpportunitySheet(o, opts = {}) {
+  const share = Number(opts.share) > 0 ? Number(opts.share) : 100;
+  const f = share / 100;
+  const partial = share < 100 - 1e-9;
+
+  const a = o.analysis || {};
+  const base = a.base || null;
+  const price = Number(o.asking_price) || 0;
+  const benefit = Number(o.face_amount) || 0;
+
+  // The posted schedule, plus whatever the analysis projected past its end —
+  // a sheet that stops at the last typed row understates the cost of a long
+  // life, which is the one thing the reader must not be misled about.
+  const posted = (o.premiums || []).map((p) => ({
+    date: String(p.due_date).slice(0, 10), amount: Number(p.amount), projected: false }));
+  const projected = ((base && base.flows) || [])
+    .filter((x) => /Premium \(projected\)/.test(x.label || ''))
+    // `analysis` is always solved at the whole policy, so these are full amounts.
+    .map((x) => ({ date: String(x.date).slice(0, 10), amount: Math.abs(Number(x.amount)), projected: true }))
+    .filter((x) => !posted.some((p) => p.date === x.date));
+  const rows = [...posted, ...projected].sort((x, y) => (x.date < y.date ? -1 : 1));
+
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const years = rows.length;
+  const avg = years ? total / years : 0;
+  const dynamics = describeRuns(rows, o.insured_dob);
+
+  const name = `${o.insured_first_name || ''} ${o.insured_last_name || ''}`.trim() || o.policy_number || '—';
+  const leYears = o.le_months ? (Number(o.le_months) / 12).toFixed(1) : null;
+  const leSecond = o.le_months_2
+    ? `${o.le_provider_2 || 'second report'} ${o.le_months_2} mo` : null;
+
+  const scen = (a.scenarios || []);
+  const irrHead = base ? fmtIrr(base.irr) : '—';
+
+  const runningRows = (() => {
+    let cum = 0;
+    return rows.map((r, i) => {
+      cum += r.amount;
+      return { ...r, n: i + 1, age: ageOn(o.insured_dob, r.date), cum };
+    });
+  })();
+
+  return `
+  <section class="rpt-sheet opp-sheet">
+    ${letterhead('Life Settlement Investment Opportunity',
+      `${esc(o.carrier_name || '—')}${o.policy_number ? ` · ${esc(o.policy_number)}` : ''}`,
+      opts.asOf || longDate())}
+    <div class="rpt-confidential">Confidential — for qualified investors only. Do not distribute.</div>
+
+    <h2 class="rpt-h2">${esc(name)}</h2>
+    <div class="opp-sheet-sub">
+      ${fmtExact(benefit)} death benefit${partial ? ` · ${share}% participation offered` : ''}
+      ${leYears ? ` · life expectancy ${o.le_months} months (~${leYears} years)` : ''}
+      ${base ? ` · ${irrHead} at life expectancy` : ''}
+    </div>
+
+    <div class="rpt-tiles" data-count="4">
+      <div class="rpt-tile"><div class="rpt-tile-label">${partial ? `Cost of ${share}%` : 'Purchase price'}</div>
+        <div class="rpt-tile-value">${fmtExact(price * f)}</div>
+        <div class="rpt-tile-note">${partial ? `${fmtExact(price)} for the whole policy` : ''}${
+          benefit ? `${partial ? ' · ' : ''}${pct(price, benefit)} of face` : ''}</div></div>
+      <div class="rpt-tile"><div class="rpt-tile-label">${partial ? 'Your death benefit' : 'Death benefit'}</div>
+        <div class="rpt-tile-value">${fmtExact(benefit * f)}</div>
+        <div class="rpt-tile-note">${partial ? `${share}% of ${fmtExact(benefit)}` : 'Net death benefit'}</div></div>
+      <div class="rpt-tile"><div class="rpt-tile-label">Life expectancy</div>
+        <div class="rpt-tile-value">${o.le_months ? `${o.le_months} mo` : '—'}</div>
+        <div class="rpt-tile-note">${esc(o.le_provider || '—')}${
+          o.le_date ? ` · report ${fmtDate(o.le_date)}` : ''}${leSecond ? ` · ${esc(leSecond)}` : ''}</div></div>
+      <div class="rpt-tile"><div class="rpt-tile-label">${partial ? `Your premiums (avg)` : 'Average annual premium'}</div>
+        <div class="rpt-tile-value">${fmtExact(avg * f)}</div>
+        <div class="rpt-tile-note">${fmtExact(total * f)} over ${years} year${years === 1 ? '' : 's'}</div></div>
+    </div>
+
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">Return if the insured lives to…</h3>
+      <table class="rpt-table rpt-scen">
+        <thead><tr><th>Maturity</th><th class="num">Premiums paid</th>
+          <th class="num">Total invested</th><th class="num">Death benefit</th>
+          <th class="num">Profit</th><th class="num">Multiple</th>
+          <th class="num">Years</th><th class="num">IRR</th></tr></thead>
+        <tbody>${scen.map((s) => `<tr class="${s.offset_months === 0 ? 'at-le' : ''}">
+          <td>${esc(SCENARIO_LABEL[String(s.offset_months)] || `${s.offset_months} mo`)}
+            <span class="rpt-dim">${fmtDate(s.matures_on)}</span></td>
+          <td class="num">${fmtExact(s.premiums_paid * f)}</td>
+          <td class="num">${fmtExact(s.invested * f)}</td>
+          <td class="num">${fmtExact(s.returned * f)}</td>
+          <td class="num">${fmtExact(s.profit * f)}</td>
+          <td class="num">${s.multiple ? `${s.multiple.toFixed(2)}×` : '—'}</td>
+          <td class="num">${Number(s.years).toFixed(1)}</td>
+          <td class="num strong">${fmtIrr(s.irr)}</td></tr>`).join('')
+          || '<tr><td colspan="8">Not priced — an asking price and a death benefit are needed.</td></tr>'}</tbody>
+      </table>
+      <p class="rpt-note">Life expectancy is a median, not a promise — around half of insureds
+        outlive it, and every extra month is another premium paid. The late row is the case worth
+        underwriting against. Rates are solved on the actual date of every cash flow over a
+        365-day year (Excel’s XIRR convention) and are identical at any participation percentage.</p>
+    </div>
+
+    <div class="rpt-cols">
+      <div>
+        <div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">Deal terms</h3>
+          <table class="rpt-kv">
+            <tr><td>Carrier</td><td>${esc(o.carrier_name || '—')}</td></tr>
+            <tr><td>Product</td><td>${esc(o.product_type || '—')}</td></tr>
+            <tr><td>Insured</td><td>${esc(name)}${o.insured_dob
+              ? ` · ${ageOn(o.insured_dob, new Date().toISOString())} · ${esc(o.insured_gender || '')}` : ''}</td></tr>
+            <tr><td>State</td><td>${esc(o.insured_state || '—')}</td></tr>
+            <tr><td>Expected close</td><td>${fmtDate(o.expected_close)}</td></tr>
+            <tr><td>Offer closes</td><td>${fmtDate(o.offer_closes_on)}</td></tr>
+            ${o.records_through ? `<tr><td>Records through</td><td>${fmtDate(o.records_through)}</td></tr>` : ''}
+          </table>
+        </div>
+
+        <div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">Premium schedule</h3>
+          <table class="rpt-kv">
+            <tr><td>Years covered</td><td>${years}</td></tr>
+            <tr><td>Total premiums${partial ? ` (${share}%)` : ''}</td><td>${fmtExact(total * f)}</td></tr>
+            <tr><td>Average a year</td><td>${fmtExact(avg * f)}</td></tr>
+            ${partial ? `<tr><td>Total, whole policy</td><td>${fmtExact(total)}</td></tr>` : ''}
+          </table>
+          ${dynamics.length ? `<ul class="rpt-bullets">${dynamics.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
+          <p class="rpt-note">Illustrated. Actual premiums vary with carrier crediting and
+            cost-of-insurance charges. The buyer pays all future premiums.</p>
+        </div>
+      </div>
+
+      <div>
+        ${o.impairments ? `<div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">Medical factors behind the life expectancy</h3>
+          ${bulletList(o.impairments)}
+        </div>` : ''}
+        ${o.mitigating ? `<div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">Mitigating factors</h3>
+          ${bulletList(o.mitigating)}
+        </div>` : ''}
+        ${o.underwriter_note ? `<div class="rpt-block avoid-break rpt-callout">
+          <h3 class="rpt-h3">Underwriter assessment</h3>
+          <p class="rpt-para">${esc(o.underwriter_note)}</p>
+        </div>` : ''}
+      </div>
+    </div>
+
+    ${o.thesis ? `<div class="rpt-block rpt-thesis">
+      <h3 class="rpt-h3">Investment case</h3>
+      ${bulletList(o.thesis)}
+    </div>` : ''}
+
+    <div class="rpt-block opp-sheet-schedule">
+      <h3 class="rpt-h3">Premiums, year by year${partial ? ` — ${share}% participation` : ''}</h3>
+      <table class="rpt-table rpt-table-tight">
+        <thead><tr><th class="num">Year</th><th class="num">Age</th><th>Due</th>
+          <th class="num">Full premium</th>${partial ? `<th class="num">${share}% share</th>` : ''}
+          <th class="num">Cumulative${partial ? ` (${share}%)` : ''}</th></tr></thead>
+        <tbody>${runningRows.map((r) => `<tr class="${r.amount === 0 ? 'rpt-zero' : ''}">
+          <td class="num">${r.n}</td><td class="num">${r.age ?? '—'}</td>
+          <td>${fmtDate(r.date)}${r.projected ? ' <span class="rpt-dim">projected</span>' : ''}</td>
+          <td class="num">${fmtExact(r.amount)}</td>
+          ${partial ? `<td class="num strong">${fmtExact(r.amount * f)}</td>` : ''}
+          <td class="num">${fmtExact(r.cum * f)}</td></tr>`).join('')
+          || '<tr><td colspan="6">No schedule posted.</td></tr>'}</tbody>
+        ${runningRows.length ? `<tfoot><tr><td colspan="3">Total over ${years} year${years === 1 ? '' : 's'}</td>
+          <td class="num">${fmtExact(total)}</td>
+          ${partial ? `<td class="num">${fmtExact(total * f)}</td>` : ''}
+          <td class="num">${fmtExact(total * f)}</td></tr></tfoot>` : ''}
+      </table>
+      ${projected.length ? `<p class="rpt-note">Rows marked projected fall past the end of the posted
+        schedule and continue at its last annual rate, to life expectancy.</p>` : ''}
+    </div>
+
+    <div class="rpt-disclaimer">
+      This document is for information only and is not an offer to sell, a solicitation to buy, or a
+      recommendation regarding any security, life settlement contract or investment. Life expectancy
+      estimates are statistical models, not predictions: the insured may live materially longer or
+      shorter than the estimate, and a longer life reduces the return shown here. Illustrated
+      premiums, crediting rates and cost-of-insurance charges will vary from actual policy
+      performance. All investment carries risk, including the loss of the entire amount invested.
+      Modelled performance is not a guide to actual results. Recipients must carry out their own
+      due diligence on the policy, the life expectancy reports and the medical records, and take
+      their own legal, tax and financial advice. Medical information is summarised here in
+      confidence for qualified investor analysis only.
+    </div>
+    ${footer(`${esc(o.policy_number || '')}${partial ? ` · ${share}% participation` : ''}`)}
+  </section>`;
+}
+
 export async function reportsView(api, state) {
   const investorUser = state.user?.role === 'investor';
   const [funds, policies] = await Promise.all([

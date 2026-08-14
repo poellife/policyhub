@@ -12,7 +12,7 @@
 
    Idempotent: fixtures use a fixed prefix and are removed first.
    ===================================================================== */
-import { BASE, ADMIN, MANAGER1, MANAGER2, INVESTOR1, INVESTOR2, login } from './test-config.mjs';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, INVESTOR2, login } from './test-config.mjs';
 
 const PREFIX = 'OPPT';
 const fails = [];
@@ -233,6 +233,117 @@ const listed = ((await json(await api(admin, '/opportunities'))) || []).find((x)
 check('the list and the detail agree on the rate', near(listed.irr_at_le, an.base.irr, 1e-9),
   `${listed.irr_at_le} vs ${an.base.irr}`);
 
+/* ------------------------------------------------------------------ *
+ * The schedule entered a year at a time
+ *
+ * A carrier illustration steps up unevenly, so what is typed has to be
+ * stored exactly — no rounding, no interpolation, and no partial write
+ * if one row is wrong.
+ * ------------------------------------------------------------------ */
+console.log('\nA SCHEDULE TYPED YEAR BY YEAR');
+const o9 = await make('9');
+const byHand = [
+  { due_date: '2026-10-01', amount: 41250.75, notes: 'quoted' },
+  { due_date: '2027-10-01', amount: 44800 },
+  { due_date: '2028-10-01', amount: 0 },
+  { due_date: '2029-10-01', amount: 63177.42 },
+];
+const wrote = await json(await api(admin, `/opportunities/${o9.id}/premium-schedule`,
+  { method: 'POST', body: { rows: byHand } }));
+check('every row is written', wrote?.written === 4, JSON.stringify(wrote));
+let sched = (await json(await api(admin, `/opportunities/${o9.id}`))).premiums;
+check('in date order', sched.map((p) => p.due_date).join(',') === byHand.map((r) => r.due_date).join(','),
+  sched.map((p) => p.due_date).join(','));
+check('to the cent, exactly as typed',
+  sched.every((p, i) => near(p.amount, byHand[i].amount)),
+  sched.map((p) => p.amount).join(','));
+check('a zero year is kept rather than dropped', sched.length === 4 && near(sched[2].amount, 0));
+check('the note survives', sched[0].notes === 'quoted');
+
+const bad = await api(admin, `/opportunities/${o9.id}/premium-schedule`, { method: 'POST', body: {
+  rows: [{ due_date: '2030-10-01', amount: 50000 }, { due_date: '', amount: 50000 }] } });
+check('a missing date is refused, naming the row', bad.status === 400
+  && /Row 2/.test((await json(bad))?.error || ''));
+sched = (await json(await api(admin, `/opportunities/${o9.id}`))).premiums;
+check('and nothing was replaced — the old schedule stands', sched.length === 4
+  && near(sched[3].amount, 63177.42), `${sched.length} rows`);
+
+const dupe = await api(admin, `/opportunities/${o9.id}/premium-schedule`, { method: 'POST', body: {
+  rows: [{ due_date: '2031-01-01', amount: 1 }, { due_date: '2031-01-01', amount: 2 }] } });
+check('two payments on one day are refused', dupe.status === 400,
+  JSON.stringify(await json(dupe)));
+
+const negative = await api(admin, `/opportunities/${o9.id}/premium-schedule`, { method: 'POST', body: {
+  rows: [{ due_date: '2031-01-01', amount: -500 }] } });
+check('a negative premium is refused', negative.status === 400);
+
+const huge = await api(admin, `/opportunities/${o9.id}/premium-schedule`, { method: 'POST', body: {
+  rows: Array.from({ length: 61 }, (_, n) => ({ due_date: `20${26 + n}-01-01`, amount: 1 })) } });
+check('and a runaway schedule is capped', huge.status === 400);
+
+const hand = (await json(await api(admin, `/opportunities/${o9.id}`))).analysis;
+// The typed years are used as typed; past the end of the schedule the
+// projection continues at the last twelve months' rate — here 63,177.42,
+// for 2030, 2031 and 2032, the maturity falling on 2033-01-15.
+check('the hand-entered amounts are what the analysis spends',
+  near(hand.base.premiums_paid, 41250.75 + 44800 + 63177.42 * 4, 0.01),
+  `${hand.base.premiums_paid} over ${hand.base.premium_count} payments`);
+check('a zero year costs nothing without vanishing from the schedule',
+  hand.base.premium_count === 6 && sched.length === 4,
+  `${hand.base.premium_count} flows from 4 typed rows`);
+check('and the projection past the schedule is declared',
+  hand.base.projected_beyond_schedule === 3, String(hand.base.projected_beyond_schedule));
+
+console.log('\nTHE ONE-PAGER NARRATIVE');
+const narrative = {
+  le_provider_2: 'Polaris PUW-41491', le_months_2: 195, records_through: '2025-05-31',
+  impairments: 'Cardiovascular: CAD s/p 5 stents\nHepatic: fatty liver with ongoing ETOH',
+  mitigating: '60 lb weight loss improved OSA and labs',
+  underwriter_note: 'Mortality risk higher than at prior underwriting.',
+  thesis: 'Discounted entry at 2.4% of face\nThree-year premium holiday at ages 67-69',
+};
+await api(admin, `/opportunities/${o9.id}`, { method: 'PUT', body: narrative });
+const withText = await json(await api(admin, `/opportunities/${o9.id}`));
+check('the sheet fields round-trip',
+  Object.entries(narrative).every(([k, v]) =>
+    String(withText[k]).slice(0, 10) === String(v).slice(0, 10)),
+  Object.keys(narrative).filter((k) => String(withText[k]).slice(0, 10) !== String(narrative[k]).slice(0, 10)).join(','));
+check('the second life expectancy is kept apart from the first',
+  withText.le_months === 84 && withText.le_months_2 === 195,
+  `${withText.le_months} / ${withText.le_months_2}`);
+check('an investor sees the narrative once it is shared with them', await (async () => {
+  await api(admin, `/opportunities/${o9.id}/shares`, { method: 'PUT', body: { investor_ids: [me1] } });
+  const seen = await json(await api(inv1, `/opportunities/${o9.id}`));
+  return seen?.impairments === narrative.impairments;
+})());
+check('but an investor still cannot write them',
+  (await api(inv1, `/opportunities/${o9.id}`, { method: 'PUT', body: { thesis: 'x' } })).status === 403);
+
+console.log('\nCORRECTING ONE PAYMENT');
+const target = sched[1];
+const moved = await json(await api(admin, `/opportunity-premiums/${target.id}`, { method: 'PUT',
+  body: { due_date: '2027-11-15', amount: 45500.5, notes: 'revised illustration' } }));
+check('the date, amount and note all move', moved?.due_date === '2027-11-15'
+  && near(moved.amount, 45500.5) && moved.notes === 'revised illustration',
+  JSON.stringify(moved));
+const onto = await api(admin, `/opportunity-premiums/${target.id}`, { method: 'PUT',
+  body: { due_date: '2026-10-01' } });
+check('but not onto a day that is already taken', onto.status === 400);
+check('an investor cannot edit a payment',
+  (await api(inv1, `/opportunity-premiums/${target.id}`, { method: 'PUT', body: { amount: 1 } })).status === 403);
+check('the owning entity\'s manager can',
+  (await api(pm1, `/opportunity-premiums/${target.id}`, { method: 'PUT', body: { amount: 45500.5 } })).status === 200);
+// …but a manager whose entities do not include the owner sees nothing to edit.
+const elsewhere = await make('9B', { fund_id: lcg2.id });
+await api(admin, `/opportunities/${elsewhere.id}/premium-schedule`,
+  { method: 'POST', body: { rows: [{ due_date: '2026-12-01', amount: 9000 }] } });
+const elsewhereRow = (await json(await api(admin, `/opportunities/${elsewhere.id}`))).premiums[0];
+check('a manager outside the owning entity cannot',
+  (await api(pm1, `/opportunity-premiums/${elsewhereRow.id}`, { method: 'PUT', body: { amount: 1 } })).status === 404);
+check('and cannot post a schedule to it either',
+  (await api(pm1, `/opportunities/${elsewhere.id}/premium-schedule`,
+    { method: 'POST', body: { rows: [{ due_date: '2026-12-01', amount: 1 }] } })).status === 404);
+
 const unpriced = await make('7', { asking_price: null, face_amount: null });
 const unan = (await json(await api(admin, `/opportunities/${unpriced.id}`))).analysis;
 check('an unpriced opportunity reports no scenarios rather than a made-up rate',
@@ -276,6 +387,22 @@ check('the opportunity is marked funded and linked', oppAfter.status === 'Funded
   && oppAfter.policy_id === newPolicyId);
 check('funding twice is refused',
   (await api(admin, `/opportunities/${o10.id}/fund`, { method: 'POST' })).status === 409);
+
+// The deal keyed in by hand as well as posted as an opportunity. The policy
+// number collides, and the refusal has to name the policy rather than saying
+// "that record already exists" — which is what the constraint alone gives you.
+const twin = await make('11', { policy_number: `${PREFIX}-10` });
+const twinFund = await api(admin, `/opportunities/${twin.id}/fund`, { method: 'POST' });
+const twinBody = await json(twinFund);
+check('funding a policy number already in the portfolio is refused', twinFund.status === 409,
+  `status ${twinFund.status}`);
+check('and the refusal names the policy, not the constraint',
+  /already in the portfolio/.test(twinBody?.error || '') && /OPPT-10/.test(twinBody?.error || ''),
+  twinBody?.error);
+check('it points at the policy so it can be opened', twinBody?.policy_id === newPolicyId);
+const twinAfter = await json(await api(admin, `/opportunities/${twin.id}`));
+check('and the opportunity is not left marked funded',
+  twinAfter.status !== 'Funded' && !twinAfter.policy_id, twinAfter.status);
 check('an editor cannot fund',
   (await api(inv1, `/opportunities/${o10.id}/fund`, { method: 'POST' })).status === 403);
 

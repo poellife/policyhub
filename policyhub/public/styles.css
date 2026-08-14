@@ -595,6 +595,75 @@ table.rpt-kv td:first-child {
 }
 table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
 
+/* --- the opportunity one-pager -------------------------------------- */
+
+/* This document is deliberately denser than the portfolio reports. It has one
+   job: put the whole case in front of somebody on a single sheet of paper, so
+   they can weigh it without turning a page. The type scale below is what makes
+   that fit; loosen it and the medical section pushes the investment case onto
+   a second page, where nobody reads it. */
+.opp-sheet { font-size: 10px; }
+.opp-sheet .rpt-h2 { font-size: 21px; margin-bottom: 4px; }
+.opp-sheet .rpt-h3 { margin-bottom: 7px; padding-bottom: 5px; }
+.opp-sheet .rpt-block { margin-bottom: 13px; }
+.opp-sheet .rpt-cols { gap: 20px; }
+.opp-sheet .rpt-confidential { margin-bottom: 14px; }
+.opp-sheet .rpt-tiles { margin-bottom: 16px; }
+.opp-sheet .rpt-tile { padding: 10px 12px; }
+.opp-sheet .rpt-tile-value { font-size: 14px; }
+.opp-sheet .rpt-tile-note { font-size: 8.5px; margin-top: 4px; }
+.opp-sheet .rpt-note { font-size: 9.5px; line-height: 1.5; }
+.opp-sheet table.rpt-kv { font-size: 10px; }
+.opp-sheet table.rpt-kv td { padding: 3px 0; }
+.opp-sheet table.rpt-table { font-size: 10px; }
+.opp-sheet table.rpt-table th { padding: 5px 6px; }
+.opp-sheet table.rpt-table td { padding: 4px 6px; }
+.opp-sheet table.rpt-table tfoot td { padding: 5px 6px; }
+.opp-sheet .rpt-bullets { margin-top: 7px; padding-left: 14px; }
+.opp-sheet .rpt-bullets li { font-size: 9.5px; line-height: 1.45; margin-bottom: 3px; }
+.opp-sheet .rpt-callout { padding: 9px 11px; }
+.opp-sheet .rpt-para { font-size: 9.5px; line-height: 1.5; }
+.opp-sheet .rpt-footer { margin-top: 16px; }
+.opp-sheet .rpt-cols { margin-bottom: 4px; }
+/* The investment case is allowed to split across the fold. Keeping it whole
+   sends the entire block to a page of its own the moment it outgrows the space
+   left, which is how four bullets end up alone on page two. */
+.opp-sheet .rpt-thesis { padding-top: 11px; margin-bottom: 10px; }
+
+.opp-sheet-sub {
+  font-size: 11.5px; color: #5c5c5c; margin: 0 0 16px; line-height: 1.5;
+}
+.rpt-bullets { margin: 10px 0 0; padding-left: 16px; }
+.rpt-bullets li { font-size: 11.5px; line-height: 1.55; color: #2e2e2e; margin-bottom: 5px; }
+.rpt-para { font-size: 11.5px; line-height: 1.6; color: #2e2e2e; margin: 0; }
+span.rpt-dim { color: #a8a8a8; font-size: 10px; margin-left: 5px; }
+.rpt-callout {
+  border: 1px solid #e0e0e0; border-left: 3px solid #8f8f8f;
+  padding: 12px 14px; background: #fafafa;
+}
+.rpt-callout .rpt-h3 { border-bottom: none; padding-bottom: 2px; margin-bottom: 6px; }
+.rpt-thesis { border-top: 1px solid #ededed; padding-top: 16px; }
+table.rpt-scen tbody tr.at-le td { background: #f5f5f5; font-weight: 600; }
+table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
+.rpt-disclaimer {
+  margin-top: 26px; padding-top: 12px; border-top: 1px solid #ededed;
+  font-size: 8.5px; line-height: 1.5; color: #8f8f8f; text-align: justify;
+  break-inside: avoid;
+}
+/* The tail of the document — closing note, disclaimer, footer — belongs
+   together. Orphaned on a page of its own it reads like a mistake. */
+.opp-sheet .rpt-disclaimer, .opp-sheet .rpt-footer { break-before: avoid; }
+/* Two deliberate pages: the case, then the arithmetic behind it. Letting the
+   schedule start wherever page one happens to end splits it across a fold. */
+@media print { .opp-sheet-schedule { break-before: page; } }
+
+/* A section rule inside a long dialog, so the form reads in parts. */
+.dlg-section {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text-muted);
+  margin: 22px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+
 .rpt-footer {
   display: flex; justify-content: space-between; gap: 12px;
   margin-top: 26px; padding-top: 10px; border-top: 1px solid #ededed;
@@ -724,4 +793,30 @@ table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-n
 
 .scenario-table th.at-le, .scenario-table td.at-le {
   background: var(--sunken); font-weight: 600;
+}
+
+/* --- the year-by-year premium grid ---------------------------------- */
+dialog.wide { width: 760px; }
+.prem-grid {
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  overflow: auto; max-height: 46vh; margin-bottom: 12px;
+}
+.prem-grid table { margin: 0; }
+.prem-grid thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-1); }
+.prem-grid td { padding: 5px 8px; vertical-align: middle; }
+.prem-grid input { margin: 0; padding: 6px 8px; font-size: 13.5px; }
+.prem-grid input.num { text-align: right; font-variant-numeric: tabular-nums; }
+.prem-year { color: var(--text-muted); font-variant-numeric: tabular-nums; text-align: center; }
+.prem-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.prem-tools .spacer { flex: 1; }
+.prem-fill {
+  display: flex; align-items: center; gap: 6px; margin: 0;
+  font-family: var(--font); text-transform: none; letter-spacing: 0;
+  font-size: 12.5px; color: var(--text-muted);
+}
+.prem-fill input { margin: 0; padding: 5px 7px; font-size: 13px; }
+@media (max-width: 720px) {
+  dialog.wide { width: 96vw; }
+  .prem-tools { align-items: stretch; }
+  .prem-fill { flex-wrap: wrap; }
 }

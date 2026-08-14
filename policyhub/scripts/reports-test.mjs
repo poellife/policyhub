@@ -87,7 +87,14 @@ check('headline is the hypothetical rate', /IRR IF MATURED TODAY/i.test(s5));
 check('names it as unrealized', /have not been realized/i.test(s5));
 check('ranks policies by return', /POLICIES, RANKED BY RETURN/i.test(s5));
 check('breaks out owner entities', /BY OWNER ENTITY/i.test(s5));
-check('lists what it leaves out', /NOT IN THIS REPORT/i.test(s5));
+// The section only exists when something is genuinely excluded — a policy
+// with no cash flows to solve. Assert it appears exactly when it should,
+// rather than assuming the fixture always has one.
+const activeExcluded = (await p.evaluate(
+  () => fetch('/api/reports/returns?realized=false').then((r) => r.json()))).excluded || [];
+check('lists what it leaves out, when there is anything to leave out',
+  activeExcluded.length ? /NOT IN THIS REPORT/i.test(s5) : !/NOT IN THIS REPORT/i.test(s5),
+  `${activeExcluded.length} excluded`);
 check('states the XIRR convention', /365-day year/.test(s5));
 check('shows cost basis when ticked', /CAPITAL INVESTED/i.test(s5));
 const chart5 = await p.locator('#rptReturnChart svg').count();

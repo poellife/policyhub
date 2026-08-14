@@ -67,7 +67,13 @@ await pm.goto(`${BASE}/#/investors`);
 await pm.waitForFunction(()=>document.querySelector('h1')?.textContent==='Investors');
 await pm.waitForTimeout(600);
 const invRows = await pm.locator('table.data tbody tr').count();
-check('investor directory is scoped', invRows >= 1 && invRows < 3, `${invRows} investors`);
+// Scoped means fewer than an admin sees, not fewer than some fixed number:
+// the fixture book gains investors as other suites run.
+const adminPeek = await session(ADMIN.email, ADMIN.password);
+const adminInvCount = await adminPeek.evaluate(
+  () => fetch('/api/investors').then((r) => r.json()).then((x) => x.length));
+check('investor directory is scoped', invRows >= 1 && invRows < adminInvCount,
+  `${invRows} of ${adminInvCount}`);
 await pm.screenshot({path:`${S}/m4-manager-investors.png`,fullPage:true});
 
 console.log('\nADMIN STILL SEES EVERYTHING');

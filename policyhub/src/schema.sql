@@ -436,6 +436,21 @@ CREATE TABLE IF NOT EXISTS opportunities (
 CREATE INDEX IF NOT EXISTS idx_opportunities_status ON opportunities (status);
 CREATE INDEX IF NOT EXISTS idx_opportunities_fund ON opportunities (fund_id);
 
+-- What goes on the investor one-pager but cannot be computed: the medical
+-- picture behind the life expectancy, the underwriter's view of it, and the
+-- case for the deal. Free text, one bullet per line, because every file
+-- reads differently and a fixed set of fields would lose more than it gained.
+--
+-- A second LE is held separately: two independent reports either corroborate
+-- each other or they do not, and averaging them away hides that.
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS le_provider_2 TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS le_months_2 INTEGER;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS impairments TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS mitigating TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS underwriter_note TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS thesis TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS records_through DATE;
+
 -- The premium schedule as offered. Beyond its last row the projection
 -- continues at the same annual rate, which the analysis states on its face.
 CREATE TABLE IF NOT EXISTS opportunity_premiums (

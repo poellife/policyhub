@@ -3,7 +3,7 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
-import { reportsView } from './reports.js';
+import { reportsView, buildOpportunitySheet } from './reports.js';
 import { analyzeFlows, fmtIrr, today as irrToday } from './irr.js';
 
 /* ------------------------------- api --------------------------------- */
@@ -173,8 +173,8 @@ function exportCsv(filename, rows, columns) {
 
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '') || 'dashboard';
-  const [route, id] = h.split('/');
-  return { route: route || 'dashboard', params: { id } };
+  const [route, id, extra] = h.split('/');
+  return { route: route || 'dashboard', params: { id, extra } };
 }
 
 export function closeAllDialogs() {
@@ -1908,6 +1908,7 @@ async function opportunityView() {
       ${staff && canEditData() ? `
         <button id="editOppBtn">Edit</button>
         <button id="scheduleBtn">Premium schedule</button>
+        <button id="sheetBtn">One-pager</button>
         <button id="shareOppBtn">Share with investors</button>
         ${['admin', 'manager'].includes(state.user.role) && o.status !== 'Funded'
           ? '<button class="primary" id="fundOppBtn">Fund it</button>' : ''}` : ''}
@@ -2016,7 +2017,9 @@ async function opportunityView() {
                 ? fmtExact(Number(p.amount) * Number(mine.pct) / 100) : '—'}</td>` : ''}
               <td class="secondary">${esc(p.notes || '')}</td>
               ${staff && canEditData()
-                ? `<td><button class="btn-sm btn-danger" data-del-prem="${p.id}">Remove</button></td>` : ''}
+                ? `<td style="white-space:nowrap">
+                     <button class="btn-sm" data-edit-prem="${p.id}">Edit</button>
+                     <button class="btn-sm btn-danger" data-del-prem="${p.id}">Remove</button></td>` : ''}
             </tr>`).join('')}</tbody>
         ${o.premiums.length ? `<tfoot><tr><td>Total posted</td>
           <td class="num">${fmtExact(o.premiums.reduce((s, p) => s + Number(p.amount), 0))}</td>
@@ -2069,13 +2072,22 @@ async function opportunityView() {
     after: () => {
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
+      $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
       $('#shareOppBtn')?.addEventListener('click', () => openShareDialog(o));
-      $('#fundOppBtn')?.addEventListener('click', () => openFundDialog(o));
+      $('#fundOppBtn')?.addEventListener('click', () => {
+        openFundDialog(o).catch((e) => alert(e.message));
+      });
 
       document.querySelectorAll('[data-del-prem]').forEach((b) =>
         b.addEventListener('click', async () => {
           await api(`/opportunity-premiums/${b.dataset.delPrem}`, { method: 'DELETE' });
           toast('Payment removed'); render();
+        }));
+
+      document.querySelectorAll('[data-edit-prem]').forEach((b) =>
+        b.addEventListener('click', () => {
+          const p = o.premiums.find((x) => String(x.id) === b.dataset.editPrem);
+          if (p) openPremiumDialog(o, p);
         }));
 
       document.querySelectorAll('[data-decide]').forEach((b) =>
@@ -2178,6 +2190,26 @@ async function openOpportunityDialog(o) {
     </div>
     <div class="field"><label>Notes for investors</label>
       <textarea name="notes" rows="3">${esc(o?.notes || '')}</textarea></div>
+
+    <div class="dlg-section">For the one-pager</div>
+    <div class="field-row">
+      ${inputField('Second LE provider', 'le_provider_2', o?.le_provider_2)}
+      ${inputField('Second LE (months)', 'le_months_2', o?.le_months_2, 'number')}
+      ${inputField('Medical records through', 'records_through', dateInput(o?.records_through), 'date')}
+    </div>
+    <div class="field"><label>Medical factors behind the life expectancy</label>
+      <textarea name="impairments" rows="5" placeholder="One per line — Cardiovascular: CAD s/p 5 stents (2023)…">${esc(o?.impairments || '')}</textarea>
+      <span class="muted" style="font-size:12px">One bullet per line. Printed as written.</span></div>
+    <div class="field"><label>Mitigating factors</label>
+      <textarea name="mitigating" rows="3" placeholder="One per line">${esc(o?.mitigating || '')}</textarea></div>
+    <div class="field"><label>Underwriter assessment</label>
+      <textarea name="underwriter_note" rows="3">${esc(o?.underwriter_note || '')}</textarea></div>
+    <div class="field"><label>Investment case</label>
+      <textarea name="thesis" rows="5" placeholder="One per line">${esc(o?.thesis || '')}</textarea>
+      <span class="muted" style="font-size:12px">
+        These four boxes are judgements, so they are printed exactly as typed and never
+        generated. The price, premiums, life expectancy and every rate on the sheet come
+        from the record itself.</span></div>
   `, async (v) => {
     if (v.fund_id === '') delete v.fund_id;
     if (isNew) {
@@ -2191,31 +2223,207 @@ async function openOpportunityDialog(o) {
   }, isNew ? 'Create' : 'Save');
 }
 
+/** Months added to a YYYY-MM-DD date, clamped to the end of the month. */
+function addMonthsIso(iso, months) {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1 + months, 1));
+  const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  t.setUTCDate(Math.min(d, last));
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * The premium schedule, entered a year at a time.
+ *
+ * A carrier illustration does not step up smoothly — cost of insurance rises
+ * with age, the policy is optimised somewhere in the middle, and the numbers
+ * jump. No single growth rate reproduces that, so every year is its own field
+ * and gets typed as it is written. The fill button is there for the common
+ * case where the early years really are level; it only ever writes into the
+ * boxes, which are then yours to correct.
+ */
 function openScheduleDialog(o) {
-  openDialog('Lay out the premium schedule', `
-    <div class="field-row">
-      ${inputField('First payment due', 'start_date',
-        dateInput(o.premiums[0]?.due_date) || dateInput(o.expected_close), 'date', 'required')}
-      ${inputField('Annual amount', 'amount', o.annual_premium, 'number', 'step=0.01 required')}
+  const start = dateInput(o.premiums?.[0]?.due_date) || dateInput(o.expected_close) || today();
+  const seed = (o.premiums || []).length
+    ? o.premiums.map((p) => ({ due: dateInput(p.due_date), amount: Number(p.amount), notes: p.notes || '' }))
+    : Array.from({ length: 10 }, (_, n) => ({
+        due: addMonthsIso(start, 12 * n),
+        amount: Number(o.annual_premium) || '',
+        notes: '',
+      }));
+
+  const rowHtml = (r) => `
+    <tr class="prem-row">
+      <td class="prem-year"></td>
+      <td><input type="date" class="prem-due" value="${esc(r.due || '')}" required></td>
+      <td><input type="number" step="0.01" min="0" class="prem-amt num"
+                 value="${r.amount === '' || r.amount == null ? '' : esc(r.amount)}"
+                 placeholder="0.00"></td>
+      <td><input type="text" class="prem-note" value="${esc(r.notes || '')}" placeholder="optional"></td>
+      <td><button type="button" class="btn-sm btn-danger prem-del" title="Remove this year">✕</button></td>
+    </tr>`;
+
+  const dlg = openDialog('Premium schedule', `
+    <div class="prem-grid">
+      <table class="data">
+        <thead><tr><th style="width:56px">Year</th><th style="width:150px">Due</th>
+          <th class="num" style="width:130px">Amount</th><th>Notes</th><th style="width:44px"></th></tr></thead>
+        <tbody id="premRows">${seed.map(rowHtml).join('')}</tbody>
+        <tfoot><tr><td colspan="2" class="strong">Total</td>
+          <td class="num strong" id="premTotal">—</td><td colspan="2"></td></tr></tfoot>
+      </table>
     </div>
-    <div class="field-row">
-      ${inputField('Number of years', 'years', 15, 'number', 'min=1 max=40')}
-      ${inputField('Yearly increase (%)', 'growth_pct', 5, 'number', 'step=0.1')}
+    <div class="prem-tools">
+      <button type="button" class="btn-sm" id="premAdd">Add a year</button>
+      <div class="spacer"></div>
+      <label class="prem-fill">Fill blanks from year one, rising
+        <input type="number" step="0.1" id="premGrowth" value="0" style="width:64px"> % a year
+        <button type="button" class="btn-sm" id="premFill">Fill</button>
+      </label>
     </div>
-    <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-family:var(--font);font-size:13.5px;letter-spacing:0;color:var(--text-primary)">
-      <input type="checkbox" name="replace" checked style="width:auto;margin:0"> Replace the existing schedule
-    </label>
     <span class="muted" style="font-size:12px">
-      Cost of insurance on a universal life policy rises with age, so a flat premium
-      understates the later years. The increase above is applied compounding. Individual
-      payments can be corrected afterwards.
+      Every payment is written exactly as entered — nothing is rounded or interpolated on
+      save. Saving replaces the posted schedule with what is in this table, so removing a
+      row here removes the payment. Years beyond the last one are carried into the IRR
+      analysis at the same annual rate.
+    </span>
+  `, async () => {
+    const rows = [...dlg.querySelectorAll('.prem-row')].map((tr) => ({
+      due_date: tr.querySelector('.prem-due').value,
+      amount: tr.querySelector('.prem-amt').value,
+      notes: tr.querySelector('.prem-note').value,
+    })).filter((r) => r.due_date || r.amount !== '');
+    if (!rows.length) throw new Error('Enter at least one payment, or remove the schedule instead.');
+    const blank = rows.findIndex((r) => r.amount === '');
+    if (blank >= 0) throw new Error(`Year ${blank + 1} has no amount. Enter 0 if nothing is due.`);
+    const res = await api(`/opportunities/${o.id}/premium-schedule`, { method: 'POST', body: { rows } });
+    toast(`${res.written} payment${res.written === 1 ? '' : 's'} saved`);
+  }, 'Save schedule');
+
+  dlg.classList.add('wide');
+  const body = $('#premRows', dlg);
+  const renumber = () => {
+    [...body.querySelectorAll('.prem-row')].forEach((tr, i) => {
+      tr.querySelector('.prem-year').textContent = i + 1;
+    });
+    const total = [...body.querySelectorAll('.prem-amt')]
+      .reduce((s, el) => s + (Number(el.value) || 0), 0);
+    $('#premTotal', dlg).textContent = total ? fmtExact(total) : '—';
+  };
+  const wire = (tr) => {
+    tr.querySelector('.prem-del').addEventListener('click', () => { tr.remove(); renumber(); });
+    tr.querySelector('.prem-amt').addEventListener('input', renumber);
+  };
+  [...body.querySelectorAll('.prem-row')].forEach(wire);
+
+  $('#premAdd', dlg).addEventListener('click', () => {
+    const rows = [...body.querySelectorAll('.prem-row')];
+    const lastDue = rows.length ? rows[rows.length - 1].querySelector('.prem-due').value : '';
+    const lastAmt = rows.length ? rows[rows.length - 1].querySelector('.prem-amt').value : '';
+    body.insertAdjacentHTML('beforeend', rowHtml({
+      due: lastDue ? addMonthsIso(lastDue, 12) : start, amount: lastAmt, notes: '' }));
+    const added = body.lastElementChild;
+    wire(added);
+    renumber();
+    added.querySelector('.prem-amt').focus();
+  });
+
+  $('#premFill', dlg).addEventListener('click', () => {
+    const amts = [...body.querySelectorAll('.prem-amt')];
+    const base = Number(amts[0]?.value);
+    if (!base) { amts[0]?.focus(); return; }
+    const growth = Number($('#premGrowth', dlg).value) || 0;
+    amts.forEach((el, i) => {
+      if (i === 0 || el.value !== '') return;
+      el.value = (Math.round(base * (1 + growth / 100) ** i * 100) / 100).toFixed(2);
+    });
+    renumber();
+  });
+
+  renumber();
+  return dlg;
+}
+
+/** Correct a single posted payment without reopening the whole schedule. */
+function openPremiumDialog(o, p) {
+  openDialog('Edit payment', `
+    <div class="field-row">
+      ${inputField('Due', 'due_date', dateInput(p.due_date), 'date', 'required')}
+      ${inputField('Amount', 'amount', p.amount, 'number', 'step=0.01 min=0 required')}
+    </div>
+    ${inputField('Notes', 'notes', p.notes || '')}
+    <span class="muted" style="font-size:12px">
+      Changes only this payment. To rework the whole schedule use <strong>Premium schedule</strong>.
     </span>
   `, async (v) => {
-    await api(`/opportunities/${o.id}/premium-schedule`, { method: 'POST', body: {
-      start_date: v.start_date, amount: v.amount, years: v.years,
-      growth_pct: v.growth_pct, replace: v.replace === 'on' } });
-    toast('Schedule posted');
-  }, 'Post schedule');
+    await api(`/opportunity-premiums/${p.id}`, { method: 'PUT', body: v });
+    toast('Payment updated');
+  }, 'Save');
+}
+
+/**
+ * Which participation the one-pager is written for.
+ *
+ * The same deal reads differently at 10% than at 100% — the numbers an
+ * investor cares about are their own — so the percentage is chosen before
+ * the sheet is built rather than after. The rate of return is identical
+ * either way, which the sheet says on its face.
+ */
+function openSheetDialog(o) {
+  const held = (o.commitments || []).filter((c) => ['Requested', 'Confirmed'].includes(c.status));
+  openDialog(`One-pager — ${oppName(o)}`, `
+    ${inputField('Participation offered (%)', 'share', 100, 'number', 'step=0.01 min=0.01 max=100 required')}
+    ${held.length ? `<span class="muted" style="font-size:12px">
+      Already spoken for: ${held.map((c) => `${esc(c.investor_name)} ${fmtPct(c.pct)}`).join(', ')}.
+      </span>` : ''}
+    <span class="muted" style="font-size:12px">
+      At 100% the sheet shows the whole policy. Below that it shows the full premium and that
+      participation's share side by side, with the cost and death benefit for that slice.
+      The IRR is the same at any percentage — every cash flow scales together.
+      ${!o.impairments && !o.thesis ? '<br><br><strong>Nothing has been written for the medical '
+        + 'or investment-case sections yet.</strong> Use <strong>Edit</strong> to add them, or '
+        + 'the sheet will print with the numbers alone.' : ''}
+    </span>
+  `, async (v) => {
+    const share = Number(v.share);
+    if (!(share > 0 && share <= 100)) throw new Error('Enter a percentage between 0 and 100.');
+    go(`#/opportunity/${o.id}/sheet-${String(share).replace('.', '_')}`);
+  }, 'Build it');
+}
+
+/** The one-pager itself: rendered, then printed by the browser. */
+async function opportunitySheetView() {
+  const o = await api(`/opportunities/${state.params.id}`);
+  const share = Number(String(state.params.extra || '').replace(/^sheet-/, '').replace('_', '.')) || 100;
+  setSheetOrientation();
+  return {
+    html: `
+      <div class="page-head no-print">
+        <div><a class="back" href="#/opportunity/${o.id}">← Back to the opportunity</a>
+          <h1>One-pager</h1>
+          <div class="sub">${esc(oppName(o))}${share < 100 ? ` · ${share}% participation` : ''}</div></div>
+        <div class="spacer"></div>
+        <button class="primary" id="sheetPrint">Save as PDF</button>
+      </div>
+      <div class="rpt-hint no-print">
+        In the print dialog choose <strong>Save as PDF</strong>. Set Margins to
+        <strong>Default</strong>, turn <strong>off</strong> "Headers and footers", and tick
+        <strong>Background graphics</strong> so the rules and shading come through.
+      </div>
+      <div class="rpt-output">${buildOpportunitySheet(o, { share })}</div>`,
+    after: () => { $('#sheetPrint')?.addEventListener('click', () => window.print()); },
+  };
+}
+
+/** The sheet is portrait; the schedule reports set this to landscape. */
+function setSheetOrientation() {
+  let tag = document.getElementById('printPageStyle');
+  if (!tag) {
+    tag = document.createElement('style');
+    tag.id = 'printPageStyle';
+    document.head.appendChild(tag);
+  }
+  tag.textContent = '@page { size: Letter portrait; margin: 0.5in; }';
 }
 
 async function openShareDialog(o) {
@@ -2241,10 +2449,21 @@ async function openShareDialog(o) {
   }, 'Save');
 }
 
-function openFundDialog(o) {
+async function openFundDialog(o) {
   const confirmed = (o.commitments || []).filter((c) => c.status === 'Confirmed');
   const pct = confirmed.reduce((s, c) => s + Number(c.pct), 0);
+  // Policy numbers are unique across the portfolio, and the commonest way to
+  // lose a minute here is funding a deal that was also keyed in by hand.
+  // Better to say so before the button than after it.
+  const clash = o.policy_number
+    ? (await api(`/policies?search=${encodeURIComponent(o.policy_number)}`).catch(() => []))
+        .find((p) => String(p.policy_number).toLowerCase() === String(o.policy_number).toLowerCase())
+    : null;
   openDialog(`Fund ${oppName(o)}`, `
+    ${clash ? `<div class="error-box" style="margin-bottom:14px">
+      Policy ${esc(clash.policy_number)} is already in the portfolio — ${esc(clash.carrier_name || 'no carrier')},
+      ${esc(clash.insured_last || '')}. Funding will be refused. Either change the policy number
+      on this opportunity, or delete the existing policy if it was entered by hand.</div>` : ''}
     <p style="margin:0 0 14px;font-size:14px">
       This creates the policy in the portfolio, records
       <strong>${fmtExact(o.asking_price)}</strong> as its acquisition cost, and writes the
@@ -3272,7 +3491,8 @@ const VIEWS = {
   policy: policyView,
   servicing: servicingView,
   opportunities: opportunitiesView,
-  opportunity: opportunityView,
+  opportunity: () => (String(state.params.extra || '').startsWith('sheet-')
+    ? opportunitySheetView() : opportunityView()),
   maturities: maturitiesView,
   insureds: insuredsView,
   investors: investorsView,
