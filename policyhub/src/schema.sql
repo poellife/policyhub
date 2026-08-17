@@ -131,6 +131,27 @@ CREATE TABLE IF NOT EXISTS user_funds (
 );
 CREATE INDEX IF NOT EXISTS idx_user_funds_user ON user_funds (user_id);
 
+-- Investors a manager may work with directly, independent of the entities.
+--
+-- The entity scope answers "whose money is already in my book"; it cannot
+-- answer "who may I take this new deal to". A manager introducing an
+-- opportunity needs the investor on file *before* that investor holds
+-- anything, and without this they would have no way to reach the record —
+-- so they would key in a second copy of a client the firm already has, and
+-- the two would drift. An administrator grants the relationship here once.
+--
+-- This only ever widens what a manager can see. It never narrows the entity
+-- scope, and it grants nothing over policies: an investor being reachable is
+-- not the same as their holdings being readable.
+CREATE TABLE IF NOT EXISTS user_investors (
+  user_id     INTEGER NOT NULL REFERENCES users(id)     ON DELETE CASCADE,
+  investor_id INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_investors_user ON user_investors (user_id);
+CREATE INDEX IF NOT EXISTS idx_user_investors_investor ON user_investors (investor_id);
+
 -- Bumped whenever a password changes. Every session cookie carries the number
 -- it was issued under, so raising it retires all of that user's cookies at once
 -- instead of waiting out the 12-hour expiry.

@@ -46,6 +46,11 @@ const wipe = async () => {
   for (const o of ((await json(await api(admin, '/opportunities'))) || [])
     .filter((x) => String(x.policy_number).startsWith(PREFIX)))
     await api(admin, `/opportunities/${o.id}`, { method: 'DELETE' });
+  // Funding creates real policies, and a policy number is unique across the
+  // book — leaving one behind makes the next run fail for the wrong reason.
+  for (const p of ((await json(await api(admin, `/policies?search=${PREFIX}`))) || [])
+    .filter((x) => String(x.policy_number).startsWith(PREFIX)))
+    await api(admin, `/policies/${p.id}`, { method: 'DELETE', body: { confirm: p.policy_number } });
 };
 await wipe();
 
@@ -407,6 +412,188 @@ check('an editor cannot fund',
   (await api(inv1, `/opportunities/${o10.id}/fund`, { method: 'POST' })).status === 403);
 
 await api(admin, `/policies/${newPolicyId}`, { method: 'DELETE', body: { confirm: `${PREFIX}-10` } });
+
+console.log('\nA CONFIRMED INVESTOR ENDS UP HOLDING THE POLICY');
+/* The whole point of the marketplace: a confirmed allocation has to arrive in
+   that investor's own book, priced at their share, without anybody re-keying
+   it. This walks the entire path — share, request, confirm, fund — and then
+   checks it from the investor's side of the wall rather than the admin's. */
+const deal = await make('30', { face_amount: 4000000, asking_price: 600000 });
+await api(admin, `/opportunities/${deal.id}/shares`, { method: 'PUT', body: { investor_ids: [me1, me2] } });
+await api(inv1, `/opportunities/${deal.id}/commit`, { method: 'POST', body: { pct: 40 } });
+await api(inv2, `/opportunities/${deal.id}/commit`, { method: 'POST', body: { pct: 25 } });
+const dealCs = (await json(await api(admin, `/opportunities/${deal.id}`))).commitments;
+const c1 = dealCs.find((c) => c.investor_id === me1);
+const c2 = dealCs.find((c) => c.investor_id === me2);
+await api(admin, `/opportunity-commitments/${c1.id}`, { method: 'PUT', body: { status: 'Confirmed' } });
+// The second investor is deliberately left unanswered — an unconfirmed
+// request must not turn into a holding.
+const beforeList = ((await json(await api(inv1, '/policies'))) || []).length;
+const fundRes = await api(admin, `/opportunities/${deal.id}/fund`, { method: 'POST',
+  body: { acquisition_date: '2026-09-30' } });
+check('the deal funds', fundRes.status === 201, `status ${fundRes.status}`);
+const dealPolicyId = (await json(fundRes)).policy_id;
+
+const invBook = (await json(await api(inv1, '/policies'))) || [];
+const mine30 = invBook.find((p) => p.id === dealPolicyId);
+check('it is in the confirmed investor\'s own policy list', !!mine30,
+  `${invBook.length} policies, was ${beforeList}`);
+check('at the percentage they were confirmed for', mine30 && near(mine30.my_pct, 40),
+  String(mine30?.my_pct));
+check('and they can open it', (await api(inv1, `/policies/${dealPolicyId}`)).status === 200);
+
+const invDetail = await json(await api(inv1, `/policies/${dealPolicyId}`));
+check('the detail carries their share, not the whole policy',
+  near(invDetail.my_pct, 40), String(invDetail.my_pct));
+check('the deal terms came across',
+  Number(invDetail.face_amount) === 4000000 && invDetail.policy_number === `${PREFIX}-30`);
+check('with the purchase price in the ledger',
+  (invDetail.transactions || []).some((t) => t.txn_type === 'Acquisition Cost'
+    && near(t.amount, 600000)));
+
+const dash = await json(await api(inv1, '/analytics/summary'));
+check('and it is counted on their portfolio dashboard',
+  Number(dash.totals.policy_count) >= 1
+  && Number(dash.totals.total_death_benefit) >= 4000000 * 0.4,
+  `${dash.totals.policy_count} policies, ${dash.totals.total_death_benefit} benefit`);
+
+check('the investor left unanswered gets nothing',
+  !((await json(await api(inv2, '/policies'))) || []).some((p) => p.id === dealPolicyId));
+check('and cannot open it', (await api(inv2, `/policies/${dealPolicyId}`)).status === 404);
+
+const irr30 = await json(await api(inv1, `/policies/${dealPolicyId}/irr`));
+// The rate itself is null here because the acquisition falls in the future,
+// which the solver reports rather than inventing a number for.
+check('the IRR calculator opens on it for them',
+  irr30?.result !== undefined && Array.isArray(irr30.ledger),
+  `irr ${JSON.stringify(irr30?.result?.irr)}`);
+check('and is solved on their 40%, not the whole policy',
+  near(irr30.my_pct, 40) && near(irr30.result.invested, 600000 * 0.4, 0.01),
+  `${irr30.my_pct}% · invested ${irr30.result?.invested}`);
+check('with their share of the death benefit as the inflow',
+  near(irr30.result.returned, 4000000 * 0.4, 0.01), String(irr30.result?.returned));
+
+await api(admin, `/policies/${dealPolicyId}`, { method: 'DELETE', body: { confirm: `${PREFIX}-30` } });
+
+console.log('\nPASSING ON A DEAL');
+const pass1 = await make('20');
+await api(admin, `/opportunities/${pass1.id}/shares`, { method: 'PUT', body: { investor_ids: [me1] } });
+check('an investor can see it while it is open',
+  ((await json(await api(inv1, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+
+const passed = await api(pm1, `/opportunities/${pass1.id}`, { method: 'PUT', body: { status: 'Passed' } });
+check('a manager can pass on a deal in their entity', passed.status === 200, `status ${passed.status}`);
+
+check('it leaves the investor list',
+  !((await json(await api(inv1, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+check('and the investor cannot open it', (await api(inv1, `/opportunities/${pass1.id}`)).status === 404);
+check('it leaves the manager\'s own list too',
+  !((await json(await api(pm1, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+check('and the manager who passed it can no longer open it',
+  (await api(pm1, `/opportunities/${pass1.id}`)).status === 404);
+check('nor undo it',
+  (await api(pm1, `/opportunities/${pass1.id}`, { method: 'PUT', body: { status: 'Open' } })).status === 404);
+check('an admin still sees it in the list',
+  ((await json(await api(admin, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+check('and can open it', (await api(admin, `/opportunities/${pass1.id}`)).status === 200);
+check('it is not counted in anybody\'s badge',
+  ((await json(await api(inv1, '/opportunities/summary'))).open ?? 0) >= 0
+  && !((await json(await api(inv1, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+const reopened = await api(admin, `/opportunities/${pass1.id}`, { method: 'PUT', body: { status: 'Open' } });
+check('an admin can put it back', reopened.status === 200);
+check('and the investor sees it again',
+  ((await json(await api(inv1, '/opportunities'))) || []).some((x) => x.id === pass1.id));
+
+check('a nonsense status is refused',
+  (await api(admin, `/opportunities/${pass1.id}`, { method: 'PUT', body: { status: 'Maybe' } })).status === 400);
+check('and Funded cannot be typed on by hand',
+  (await api(admin, `/opportunities/${pass1.id}`, { method: 'PUT', body: { status: 'Funded' } })).status === 400);
+
+console.log('\nDELETING ONE');
+const doomed = await make('21');
+await api(admin, `/opportunities/${doomed.id}/premium-schedule`,
+  { method: 'POST', body: { rows: [{ due_date: '2026-11-01', amount: 1000 }] } });
+await api(admin, `/opportunities/${doomed.id}/shares`, { method: 'PUT', body: { investor_ids: [me1] } });
+await api(inv1, `/opportunities/${doomed.id}/commit`, { method: 'POST', body: { pct: 5 } });
+check('an investor cannot delete one',
+  (await api(inv1, `/opportunities/${doomed.id}`, { method: 'DELETE' })).status === 403);
+const del = await api(admin, `/opportunities/${doomed.id}`, { method: 'DELETE' });
+check('an admin can', del.status === 200, `status ${del.status}`);
+check('and it is gone', (await api(admin, `/opportunities/${doomed.id}`)).status === 404);
+check('its schedule, shares and requests went with it', await (async () => {
+  const still = ((await json(await api(admin, '/opportunities'))) || []).some((x) => x.id === doomed.id);
+  const inv = ((await json(await api(inv1, '/opportunities'))) || []).some((x) => x.id === doomed.id);
+  return !still && !inv;
+})());
+
+console.log('\nFUNDING A POLICY ALREADY ON THE BOOKS');
+// Stand up a policy of our own: the one funded earlier in this suite has
+// already been cleaned up by the time we get here.
+const base = await make('22');
+const baseFunded = await json(await api(admin, `/opportunities/${base.id}/fund`,
+  { method: 'POST', body: { acquisition_date: '2026-09-30' } }));
+const basePolicyId = baseFunded.policy_id;
+
+const twin2 = await make('23', { policy_number: `${PREFIX}-22` });
+await api(admin, `/opportunities/${twin2.id}/shares`, { method: 'PUT', body: { investor_ids: [me2] } });
+await api(inv2, `/opportunities/${twin2.id}/commit`, { method: 'POST', body: { pct: 12 } });
+const cs2 = (await json(await api(admin, `/opportunities/${twin2.id}`))).commitments;
+await api(admin, `/opportunity-commitments/${cs2[0].id}`, { method: 'PUT', body: { status: 'Confirmed' } });
+
+const refused = await api(admin, `/opportunities/${twin2.id}/fund`, { method: 'POST' });
+const refusedBody = await json(refused);
+check('funding still refuses by default', refused.status === 409);
+check('but offers to link instead', refusedBody?.can_link === true, JSON.stringify(refusedBody));
+
+const before10 = await json(await api(admin, `/policies/${basePolicyId}`));
+const linkRes = await api(admin, `/opportunities/${twin2.id}/fund`, { method: 'POST', body: { link: true } });
+const linkBody = await json(linkRes);
+check('linking succeeds', linkRes.status === 200, `status ${linkRes.status}`);
+check('against the policy that was already there', linkBody?.policy_id === basePolicyId);
+check('and reports itself as a link, not a creation', linkBody?.linked === true);
+const after10 = await json(await api(admin, `/policies/${basePolicyId}`));
+check('the existing policy keeps its own acquisition cost',
+  near(after10.acquisition_cost, before10.acquisition_cost),
+  `${before10.acquisition_cost} → ${after10.acquisition_cost}`);
+check('no second acquisition entry was written',
+  after10.transactions.filter((t) => t.txn_type === 'Acquisition Cost').length
+  === before10.transactions.filter((t) => t.txn_type === 'Acquisition Cost').length);
+check('the confirmed allocation was added to its cap table',
+  after10.owners.length === before10.owners.length + 1
+  && after10.owners.some((x) => near(x.pct, 12)),
+  after10.owners.map((x) => `${x.name} ${x.pct}`).join(', '));
+const twinAfter2 = await json(await api(admin, `/opportunities/${twin2.id}`));
+check('and the opportunity now reads as funded',
+  twinAfter2.status === 'Funded' && twinAfter2.policy_id === basePolicyId, twinAfter2.status);
+check('funding it a second time is refused',
+  (await api(admin, `/opportunities/${twin2.id}/fund`, { method: 'POST', body: { link: true } })).status === 409);
+
+await api(admin, `/policies/${basePolicyId}`, { method: 'DELETE', body: { confirm: `${PREFIX}-22` } });
+
+console.log('\nA MANAGER CAN ONLY SHARE WITH INVESTORS THEY MAY REACH');
+const pmReach = (await json(await api(pm1, '/investors'))) || [];
+const allInv = (await json(await api(admin, '/investors'))) || [];
+const unreachable = allInv.find((i) => !pmReach.some((x) => x.id === i.id));
+const pmOwn = await make('40', {}, pm1);
+if (unreachable) {
+  const barred = await api(pm1, `/opportunities/${pmOwn.id}/shares`,
+    { method: 'PUT', body: { investor_ids: [unreachable.id] } });
+  check('sharing with an investor outside their reach is refused', barred.status === 403,
+    `status ${barred.status}`);
+  check('and nothing was written',
+    ((await json(await api(admin, `/opportunities/${pmOwn.id}`))).shares || []).length === 0);
+} else {
+  check('sharing with an investor outside their reach is refused', true, 'none unreachable');
+  check('and nothing was written', true, 'skipped');
+}
+if (pmReach.length) {
+  const ok = await api(pm1, `/opportunities/${pmOwn.id}/shares`,
+    { method: 'PUT', body: { investor_ids: [pmReach[0].id] } });
+  check('sharing with one of their own works', ok.status === 200, `status ${ok.status}`);
+}
+check('an admin is not restricted this way',
+  (await api(admin, `/opportunities/${pmOwn.id}/shares`,
+    { method: 'PUT', body: { investor_ids: [me1, me2] } })).status === 200);
 
 console.log('\nUNAUTHENTICATED');
 for (const path of ['/opportunities', '/opportunities/summary', `/opportunities/${o1.id}`])

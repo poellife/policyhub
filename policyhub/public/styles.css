@@ -788,6 +788,14 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
 .opp-deadline.soon { border-color: var(--serious); color: var(--serious); font-weight: 600; }
 .opp-deadline.closed { border-color: var(--border); color: var(--text-muted); }
 
+/* Passed: on file, off the list. Reads as set aside rather than dead — an
+   administrator is looking at it precisely because it might come back. */
+/* A toggle that is currently on reads as pressed, not as another action. */
+.active-toggle { background: var(--sunken); border-color: var(--text-primary); font-weight: 600; }
+
+.opp-card.passed { opacity: .62; border-style: dashed; }
+.opp-card.passed:hover { opacity: 1; }
+
 .opp-take { padding: 16px 20px; border-top: 1px solid var(--border); background: var(--sunken); }
 .opp-take .field-row { align-items: flex-end; }
 

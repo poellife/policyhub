@@ -317,6 +317,147 @@ const full = (await staff.locator('.opp-sheet').textContent()).replace(/\s+/g, '
 check('at 100% it drops the partner-share column', !/SHARE/i.test(full.replace(/participation/gi, '')));
 check('and prices the whole policy', /\$780,000\.00/.test(full));
 
+console.log('\nA FUNDED DEAL LEAVES THE LIST');
+const done = await json(await api('/opportunities', { method: 'POST', body: {
+  policy_number: `${PREFIX}-DONE`, carrier_name: 'Screen Life', product_type: 'UL',
+  face_amount: 2000000, insured_last_name: 'Closedeal', insured_first_name: 'Nora',
+  insured_dob: '1939-06-15', le_months: 66, le_date: '2026-01-01',
+  asking_price: 350000, annual_premium: 30000, expected_close: '2026-10-01',
+  fund_id: funds[0].id } }));
+await api(`/opportunities/${done.id}/shares`, { method: 'PUT', body: { investor_ids: [me1] } });
+await fetch(`${BASE}/api/opportunities/${done.id}/commit`, { method: 'POST',
+  headers: { Cookie: inv1c, 'Content-Type': 'application/json' }, body: JSON.stringify({ pct: 30 }) });
+const doneCs = (await json(await api(`/opportunities/${done.id}`))).commitments;
+await api(`/opportunity-commitments/${doneCs[0].id}`, { method: 'PUT', body: { status: 'Confirmed' } });
+
+await staff.goto(`${BASE}/#/opportunities`); await staff.waitForSelector('.opp-card');
+await staff.waitForTimeout(800);
+check('it is on the list while it is open',
+  (await staff.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 1);
+
+await staff.goto(`${BASE}/#/opportunity/${done.id}`);
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(600);
+await staff.click('#fundOppBtn');
+await staff.waitForSelector('dialog[open] button[type=submit]');
+await staff.waitForTimeout(400);
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForSelector('.tabs', { timeout: 15000 });
+await staff.waitForTimeout(1200);
+const policyUrl = staff.url();
+check('funding lands on the new policy in the portfolio', /#\/policy\/\d+/.test(policyUrl), policyUrl);
+const polText = (await staff.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('with the confirmed investor on its cap table', new RegExp(name1).test(polText), name1);
+check('at the percentage they were confirmed for', /30(\.0)?%/.test(polText));
+
+await staff.goto(`${BASE}/#/opportunities`); await staff.waitForSelector('.opp-card, .empty');
+await staff.waitForTimeout(900);
+check('the funded deal is off the opportunities list by default',
+  (await staff.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 0);
+check('and a Show all button says how many are hidden',
+  /Show all \(\d+\)/.test(await staff.locator('#oppShowAll').textContent()),
+  await staff.locator('#oppShowAll').textContent());
+await staff.screenshot({ path: `${S}/oi8-list-default.png`, fullPage: true });
+
+await staff.click('#oppShowAll'); await staff.waitForTimeout(1000);
+check('Show all brings it back', (await staff.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 1);
+check('under a heading that says what it is',
+  /No longer open/.test((await staff.locator('.main').textContent())));
+check('and the button now offers to hide them again',
+  /Hide closed/.test(await staff.locator('#oppShowAll').textContent()));
+await staff.screenshot({ path: `${S}/oi9-list-showall.png`, fullPage: true });
+await staff.click('#oppShowAll'); await staff.waitForTimeout(900);
+check('which it does', (await staff.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 0);
+
+console.log('\nTHE INVESTOR NOW HOLDS IT');
+await inv.goto(`${BASE}/#/policies`); await inv.waitForSelector('table.data'); await inv.waitForTimeout(900);
+const invPolicies = (await inv.locator('.main').textContent()).replace(/\s+/g, ' ');
+check("it is in the investor's own policy list", /Closedeal/.test(invPolicies),
+  invPolicies.slice(0, 200));
+check('showing their share', /30(\.0)?%/.test(invPolicies));
+await inv.goto(`${BASE}/#/opportunities`); await inv.waitForTimeout(900);
+check('and it is no longer offered to them as an opportunity',
+  (await inv.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 0);
+await inv.screenshot({ path: `${S}/oi10-investor-holds.png`, fullPage: true });
+
+// Clean up the policy this created.
+await staff.evaluate(async (n) => {
+  const list = await fetch(`/api/policies?search=${n}`).then((r) => r.json());
+  for (const p of list.filter((x) => x.policy_number === n))
+    await fetch(`/api/policies/${p.id}`, { method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: n }) });
+}, `${PREFIX}-DONE`);
+
+console.log('\nPASSING AND DELETING FROM THE SCREEN');
+const spare = await json(await api('/opportunities', { method: 'POST', body: {
+  policy_number: `${PREFIX}-SPARE`, carrier_name: 'Screen Life', product_type: 'UL',
+  face_amount: 1000000, insured_last_name: 'Spareman', insured_first_name: 'Ada',
+  insured_dob: '1940-01-20', le_months: 60, le_date: '2026-01-01',
+  asking_price: 200000, annual_premium: 20000, expected_close: '2026-10-01',
+  fund_id: funds[0].id } }));
+await api(`/opportunities/${spare.id}/shares`, { method: 'PUT', body: { investor_ids: [me1] } });
+
+await staff.goto(`${BASE}/#/opportunity/${spare.id}`);
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(600);
+check('a Pass button is on the page', (await staff.locator('#passOppBtn').count()) === 1);
+check('so is Delete', (await staff.locator('#deleteOppBtn').count()) === 1);
+
+await staff.click('#passOppBtn');
+await staff.waitForSelector('dialog[open] textarea[name="reason"]');
+const passText = (await staff.locator('dialog[open]').textContent()).replace(/\s+/g, ' ');
+check('the dialog says the record is kept', /keeps the record/i.test(passText));
+await staff.fill('dialog[open] textarea[name="reason"]', 'LE too long for the price');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForSelector('.opp-card, .empty', { timeout: 12000 });
+await staff.waitForTimeout(1200);
+
+// A passed deal is archived like a funded one: off the working list until asked for.
+check('it is off the working list straight away',
+  (await staff.locator('.opp-card', { hasText: 'Spareman' }).count()) === 0);
+await staff.click('#oppShowAll'); await staff.waitForTimeout(1000);
+const listAfter = (await staff.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('but Show all puts it under a heading of its own', /Passed on/.test(listAfter));
+check('and the card is marked as set aside',
+  (await staff.locator('.opp-card.passed').count()) >= 1);
+check('with a line saying only administrators can see it',
+  /visible only to administrators/i.test(listAfter));
+
+const invSees = await inv.evaluate((id) =>
+  fetch('/api/opportunities').then((r) => r.json()).then((x) => x.some((o) => o.id === id)), spare.id);
+check('the investor it was shared with no longer has it', invSees === false);
+
+await staff.goto(`${BASE}/#/opportunity/${spare.id}`);
+await staff.waitForSelector('.scenario-table'); await staff.waitForTimeout(700);
+const passedDetail = (await staff.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('the reason was written into the notes', /LE too long for the price/.test(passedDetail));
+check('and Reopen is offered instead of Pass',
+  (await staff.locator('#reopenOppBtn').count()) === 1
+  && (await staff.locator('#passOppBtn').count()) === 0);
+await staff.screenshot({ path: `${S}/oi7-passed.png`, fullPage: true });
+
+await staff.click('#reopenOppBtn');
+await staff.waitForTimeout(1500);
+check('reopening puts it back',
+  (await staff.locator('#passOppBtn').count()) === 1);
+check('and the investor has it again', await inv.evaluate((id) =>
+  fetch('/api/opportunities').then((r) => r.json()).then((x) => x.some((o) => o.id === id)), spare.id));
+
+await staff.click('#deleteOppBtn');
+await staff.waitForSelector('dialog[open] input[name="confirm"]');
+const delText = (await staff.locator('dialog[open]').textContent()).replace(/\s+/g, ' ');
+check('deleting points at Pass as the better answer', /Pass<\/strong> is the better answer|Pass is the better answer/.test(delText));
+await staff.fill('dialog[open] input[name="confirm"]', 'WRONG');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForTimeout(700);
+check('a mistyped confirmation is refused',
+  (await staff.locator('dialog[open] .error-box').count()) >= 1
+  && (await staff.locator('dialog[open]').count()) === 1);
+await staff.fill('dialog[open] input[name="confirm"]', `${PREFIX}-SPARE`);
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForSelector('.opp-card, .empty', { timeout: 12000 });
+await staff.waitForTimeout(1200);
+check('typing the policy number deletes it', await staff.evaluate((id) =>
+  fetch(`/api/opportunities/${id}`).then((r) => r.status === 404), spare.id));
+
 console.log('\nERRORS');
 check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | '));
 await br.close();

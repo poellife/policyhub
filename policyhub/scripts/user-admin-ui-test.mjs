@@ -107,6 +107,41 @@ await p.waitForTimeout(400);
 check('cancelling changed nothing',
   (await rowFor(INVESTOR1.email).textContent()).includes('investor'));
 
+console.log('\nGIVING A MANAGER ACCESS TO AN INVESTOR');
+/* A manager can always reach whoever already holds a position in their
+   entities. This is the other half: an admin naming investors the manager may
+   take a new deal to, so they never have to key in a second copy of a client
+   the firm already has. */
+await rowFor(MANAGER1.email).locator('[data-edit-user]').click();
+await p.waitForSelector('dialog[open]'); await p.waitForTimeout(500);
+check('a manager account shows the entity picker', await p.locator('#fundPick').isVisible());
+check('and an investor-access picker beside it', await p.locator('#grantPick').isVisible());
+const grantHelp = (await p.locator('#grantPick').textContent()).replace(/\s+/g, ' ');
+check('which explains what it is for', /before there is any holding/i.test(grantHelp), grantHelp.slice(0, 120));
+check('and says it does not open up holdings',
+  /does not open up holdings/i.test(grantHelp));
+
+const options = await p.$$eval('select[name=granted_investor_ids] option',
+  (o) => o.map((x) => ({ v: x.value, t: x.textContent.trim() })));
+check('every investor is listed to choose from', options.length >= 2, `${options.length} options`);
+await p.selectOption('select[name=granted_investor_ids]', options[0].v);
+await p.locator('dialog[open] button[type=submit]').click();
+await p.waitForTimeout(1500); await gotoSettings();
+const mgrRow = (await rowFor(MANAGER1.email).textContent()).replace(/\s+/g, ' ');
+check('the grant shows on their row', mgrRow.includes(options[0].t), mgrRow.slice(0, 140));
+
+await rowFor(MANAGER1.email).locator('[data-edit-user]').click();
+await p.waitForSelector('dialog[open]'); await p.waitForTimeout(500);
+const still = await p.$eval('select[name=granted_investor_ids]',
+  (s) => [...s.selectedOptions].map((o) => o.textContent.trim()));
+check('and comes back selected when reopened', still.includes(options[0].t), still.join(','));
+// Deselecting everything revokes it, which is the only way to take one away.
+await p.selectOption('select[name=granted_investor_ids]', []);
+await p.locator('dialog[open] button[type=submit]').click();
+await p.waitForTimeout(1500); await gotoSettings();
+check('deselecting takes it away again',
+  !(await rowFor(MANAGER1.email).textContent()).includes(options[0].t));
+
 console.log('\nYOUR OWN ROW IS LOCKED DOWN');
 await self.locator('[data-edit-user]').click();
 await p.waitForSelector('dialog[open]'); await p.waitForTimeout(300);

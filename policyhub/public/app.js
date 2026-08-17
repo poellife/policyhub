@@ -204,10 +204,10 @@ const PRODUCT_LABELS = {
 const STAFF_NAV = [
   ['dashboard', 'Dashboard'],
   ['policies', 'Policies'],
-  ['servicing', 'Servicing'],
-  ['opportunities', 'Opportunities'],
-  ['maturities', 'Maturities'],
   ['insureds', 'Insureds'],
+  ['servicing', 'Servicing'],
+  ['maturities', 'Maturities'],
+  ['opportunities', 'Opportunities'],
   ['investors', 'Investors'],
   ['reports', 'Reports'],
   ['import', 'Import'],
@@ -1699,7 +1699,7 @@ async function servicingView() {
 
 /* --------------------------- opportunities --------------------------- */
 
-const OPP_STATUSES = ['Open', 'Closed', 'Withdrawn', 'Funded'];
+const OPP_STATUSES = ['Open', 'Passed', 'Closed', 'Withdrawn'];
 
 /** Days until a date, or null. Negative means it has passed. */
 function daysUntil(iso) {
@@ -1748,7 +1748,14 @@ async function opportunitiesView() {
   const rows = await api('/opportunities');
   const staff = !isInvestorUser();
   const live = rows.filter((o) => o.status === 'Open');
-  const rest = rows.filter((o) => o.status !== 'Open');
+  const passed = rows.filter((o) => o.status === 'Passed');
+  const rest = rows.filter((o) => !['Open', 'Passed'].includes(o.status));
+  const funded = rest.filter((o) => o.status === 'Funded');
+  // What is live is the working list. A deal that has been funded is now a
+  // policy and belongs in the portfolio, not on a marketplace; the rest are
+  // decisions already taken. They stay one click away rather than in the way.
+  const showAll = !!state.oppShowAll;
+  const archived = rest.length + passed.length;
 
   const card = (o) => {
     const remaining = Math.max(0, 100 - (Number(o.taken_pct) || 0));
@@ -1756,7 +1763,8 @@ async function opportunitiesView() {
     const urgent = o.status === 'Open' && ((d !== null && d >= 0 && d <= 7) || (remaining > 0 && remaining <= 25));
     const gone = o.status !== 'Open' || remaining === 0;
     return `
-    <div class="opp-card ${o.status === 'Open' ? 'live' : ''} ${urgent ? 'urgent' : ''} ${gone ? 'gone' : ''}"
+    <div class="opp-card ${o.status === 'Open' ? 'live' : ''} ${urgent ? 'urgent' : ''} ${gone ? 'gone' : ''} ${
+      o.status === 'Passed' ? 'passed' : ''}"
          data-opp="${o.id}">
       <div class="opp-head">
         <div>
@@ -1813,27 +1821,50 @@ async function opportunitiesView() {
       <div><h1>Opportunities</h1>
         <div class="sub">${isInvestorUser()
           ? `${live.length} ${live.length === 1 ? 'offer is' : 'offers are'} open to you`
-          : `${live.length} open · ${rest.length} closed or funded`}</div></div>
+          : `${live.length} open · ${funded.length} funded${
+              rest.length - funded.length ? ` · ${rest.length - funded.length} closed` : ''}${
+              passed.length ? ` · ${passed.length} passed` : ''}`}</div></div>
       <div class="spacer"></div>
+      ${staff && archived ? `<button id="oppShowAll" ${showAll ? 'class="active-toggle"' : ''}>${
+        showAll ? 'Hide closed' : `Show all (${archived})`}</button>` : ''}
       ${canEditData() && !isInvestorUser()
         ? '<button class="primary" id="newOppBtn">New opportunity</button>' : ''}
     </div>
 
-    ${rows.length === 0 ? `
+    ${live.length === 0 ? `
       <div class="card"><div class="card-body"><div class="empty">
         ${isInvestorUser()
           ? 'Nothing is being offered to you right now. This is where new policies will appear.'
-          : 'No opportunities yet. Create one and choose which investors get to see it.'}
+          : archived
+            ? `Nothing is open at the moment. ${archived} ${archived === 1 ? 'deal has' : 'deals have'}
+               been funded, closed or passed on — use <strong>Show all</strong> to see them.`
+            : 'No opportunities yet. Create one and choose which investors get to see it.'}
       </div></div></div>` : ''}
 
     ${live.map(card).join('')}
-    ${rest.length ? `<div class="eyebrow" style="margin:26px 0 12px;color:var(--text-muted)">
-      No longer open</div>${rest.map(card).join('')}` : ''}`;
+
+    ${showAll && rest.length ? `<div class="eyebrow" style="margin:26px 0 6px;color:var(--text-muted)">
+      No longer open</div>
+      ${funded.length ? `<div class="muted" style="font-size:12.5px;margin-bottom:12px">
+        ${funded.length === 1 ? 'One deal is' : `${funded.length} deals are`} funded — those policies
+        are in the portfolio now, with the confirmed investors on the cap table.</div>` : ''}
+      ${rest.map(card).join('')}` : ''}
+
+    ${showAll && passed.length ? `<div class="eyebrow" style="margin:26px 0 6px;color:var(--text-muted)">
+      Passed on</div>
+      <div class="muted" style="font-size:12.5px;margin-bottom:12px">
+        Kept on file and visible only to administrators. Open one and choose
+        <strong>Reopen</strong> to put it back on everybody's list.</div>
+      ${passed.map(card).join('')}` : ''}`;
 
   return {
     html,
     after: () => {
       $('#newOppBtn')?.addEventListener('click', () => openOpportunityDialog(null));
+      $('#oppShowAll')?.addEventListener('click', () => {
+        state.oppShowAll = !state.oppShowAll;
+        render();
+      });
       document.querySelectorAll('.opp-card').forEach((c) =>
         c.addEventListener('click', (e) => {
           if (e.target.closest('a,button')) return;
@@ -1910,8 +1941,14 @@ async function opportunityView() {
         <button id="scheduleBtn">Premium schedule</button>
         <button id="sheetBtn">One-pager</button>
         <button id="shareOppBtn">Share with investors</button>
+        ${o.status === 'Passed'
+          ? '<button id="reopenOppBtn">Reopen</button>'
+          : o.status === 'Funded' ? ''
+            : '<button id="passOppBtn">Pass</button>'}
         ${['admin', 'manager'].includes(state.user.role) && o.status !== 'Funded'
-          ? '<button class="primary" id="fundOppBtn">Fund it</button>' : ''}` : ''}
+          ? '<button class="primary" id="fundOppBtn">Fund it</button>' : ''}
+        ${['admin', 'manager'].includes(state.user.role)
+          ? '<button class="btn-danger" id="deleteOppBtn">Delete</button>' : ''}` : ''}
     </div>
 
     <div class="opp-card ${o.status === 'Open' ? 'live' : ''}" style="margin-bottom:22px">
@@ -2073,6 +2110,12 @@ async function opportunityView() {
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
       $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
+      $('#passOppBtn')?.addEventListener('click', () => openPassDialog(o));
+      $('#deleteOppBtn')?.addEventListener('click', () => openDeleteOppDialog(o));
+      $('#reopenOppBtn')?.addEventListener('click', async () => {
+        await api(`/opportunities/${o.id}`, { method: 'PUT', body: { status: 'Open' } });
+        toast('Back on the list'); render();
+      });
       $('#shareOppBtn')?.addEventListener('click', () => openShareDialog(o));
       $('#fundOppBtn')?.addEventListener('click', () => {
         openFundDialog(o).catch((e) => alert(e.message));
@@ -2391,6 +2434,68 @@ function openSheetDialog(o) {
   }, 'Build it');
 }
 
+/**
+ * Passing on a deal.
+ *
+ * Not the same as deleting it: the price we would not pay, the medical file
+ * and the reasoning are all worth having when the same policy comes round
+ * again six months later at a different number. So it stays on file and
+ * leaves everybody's list — including, if a manager passes it, their own.
+ * Only an administrator can see it afterwards, or put it back.
+ */
+function openPassDialog(o) {
+  const held = (o.commitments || []).filter((c) => ['Requested', 'Confirmed'].includes(c.status));
+  const admin = state.user.role === 'admin';
+  openDialog(`Pass on ${oppName(o)}`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      This keeps the record — price, premium schedule, life expectancy, medical file and
+      everything written for the one-pager — and takes it off the list.
+    </p>
+    ${held.length ? `<div class="error-box" style="margin-bottom:14px">
+      ${held.length} investor${held.length === 1 ? '' : 's'} still ${held.length === 1 ? 'has' : 'have'} a
+      request against this (${held.map((c) => `${esc(c.investor_name)} ${fmtPct(c.pct)}`).join(', ')}).
+      Passing hides it from them without answering. Decline the request${held.length === 1 ? '' : 's'}
+      first if they are owed a decision.</div>` : ''}
+    ${admin ? '' : `<div class="error-box" style="margin-bottom:14px">
+      Only administrators can see a passed opportunity. Once you pass this, it leaves your
+      list too and you will need an administrator to bring it back.</div>`}
+    <div class="field"><label>Why (optional)</label>
+      <textarea name="reason" rows="3" placeholder="LE too long for the price, carrier declined the change of ownership…"></textarea>
+      <span class="muted" style="font-size:12px">Added to the notes with today's date, so the
+        reasoning is still there the next time this policy is offered.</span></div>
+  `, async (v) => {
+    const reason = String(v.reason || '').trim();
+    const body = { status: 'Passed' };
+    if (reason) body.notes = `${o.notes ? `${o.notes}\n\n` : ''}Passed ${fmtDate(today())}: ${reason}`;
+    await api(`/opportunities/${o.id}`, { method: 'PUT', body });
+    toast('Passed');
+    go('#/opportunities');
+  }, 'Pass on it');
+}
+
+/** Deleting it outright — the record and everything hanging off it. */
+function openDeleteOppDialog(o) {
+  const label = o.policy_number || o.insured_last_name || String(o.id);
+  const held = (o.commitments || []).length;
+  openDialog(`Delete ${oppName(o)}`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      This removes the opportunity, its premium schedule, who it was shared with and
+      ${held} investor request${held === 1 ? '' : 's'}. It cannot be undone.
+      ${o.policy_id ? 'The policy it was funded into stays in the portfolio.' : ''}
+    </p>
+    <div class="error-box" style="margin-bottom:14px">
+      If you are simply not doing this deal, <strong>Pass</strong> is the better answer — it
+      keeps the price and the medical file for next time and only an administrator sees it.
+    </div>
+    ${inputField(`Type <strong>${esc(label)}</strong> to confirm`, 'confirm', '', 'text', 'required autocomplete=off')}
+  `, async (v) => {
+    if (String(v.confirm).trim() !== label) throw new Error(`Type ${label} exactly to confirm.`);
+    await api(`/opportunities/${o.id}`, { method: 'DELETE' });
+    toast('Opportunity deleted');
+    go('#/opportunities');
+  }, 'Delete it');
+}
+
 /** The one-pager itself: rendered, then printed by the browser. */
 async function opportunitySheetView() {
   const o = await api(`/opportunities/${state.params.id}`);
@@ -2461,30 +2566,38 @@ async function openFundDialog(o) {
     : null;
   openDialog(`Fund ${oppName(o)}`, `
     ${clash ? `<div class="error-box" style="margin-bottom:14px">
-      Policy ${esc(clash.policy_number)} is already in the portfolio — ${esc(clash.carrier_name || 'no carrier')},
-      ${esc(clash.insured_last || '')}. Funding will be refused. Either change the policy number
-      on this opportunity, or delete the existing policy if it was entered by hand.</div>` : ''}
+      Policy ${esc(clash.policy_number)} is already in the portfolio — ${esc(clash.carrier_name || 'no carrier')}${
+        clash.insured_last ? `, ${esc(clash.insured_last)}` : ''}. This will
+      <strong>link</strong> the opportunity to that policy and mark it funded rather than
+      creating a second one. Nothing on the existing policy is overwritten; only the
+      ${confirmed.length} confirmed allocation${confirmed.length === 1 ? '' : 's'} ${
+        confirmed.length === 1 ? 'is' : 'are'} added to its cap table.</div>` : ''}
     <p style="margin:0 0 14px;font-size:14px">
-      This creates the policy in the portfolio, records
+      ${clash ? `This marks the opportunity funded against
+        <a href="#/policy/${clash.id}">policy ${esc(clash.policy_number)}</a>, which stays exactly
+        as it is.` : `This creates the policy in the portfolio, records
       <strong>${fmtExact(o.asking_price)}</strong> as its acquisition cost, and writes the
       cap table from the ${confirmed.length} confirmed allocation${confirmed.length === 1 ? '' : 's'}
-      (${fmtPct(pct)} of the policy).
+      (${fmtPct(pct)} of the policy).`}
     </p>
     ${confirmed.length === 0 ? `<div class="error-box" style="margin-bottom:14px">
       Nothing has been confirmed yet. The policy will be created with an empty cap table.</div>` : ''}
     ${!o.policy_number || !o.carrier_name ? `<div class="error-box" style="margin-bottom:14px">
       A policy number and carrier are required before funding.</div>` : ''}
-    ${inputField('Acquisition date', 'acquisition_date',
+    ${clash ? '' : inputField('Acquisition date', 'acquisition_date',
       dateInput(o.expected_close) || today(), 'date')}
     <span class="muted" style="font-size:12px">
       Requests still waiting on a decision are not carried over — confirm them first if they
       should be. The opportunity stays on file, marked Funded, linked to the new policy.
     </span>
   `, async (v) => {
-    const res = await api(`/opportunities/${o.id}/fund`, { method: 'POST', body: v });
-    toast(`Policy created with ${res.allocations} allocation${res.allocations === 1 ? '' : 's'}`);
+    const res = await api(`/opportunities/${o.id}/fund`,
+      { method: 'POST', body: { ...v, link: clash ? true : undefined } });
+    toast(res.linked
+      ? `Linked to the existing policy · ${res.allocations} allocation${res.allocations === 1 ? '' : 's'} added`
+      : `Policy created with ${res.allocations} allocation${res.allocations === 1 ? '' : 's'}`);
     go(`#/policy/${res.policy_id}`);
-  }, 'Create the policy');
+  }, clash ? 'Link and mark funded' : 'Create the policy');
 }
 
 /* ---------------------------- maturities ----------------------------- */
@@ -3236,7 +3349,9 @@ async function settingsView() {
           <tbody>${users.map((u) => `<tr class="${u.is_active ? '' : 'row-muted'}">
             <td class="strong">${esc(u.email)}</td><td>${esc(u.full_name)}</td>
             <td>${esc(u.role)}</td>
-            <td class="secondary">${esc(u.investor_name || u.fund_codes || '')}</td>
+            <td class="secondary">${esc(u.investor_name || u.fund_codes || '')}${
+              u.investor_names ? `<div class="muted" style="font-size:11.5px;margin-top:3px"
+                >+ ${esc(u.investor_names)}</div>` : ''}</td>
             <td>${u.is_active
                   ? '<span class="badge inforce"><span class="dot"></span>Active</span>'
                   : '<span class="badge lapsed"><span class="dot"></span>Suspended</span>'}</td>
@@ -3370,6 +3485,16 @@ async function settingsView() {
               Hold ⌘ or Ctrl to pick several. This manager gets full access to the policies
               in these entities, and no access to Settings.</span>
           </div>
+          <div class="field" id="grantPick" style="display:none">
+            <label>Investors they may work with</label>
+            <select name="investor_ids" multiple size="${Math.min(8, Math.max(3, state.investors.length))}">
+              ${state.investors.map((i) => `<option value="${i.id}">${esc(i.name)}</option>`).join('')}
+            </select>
+            <span class="muted" style="font-size:12px">
+              Investors they can take an opportunity to, or allocate a policy to, before there
+              is any holding to go on. Anyone already holding inside their entities is
+              reachable without this. Can be changed later.</span>
+          </div>
           <div class="field" id="investorPick" style="display:none">
             <label>Investor *</label>
             <select name="investor_id">
@@ -3388,6 +3513,7 @@ async function settingsView() {
         const sync = () => {
           $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
           $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+          $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
         };
         roleSel.addEventListener('change', sync);
         sync();
@@ -3412,6 +3538,7 @@ async function openUserDialog(u, funds, onSaved) {
   }
   const self = u.id === state.user.id;
   const held = (u.fund_ids || []).map(Number);
+  const granted = (u.granted_investor_ids || []).map(Number);
 
   const dlg = openDialog(`Edit ${u.email}`, `
     ${inputField('Full name', 'full_name', u.full_name)}
@@ -3446,6 +3573,20 @@ async function openUserDialog(u, funds, onSaved) {
         including to a session they already have open.</span>
     </div>
 
+    <div class="field" id="grantPick" style="display:none">
+      <label>Investors they may work with</label>
+      <select name="granted_investor_ids" multiple size="${Math.min(8, Math.max(3, state.investors.length))}">
+        ${state.investors.map((i) => `<option value="${i.id}" ${
+          granted.includes(Number(i.id)) ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">
+        Anyone already holding a position in their entities is reachable anyway — this is for
+        investors they should be able to take a new opportunity to, or allocate a policy to,
+        before there is any holding to go on. Without it they would have to key in a second
+        copy of a client the firm already has. It only lets them <em>name</em> the investor;
+        it does not open up holdings outside their entities.</span>
+    </div>
+
     <div class="field" id="investorPick" style="display:none">
       <label>Investor *</label>
       <select name="investor_id">
@@ -3468,6 +3609,7 @@ async function openUserDialog(u, funds, onSaved) {
       is_active: self ? u.is_active : v.is_active === 'true',
       investor_id: v.investor_id || null,
       fund_ids: v.fund_ids || [],
+      investor_ids: v.granted_investor_ids || [],
     } });
     if (v.password) await api(`/users/${u.id}/password`, { method: 'POST', body: { password: v.password } });
     toast(v.password ? 'Account updated and password reset' : 'Account updated');
@@ -3478,6 +3620,7 @@ async function openUserDialog(u, funds, onSaved) {
   const sync = () => {
     $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
     $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+    $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
   };
   roleSel.addEventListener('change', sync);
   sync();

@@ -37,6 +37,36 @@ const fundScope = (req) =>
   isManager(req) ? (req.user.fundIds && req.user.fundIds.length ? req.user.fundIds : [-1]) : null;
 
 /**
+ * Investors an administrator has put in this manager's hands by name.
+ *
+ * Null for anybody who is not a manager, meaning "no extra grants" rather
+ * than "everybody" — it is only ever OR-ed with the entity scope, so a null
+ * here can never widen an admin's or an investor's view.
+ */
+const grantedInvestors = (req) =>
+  isManager(req) && req.user.investorIds?.length ? req.user.investorIds : null;
+
+/**
+ * Which of these investors is this caller allowed to name?
+ *
+ * Reading a directory and writing a name into it are different acts, and a
+ * manager should not be able to hand a deal to — or allocate a policy to —
+ * an investor they have no relationship with, even though guessing an id
+ * costs nothing. Returns the ids that are out of bounds; empty means fine.
+ */
+async function investorsOutOfScope(req, ids) {
+  if (!isManager(req) || !ids.length) return [];
+  const { rows } = await q(
+    `SELECT inv.id FROM investors inv
+      WHERE inv.id = ANY($1)
+        AND inv.id <> ALL(COALESCE($3::int[], '{}'))
+        AND NOT EXISTS (SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
+                         WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2))`,
+    [ids, fundScope(req), grantedInvestors(req)]);
+  return rows.map((r) => r.id);
+}
+
+/**
  * WHERE fragment limiting a row to what the caller may see.
  * `iP` is the investor-scope parameter index, `fP` the fund-scope one.
  */
@@ -194,7 +224,12 @@ router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async
                         FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
                        WHERE uf.user_id = u.id), '') AS fund_codes,
             COALESCE((SELECT array_agg(uf.fund_id)
-                        FROM user_funds uf WHERE uf.user_id = u.id), '{}') AS fund_ids
+                        FROM user_funds uf WHERE uf.user_id = u.id), '{}') AS fund_ids,
+            COALESCE((SELECT string_agg(iv.name, ', ' ORDER BY iv.name)
+                        FROM user_investors ui JOIN investors iv ON iv.id = ui.investor_id
+                       WHERE ui.user_id = u.id), '') AS investor_names,
+            COALESCE((SELECT array_agg(ui.investor_id)
+                        FROM user_investors ui WHERE ui.user_id = u.id), '{}') AS granted_investor_ids
        FROM users u LEFT JOIN investors i ON i.id = u.investor_id
       ORDER BY u.id`
   );
@@ -718,6 +753,15 @@ const oppFundScope = (req) => (isManager(req) ? (req.user.fundIds?.length ? req.
  * Investors: only if it has been shared with them and is still open.
  * Managers: only inside their entities. Everyone else: yes.
  */
+/**
+ * A passed deal is one we decided against. It is kept — the reasoning, the
+ * medical file and the price we would not pay are worth having the next time
+ * the same policy comes round — but it disappears from everybody's list
+ * except an administrator's. Only an admin can bring it back.
+ */
+const isAdmin = (req) => req.user?.role === 'admin';
+const canSeePassed = (req) => isAdmin(req);
+
 async function oppVisible(req, id) {
   const { rows } = await q(
     `SELECT o.id, o.fund_id, o.status,
@@ -728,11 +772,16 @@ async function oppVisible(req, id) {
   );
   const o = rows[0];
   if (!o) return null;
+  if (o.status === 'Passed' && !canSeePassed(req)) return null;
   if (isInvestor(req)) return o.shared && o.status === 'Open' ? o : null;
   const funds = oppFundScope(req);
   if (funds && !funds.includes(o.fund_id)) return null;
   return o;
 }
+
+/* Open → live. Passed → we said no; admin-only. Closed/Withdrawn → off the
+   table without a decision recorded. Funded → it became a policy. */
+const OPP_STATUSES = ['Open', 'Passed', 'Closed', 'Withdrawn', 'Funded'];
 
 const OPP_FIELDS = {
   policy_number: str, carrier_name: str, product_type: str, face_amount: num,
@@ -818,8 +867,10 @@ router.get('/opportunities', wrap(async (req, res) => {
                SELECT 1 FROM opportunity_shares s
                 WHERE s.opportunity_id = o.id AND s.investor_id = $1)))
         AND ($2::int[] IS NULL OR o.fund_id = ANY($2))
+        -- A passed deal is on file but off the list, for everybody but an admin.
+        AND (o.status <> 'Passed' OR $3::boolean)
       ORDER BY (o.status = 'Open') DESC, o.offer_closes_on NULLS LAST, o.created_at DESC`,
-    [me, funds]
+    [me, funds, canSeePassed(req)]
   );
 
   // Pull every schedule in one query: an IRR computed from the stated
@@ -887,6 +938,8 @@ router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => 
     return res.status(403).json({ error: 'Choose one of your own owner entities' });
   if (!str(req.body.insured_last_name) && !str(req.body.policy_number))
     return res.status(400).json({ error: 'A policy number or an insured last name is required' });
+  if ('status' in req.body && !OPP_STATUSES.includes(str(req.body.status)))
+    return res.status(400).json({ error: `Status must be one of ${OPP_STATUSES.join(', ')}` });
 
   const { cols, vals } = buildSet(OPP_FIELDS, req.body);
   cols.push('created_by'); vals.push(req.user.uid);
@@ -904,6 +957,18 @@ router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) 
   const funds = oppFundScope(req);
   if (funds && 'fund_id' in req.body && !funds.includes(int(req.body.fund_id)))
     return res.status(403).json({ error: 'That owner entity is not one of yours' });
+  if ('status' in req.body && !OPP_STATUSES.includes(str(req.body.status)))
+    return res.status(400).json({ error: `Status must be one of ${OPP_STATUSES.join(', ')}` });
+  // Funded is a consequence of creating the policy, never a label typed on by
+  // hand: setting it here would leave an opportunity claiming a policy that
+  // does not exist. Use POST /opportunities/:id/fund.
+  if (str(req.body.status) === 'Funded') {
+    const cur = await q('SELECT policy_id FROM opportunities WHERE id = $1', [req.params.id]);
+    if (!cur.rows[0]?.policy_id)
+      return res.status(400).json({
+        error: 'Use "Fund it" to mark this funded — that creates the policy in the portfolio, '
+          + 'or links it to one already there.' });
+  }
 
   const { sets, vals, next } = buildSet(OPP_FIELDS, req.body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
@@ -1072,6 +1137,12 @@ router.put('/opportunities/:id/shares', blockInvestors, oppEdit, wrap(async (req
     return res.status(400).json({
       error: 'Those investors have already asked for a piece — decline their request before removing them.' });
 
+  const barred = await investorsOutOfScope(req, ids);
+  if (barred.length)
+    return res.status(403).json({
+      error: 'You can only share with investors in your own entities, or ones an administrator '
+        + 'has given you access to.' });
+
   await q('DELETE FROM opportunity_shares WHERE opportunity_id = $1 AND investor_id <> ALL($2)',
     [req.params.id, ids.length ? ids : [-1]]);
   for (const id of ids)
@@ -1209,23 +1280,46 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
       dob: o.insured_dob, gender: o.insured_gender, state: o.insured_state,
       le_months: o.le_months, le_provider: o.le_provider, le_date: o.le_date,
     });
-    // A policy number is unique across the portfolio. If one is already
-    // there, say which policy it is rather than letting the constraint
-    // surface as "that record already exists" — the usual cause is that the
-    // deal was entered by hand as well as posted as an opportunity, and the
-    // right answer is to link the two, not to guess.
+    // A policy number is unique across the portfolio. The usual cause of a
+    // collision is that the deal was keyed in by hand as well as posted as an
+    // opportunity, and the right answer is to join the two records rather than
+    // to create a second one or to refuse outright. So: say which policy it
+    // is, and take `link` as the instruction to adopt it.
     const clash = await q(
       'SELECT id, carrier_name FROM policies WHERE lower(policy_number) = lower($1)',
       [str(o.policy_number)]);
-    if (clash.rows.length)
+    if (clash.rows.length && !req.body.link)
       return res.status(409).json({
         error: `Policy ${o.policy_number} is already in the portfolio (${
-          clash.rows[0].carrier_name || 'no carrier'}). Change the policy number on this `
-          + 'opportunity, or delete the existing policy first if it was entered by hand.',
+          clash.rows[0].carrier_name || 'no carrier'}). Link this opportunity to that policy, `
+          + 'or change the policy number here first.',
         policy_id: clash.rows[0].id,
+        can_link: true,
       });
 
     const acquired = date(req.body.acquisition_date) || o.expected_close || today();
+
+    /* Adopting a policy that is already on the books. Nothing about the
+       policy is rewritten — it is the record of what was actually bought,
+       and an opportunity's asking price is what was hoped for. Only the
+       confirmed allocations are carried across, and only where the policy
+       does not already have that investor. */
+    if (clash.rows.length) {
+      const policyId = clash.rows[0].id;
+      let linked = 0;
+      for (const c of o.commitments.filter((x) => x.status === 'Confirmed')) {
+        const ins = await q(
+          `INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
+           VALUES ($1,$2,$3,$4,'From opportunity') ON CONFLICT DO NOTHING RETURNING id`,
+          [policyId, c.investor_id, c.pct, acquired]);
+        linked += ins.rows.length;
+      }
+      await q(`UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
+                WHERE id = $2`, [policyId, req.params.id]);
+      await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+        `linked to existing policy ${o.policy_number} with ${linked} allocation(s)`);
+      return res.status(200).json({ policy_id: policyId, allocations: linked, linked: true });
+    }
 
     // All of it or none of it: a half-funded deal — a policy with no
     // acquisition cost, or a cap table with no policy behind it — is worse
@@ -1589,8 +1683,13 @@ const INVESTOR_FIELDS = {
 router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
   const search = str(req.query.search);
   const funds = fundScope(req);
-  // A manager sees only investors who hold a position inside their entities,
-  // and the figures shown cover only those positions.
+  // A manager sees investors who hold a position inside their entities, plus
+  // any an administrator has granted them by name — that second list is what
+  // lets a manager take a new deal to an existing client without keying in a
+  // duplicate record. The figures shown still cover only their own entities,
+  // so a granted investor with holdings elsewhere reads as zero here rather
+  // than exposing a book that is not theirs to see.
+  const granted = grantedInvestors(req);
   const { rows } = await q(
     `SELECT inv.*,
             COUNT(pi.id)::int AS position_count,
@@ -1604,24 +1703,25 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
                                  AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
              OR inv.email ILIKE '%'||$1||'%')
-        AND ($2::int[] IS NULL OR EXISTS (
+        AND ($2::int[] IS NULL OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
       GROUP BY inv.id ORDER BY inv.name`,
-    [search, funds]
+    [search, funds, granted]
   );
   res.json(rows);
 }));
 
 router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) => {
   const funds = fundScope(req);
+  const granted = grantedInvestors(req);
   const { rows } = await q(
     `SELECT inv.* FROM investors inv
       WHERE inv.id = $1
-        AND ($2::int[] IS NULL OR EXISTS (
+        AND ($2::int[] IS NULL OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))`,
-    [req.params.id, funds]
+    [req.params.id, funds, granted]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
   const positions = await q(
@@ -1702,6 +1802,9 @@ router.post('/policies/:id/investors', blockInvestors, canEdit, inPolicyScope('i
   if (!investorId) return res.status(400).json({ error: 'Choose an investor' });
   if (pct === null || pct <= 0 || pct > 100)
     return res.status(400).json({ error: 'Percentage must be between 0 and 100' });
+  if ((await investorsOutOfScope(req, [investorId])).length)
+    return res.status(403).json({
+      error: 'That investor is not one of yours. Ask an administrator to give you access.' });
 
   const already = await allocatedPct(req.params.id);
   if (already + pct > 100.000001)

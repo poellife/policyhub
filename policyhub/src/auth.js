@@ -94,9 +94,15 @@ export async function loadScope(req, res, next) {
   req.user.role = u.role;
   req.user.iid = u.investor_id;
   req.user.fundIds = null;
+  req.user.investorIds = null;
   if (u.role === 'manager') {
     const { rows: f } = await q('SELECT fund_id FROM user_funds WHERE user_id = $1', [req.user.uid]);
     req.user.fundIds = f.map((r) => r.fund_id);
+    // Investors an administrator has put in this manager's hands, over and
+    // above whoever already holds a position in their entities.
+    const { rows: i } = await q('SELECT investor_id FROM user_investors WHERE user_id = $1',
+      [req.user.uid]);
+    req.user.investorIds = i.map((r) => r.investor_id);
   }
   next();
 }
@@ -162,8 +168,26 @@ export async function updateUser(req, res) {
     for (const fid of fundIds)
       await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
         [id, fid]);
+
+    // Investor access, same shape: replaced wholesale, and only when the
+    // caller actually sent the field. Omitting it leaves the grants alone, so
+    // a form that does not know about them cannot silently revoke them.
+    if (Array.isArray(req.body.investor_ids)) {
+      const investorIds = req.body.investor_ids
+        .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+      if (investorIds.length) {
+        await q('DELETE FROM user_investors WHERE user_id = $1 AND investor_id <> ALL($2)',
+          [id, investorIds]);
+        for (const iid of investorIds)
+          await q('INSERT INTO user_investors (user_id, investor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+            [id, iid]);
+      } else {
+        await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
+      }
+    }
   } else {
     await q('DELETE FROM user_funds WHERE user_id = $1', [id]);
+    await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
   }
 
   await audit(req.user.uid, 'user', id, 'update',
@@ -348,6 +372,10 @@ export async function createUser(req, res) {
       for (const fid of fundIds)
         await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
           [rows[0].id, fid]);
+      for (const iid of (Array.isArray(req.body.investor_ids) ? req.body.investor_ids : [])
+        .map((n) => parseInt(n, 10)).filter(Number.isInteger))
+        await q('INSERT INTO user_investors (user_id, investor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+          [rows[0].id, iid]);
     }
     await audit(req.user.uid, 'user', rows[0].id, 'create', `${email} (${role})`);
     res.status(201).json(rows[0]);

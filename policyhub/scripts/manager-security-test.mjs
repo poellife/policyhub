@@ -88,19 +88,26 @@ for (const id of p1Ids) {
   if (used < 99.9) { allocTarget = id; break; }
 }
 check('found a policy with unallocated room', allocTarget !== null);
+// Allocate somebody the manager can actually reach: naming an investor is
+// scoped now, so an arbitrary id would be refused for the right reason and
+// prove nothing about allocation itself.
+const reachable = await json(await api(pm1, '/investors'));
+check('the manager has at least one investor to allocate', reachable.length >= 1,
+  `${reachable.length} visible`);
+const allocInvestor = reachable[0].id;
 // Clear any allocation left by an earlier run so this is repeatable, which also
 // exercises the manager's ability to remove one.
 const existing = (await json(await api(pm1, `/policies/${allocTarget}`))).owners
-  .find((o) => o.investor_id === 3);
+  .find((o) => o.investor_id === allocInvestor);
 if (existing) {
   const del = await api(pm1, `/policy-investors/${existing.id}`, { method: 'DELETE' });
   check('can remove an allocation in their entity', del.status === 200, `status ${del.status}`);
 }
 const alloc = await api(pm1, `/policies/${allocTarget}/investors`, {
-  method: 'POST', body: '{"investor_id":3,"pct":10}' });
+  method: 'POST', body: JSON.stringify({ investor_id: allocInvestor, pct: 10 }) });
 check('can allocate an investor', alloc.status === 201, `status ${alloc.status}`);
 const over = await api(pm1, `/policies/${allocTarget}/investors`, {
-  method: 'POST', body: '{"investor_id":1,"pct":95}' });
+  method: 'POST', body: JSON.stringify({ investor_id: reachable[0].id, pct: 95 }) });
 check('over-allocation still refused', over.status === 400, `status ${over.status}`);
 
 console.log('\nWRITE ATTEMPTS OUTSIDE THEIR ENTITIES');
@@ -175,6 +182,81 @@ const imp2 = await json(await fetch(`${BASE}/api/import/run`, { method: 'POST', 
 // created on the first run, updated on re-runs — either proves it was accepted
 check('import into their own entity succeeds',
   (imp2.created + imp2.updated) === 1 && imp2.errors.length === 0, JSON.stringify(imp2));
+
+console.log('\nAN ADMIN CAN PUT AN INVESTOR IN A MANAGER\'S HANDS');
+/* The entity scope answers "whose money is already in my book". It cannot
+   answer "who may I take this new deal to" — and a manager who cannot reach
+   an existing client will simply key in a second copy of them. So an admin
+   grants the relationship explicitly, and that grant widens the directory
+   without opening up holdings. */
+const allInvestors = await json(await api(staff, '/investors'));
+const pmSeesBefore = await json(await api(pm1, '/investors'));
+const stranger = allInvestors.find((i) => !pmSeesBefore.some((x) => x.id === i.id));
+check('there is an investor this manager cannot currently reach', !!stranger,
+  `${pmSeesBefore.length} of ${allInvestors.length} visible`);
+
+const users = await json(await api(staff, '/users'));
+const pm1User = users.find((u) => u.email === MANAGER1.email);
+check('the users list reports what a manager has been granted',
+  Array.isArray(pm1User?.granted_investor_ids), JSON.stringify(pm1User?.granted_investor_ids));
+
+check('before the grant, the manager cannot open them',
+  (await api(pm1, `/investors/${stranger.id}`)).status === 404);
+
+const grant = await api(staff, `/users/${pm1User.id}`, { method: 'PUT', body: JSON.stringify({
+  full_name: pm1User.full_name, role: 'manager', is_active: true,
+  fund_ids: pm1User.fund_ids, investor_ids: [stranger.id] }) });
+check('an admin can grant one', grant.status === 200, `status ${grant.status}`);
+
+const pmSeesAfter = await json(await api(pm1, '/investors'));
+check('the granted investor is now in the manager\'s directory',
+  pmSeesAfter.some((x) => x.id === stranger.id),
+  `${pmSeesBefore.length} → ${pmSeesAfter.length}`);
+check('and they can open the record', (await api(pm1, `/investors/${stranger.id}`)).status === 200);
+
+const strangerDetail = await json(await api(pm1, `/investors/${stranger.id}`));
+check('but it shows no positions from outside their entities',
+  (strangerDetail.positions || []).every((p) => p.fund_code === 'LCG1'),
+  (strangerDetail.positions || []).map((p) => p.fund_code).join(',') || 'none');
+check('and still no login details', (strangerDetail.logins || []).length === 0);
+check('the grant did not widen the policy list',
+  (await json(await api(pm1, '/policies'))).every((p) => p.fund_code === 'LCG1'));
+
+console.log('\nNAMING AN INVESTOR IS SCOPED TOO, NOT JUST READING ONE');
+const outsider = allInvestors.find((i) =>
+  i.id !== stranger.id && !pmSeesBefore.some((x) => x.id === i.id));
+if (outsider) {
+  let room = null;
+  for (const p of await json(await api(pm1, '/policies'))) {
+    const d = await json(await api(pm1, `/policies/${p.id}`));
+    const used = (d.owners || []).reduce((sum, o) => sum + Number(o.pct), 0);
+    if (used < 98 && !(d.owners || []).some((o) => o.investor_id === stranger.id)) { room = p; break; }
+  }
+  check('there is a policy with room to allocate into', !!room);
+  const sneak = await api(pm1, `/policies/${room.id}/investors`, {
+    method: 'POST', body: JSON.stringify({ investor_id: outsider.id, pct: 1 }) });
+  check('a manager cannot allocate to an investor who is not theirs',
+    sneak.status === 403, `status ${sneak.status}`);
+  const allowed = await api(pm1, `/policies/${room.id}/investors`, {
+    method: 'POST', body: JSON.stringify({ investor_id: stranger.id, pct: 1 }) });
+  check('but can allocate to the one they were granted',
+    [201, 409].includes(allowed.status), `status ${allowed.status}`);
+  if (allowed.status === 201) {
+    const made = await json(allowed);
+    await api(pm1, `/policy-investors/${made.id}`, { method: 'DELETE' });
+  }
+} else {
+  check('there is a policy with room to allocate into', true, 'skipped');
+  check('a manager cannot allocate to an investor who is not theirs', true, 'no outsider to test with');
+  check('but can allocate to the one they were granted', true, 'skipped');
+}
+
+// Put it back the way it was found.
+await api(staff, `/users/${pm1User.id}`, { method: 'PUT', body: JSON.stringify({
+  full_name: pm1User.full_name, role: 'manager', is_active: true,
+  fund_ids: pm1User.fund_ids, investor_ids: pm1User.granted_investor_ids || [] }) });
+check('revoking it takes the investor away again',
+  !((await json(await api(pm1, '/investors'))) || []).some((x) => x.id === stranger.id));
 
 console.log('\nINVESTORS ARE STILL LOCKED OUT OF MANAGER ROUTES');
 const harrison = await login(INVESTOR1.email, INVESTOR1.password);
