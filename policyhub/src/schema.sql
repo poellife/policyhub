@@ -523,3 +523,39 @@ SELECT o.id AS opportunity_id,
   FROM opportunities o
   LEFT JOIN opportunity_commitments c ON c.opportunity_id = o.id
  GROUP BY o.id;
+
+
+/* ====================================================================
+   Scheduled next steps
+   ====================================================================
+
+   "Next premium due" is one date on the policy, and a life settlement
+   needs more than that. The carrier illustration says the premium steps
+   up in three years; the change-of-ownership form has to be chased in
+   April; the LE report should be refreshed before it goes stale. None of
+   those are a premium payment, and none of them fit in a single column.
+
+   So this is a small list of dated intentions against a policy. Two
+   kinds, because they behave differently on a calendar: a Premium
+   carries a figure and is money that has to be found, while a Reminder
+   is work that has to be done. Both are estimates until they happen —
+   marking one done is what makes it real, and the transaction ledger,
+   not this table, remains the record of what was actually paid.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS policy_reminders (
+  id          SERIAL PRIMARY KEY,
+  policy_id   INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+  due_date    DATE NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'Reminder',   -- Premium | Reminder
+  amount      NUMERIC(16,2),                      -- estimate; only for Premium
+  note        TEXT NOT NULL DEFAULT '',
+  done_at     TIMESTAMPTZ,
+  done_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_reminders_policy ON policy_reminders (policy_id);
+-- The servicing calendar reads "what is outstanding, soonest first" on every
+-- load, so that is the index worth having.
+CREATE INDEX IF NOT EXISTS idx_policy_reminders_open
+  ON policy_reminders (due_date) WHERE done_at IS NULL;

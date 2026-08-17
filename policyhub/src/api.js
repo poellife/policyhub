@@ -461,12 +461,18 @@ router.get('/policies/:id', wrap(async (req, res) => {
   // A policy the investor doesn't hold is reported as missing, not forbidden —
   // "forbidden" would confirm it exists.
   if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
-  const [values, txns, extra] = await Promise.all([
+  const [values, txns, extra, reminders] = await Promise.all([
     q('SELECT * FROM policy_values WHERE policy_id = $1 ORDER BY as_of_date DESC', [req.params.id]),
     q('SELECT * FROM transactions WHERE policy_id = $1 ORDER BY txn_date DESC, id DESC', [req.params.id]),
     q(`SELECT pi.id AS link_id, pi.role, pi.notes AS link_notes, i.*
          FROM policy_insureds pi JOIN insureds i ON i.id = pi.insured_id
         WHERE pi.policy_id = $1 ORDER BY pi.id`, [req.params.id]),
+    // Servicing notes are staff business; an investor's payload carries none.
+    isInvestor(req) ? Promise.resolve({ rows: [] }) : q(
+      `SELECT r.*, u.full_name AS done_by_name
+         FROM policy_reminders r LEFT JOIN users u ON u.id = r.done_by
+        WHERE r.policy_id = $1
+        ORDER BY (r.done_at IS NOT NULL), r.due_date, r.id`, [req.params.id]),
   ]);
   // Staff see the whole cap table; an investor sees only their own line.
   const owners = await q(
@@ -484,6 +490,7 @@ router.get('/policies/:id', wrap(async (req, res) => {
     transactions: txns.rows,
     additionalInsureds: extra.rows,
     owners: owners.rows,
+    reminders: reminders.rows,
   });
 }));
 
@@ -593,6 +600,94 @@ router.delete('/policies/:id', blockInvestors, adminOrManager, inPolicyScope('id
 
   res.json({ ok: true, deleted: {
     policy_number: p.policy_number, values: p.value_count, transactions: p.txn_count } });
+}));
+
+/* ------------------------------------------------------------------ *
+ * scheduled next steps
+ *
+ * A dated intention against a policy: a premium expected in three years
+ * at roughly this figure, or a piece of work — chase the change of
+ * ownership, refresh the LE report — that has no figure at all. Both are
+ * estimates until they happen. Marking one done records that it did; the
+ * transaction ledger, not this list, remains the record of what was paid.
+ * ------------------------------------------------------------------ */
+
+const REMINDER_KINDS = ['Premium', 'Reminder'];
+
+// Staff only. These are internal servicing notes — "chase the change of
+// ownership form" is not something to put in front of an investor, and
+// inPolicyScope alone would not keep them out: it constrains entities, and an
+// investor has no entity scope to constrain.
+router.get('/policies/:id/reminders', blockInvestors, staffOnly, inPolicyScope('id'),
+  wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT r.*, u.full_name AS done_by_name
+       FROM policy_reminders r LEFT JOIN users u ON u.id = r.done_by
+      WHERE r.policy_id = $1
+      ORDER BY (r.done_at IS NOT NULL), r.due_date, r.id`, [req.params.id]);
+    res.json(rows);
+  }));
+
+router.post('/policies/:id/reminders', blockInvestors, canEdit, inPolicyScope('id'),
+  wrap(async (req, res) => {
+    const due = date(req.body.due_date);
+    const kind = REMINDER_KINDS.includes(str(req.body.kind)) ? str(req.body.kind) : 'Reminder';
+    const amount = kind === 'Premium' ? num(req.body.amount) : null;
+    const note = str(req.body.note);
+    if (!due) return res.status(400).json({ error: 'A date is required' });
+    if (amount !== null && amount < 0)
+      return res.status(400).json({ error: 'An estimated amount cannot be negative' });
+    // A reminder with no words is a dot on a calendar nobody can act on.
+    if (kind === 'Reminder' && !note)
+      return res.status(400).json({ error: 'Say what the reminder is for' });
+    const { rows } = await q(
+      `INSERT INTO policy_reminders (policy_id, due_date, kind, amount, note, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [req.params.id, due, kind, amount, note, req.user.uid]);
+    await audit(req.user.uid, 'policy_reminder', rows[0].id, 'create',
+      `policy ${req.params.id} · ${kind} ${due}`);
+    res.status(201).json(rows[0]);
+  }));
+
+/** Edit one, or tick it off. `done` is sent as a boolean either way. */
+router.put('/policy-reminders/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows: found } = await q('SELECT * FROM policy_reminders WHERE id = $1', [req.params.id]);
+  if (!found[0] || !(await assertPolicyInScope(req, found[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
+  const r = found[0];
+
+  const due = req.body.due_date === undefined ? r.due_date : date(req.body.due_date);
+  if (!due) return res.status(400).json({ error: 'A date is required' });
+  const kind = req.body.kind === undefined ? r.kind
+    : (REMINDER_KINDS.includes(str(req.body.kind)) ? str(req.body.kind) : r.kind);
+  const amount = kind !== 'Premium' ? null
+    : (req.body.amount === undefined ? r.amount : num(req.body.amount));
+  const note = req.body.note === undefined ? r.note : str(req.body.note);
+  if (kind === 'Reminder' && !note)
+    return res.status(400).json({ error: 'Say what the reminder is for' });
+
+  // Ticking it off stamps who and when; un-ticking clears both, so a mistake
+  // leaves no misleading trail of somebody having done something they did not.
+  const doneAt = req.body.done === undefined ? r.done_at : (req.body.done ? new Date() : null);
+  const doneBy = req.body.done === undefined ? r.done_by : (req.body.done ? req.user.uid : null);
+
+  const { rows } = await q(
+    `UPDATE policy_reminders SET due_date=$1, kind=$2, amount=$3, note=$4, done_at=$5, done_by=$6
+      WHERE id=$7 RETURNING *`,
+    [due, kind, amount, note, doneAt, doneBy, req.params.id]);
+  await audit(req.user.uid, 'policy_reminder', Number(req.params.id), 'update',
+    req.body.done === undefined ? `${kind} ${due}` : (req.body.done ? 'marked done' : 'reopened'));
+  res.json(rows[0]);
+}));
+
+router.delete('/policy-reminders/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows } = await q('SELECT policy_id FROM policy_reminders WHERE id = $1', [req.params.id]);
+  if (!rows[0] || !(await assertPolicyInScope(req, rows[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
+  await q('DELETE FROM policy_reminders WHERE id = $1', [req.params.id]);
+  await audit(req.user.uid, 'policy_reminder', Number(req.params.id), 'delete',
+    `policy ${rows[0].policy_id}`);
+  res.json({ ok: true });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -1666,9 +1761,44 @@ router.get('/servicing', wrap(async (req, res) => {
     }
   }
 
+  /* Scheduled next steps join the calendar as alerts of their own. A note
+     written six months ago is only useful if it comes back at you on the day
+     it matters, and the servicing screen is where somebody is already
+     looking. Investors get none of these — they are internal work. */
+  let steps = { rows: [] };
+  if (!isInvestor(req)) {
+    steps = await q(
+      `SELECT r.id AS reminder_id, r.due_date, r.kind, r.amount, r.note,
+              (r.due_date - CURRENT_DATE) AS days_until_due,
+              pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
+              pl.insured_first, pl.insured_last, pl.status
+         FROM policy_reminders r JOIN policy_latest pl ON pl.id = r.policy_id
+        WHERE r.done_at IS NULL
+          AND r.due_date <= CURRENT_DATE + 45
+          AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+        ORDER BY r.due_date`,
+      [scope, funds]);
+    for (const r of steps.rows) {
+      const name = r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
+      const d = r.days_until_due;
+      const when = d < 0 ? `${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} overdue`
+        : d === 0 ? 'due today'
+          : `due in ${d} day${d === 1 ? '' : 's'}`;
+      const what = r.kind === 'Premium'
+        ? `Scheduled premium${r.amount ? ` of about ${Number(r.amount).toLocaleString('en-US',
+            { style: 'currency', currency: 'USD' })}` : ''}`
+        : 'Follow-up';
+      alerts.push({
+        ...r, insured: name, scheduled: true,
+        severity: d < 0 ? 'critical' : d <= 14 ? 'warning' : 'info',
+        reason: `${what} ${when}${r.note ? ` — ${r.note}` : ''}`,
+      });
+    }
+  }
+
   const rank = { critical: 0, serious: 1, warning: 2, info: 3 };
   alerts.sort((a, b) => rank[a.severity] - rank[b.severity]);
-  res.json({ upcoming: rows.filter((r) => r.next_premium_due), alerts });
+  res.json({ upcoming: rows.filter((r) => r.next_premium_due), alerts, scheduled: steps.rows });
 }));
 
 /* ------------------------------------------------------------------ *

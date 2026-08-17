@@ -158,7 +158,11 @@ check('an investor gets it as "Realized"', inav.includes('Realized'), inav.join(
 await ip.goto(`${BASE}/#/maturities`); await ip.waitForTimeout(900);
 const itext = await ip.locator('.main').textContent();
 check('the page renders for an investor', itext.includes('Realized'));
-check('and offers the share toggle', (await ip.locator('.share-toggle').count()) === 1);
+check('and states that the figures are their share',
+  (await ip.locator('.share-note').count()) === 1,
+  await ip.locator('.share-note').textContent().catch(() => 'absent'));
+check('with no way to switch to whole-policy figures',
+  (await ip.locator('[data-share]').count()) === 0);
 check('with no owner-entity column', !itext.includes('LCG1'));
 await ip.screenshot({ path: `${S}/mt5-investor.png`, fullPage: true });
 

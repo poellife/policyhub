@@ -315,17 +315,22 @@ table.data tfoot td {
 .alert-row .meta { color: var(--text-muted); font-size: 12.5px; margin-top: 3px; }
 .alert-row .spacer { flex: 1; }
 
-.share-toggle {
-  display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--pill);
-  overflow: hidden; flex: none;
+/* An investor is told what they are looking at rather than offered a choice
+   about it — the full-policy figure is not theirs and never was. */
+.share-note {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 13px; border-radius: var(--pill);
+  border: 1px solid var(--border-strong); background: var(--sunken);
+  font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.09em; color: var(--text-muted); white-space: nowrap;
 }
-.share-toggle button {
-  border: none; border-radius: 0; padding: 7px 14px; font-size: 12.5px;
-  background: transparent; color: var(--text-muted); font-weight: 500;
-}
-.share-toggle button:hover { color: var(--text-primary); border: none; }
-.share-toggle button.on {
-  background: var(--accent); color: var(--accent-ink); font-weight: 600;
+.share-note strong { color: var(--text-primary); font-size: 12px; letter-spacing: 0; }
+
+/* The same fact, stated once at the top of a policy an investor opens. */
+.share-banner {
+  border: 1px solid var(--border-strong); border-left: 3px solid var(--text-primary);
+  border-radius: var(--radius); background: var(--sunken);
+  padding: 13px 16px; margin-bottom: 18px; font-size: 13.5px; line-height: 1.55;
 }
 
 /* ------------------------------- tabs -------------------------------- */
@@ -595,6 +600,13 @@ table.rpt-kv td:first-child {
 }
 table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
 
+/* An investor's statement says what basis it is on, once, near the top. */
+.rpt-basis {
+  border: 1px solid #e0e0e0; border-left: 3px solid #0a0a0a;
+  padding: 9px 12px; margin: -8px 0 18px;
+  font-size: 11px; line-height: 1.5; color: #2e2e2e; background: #fafafa;
+}
+
 /* --- the opportunity one-pager -------------------------------------- */
 
 /* This document is deliberately denser than the portfolio reports. It has one
@@ -790,6 +802,23 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
 
 /* Passed: on file, off the list. Reads as set aside rather than dead — an
    administrator is looking at it precisely because it might come back. */
+.opp-bullets { margin: 0; padding-left: 18px; }
+.opp-bullets li { font-size: 13.5px; line-height: 1.6; margin-bottom: 7px; color: var(--text-primary); }
+.opp-callout {
+  border: 1px solid var(--border); border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius); padding: 14px 16px; background: var(--sunken);
+}
+
+/* --- the follow-up schedule ----------------------------------------- */
+
+.step-kind { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+.step-row { align-items: flex-start; }
+.step-row .who { font-weight: 600; }
+/* Completed work stays legible but stops competing with what is outstanding. */
+.step-done { opacity: .55; }
+.step-done:hover { opacity: 1; }
+.step-row + .step-row { border-top: 1px solid var(--grid); }
+
 /* A toggle that is currently on reads as pressed, not as another action. */
 .active-toggle { background: var(--sunken); border-color: var(--text-primary); font-weight: 600; }
 

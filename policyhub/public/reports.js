@@ -46,6 +46,50 @@ const pct = (part, whole) => (!whole ? '—' : `${((part / whole) * 100).toFixed
 const insuredOf = (p) =>
   p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
 
+/* --------------------- an investor's share of it --------------------- *
+ *
+ * The portfolio-level reports are weighted on the server, because the
+ * arithmetic has to happen before the rows are summed. The two that work
+ * from raw policy records — the schedule and the fact sheets — are weighted
+ * here instead, on exactly the same principle: an investor holding 8% of a
+ * policy is handed a document about 8% of a policy, and it says so on its
+ * face. A statement that quotes a death benefit the reader does not own is
+ * worse than no statement at all.
+ * -------------------------------------------------------------------- */
+
+/** Money columns on a policy row. Dates, names and percentages are untouched. */
+const MONEY_KEYS = [
+  'face_amount', 'death_benefit', 'account_value', 'cash_surrender_value',
+  'cost_of_insurance', 'premium_required', 'total_invested', 'total_acquisition',
+  'total_premiums', 'acquisition_cost', 'loan_balance', 'proceeds_amount',
+];
+
+function scaleRow(p) {
+  const pct = Number(p?.my_pct);
+  if (!Number.isFinite(pct)) return p;
+  const f = pct / 100;
+  const out = { ...p };
+  for (const k of MONEY_KEYS) if (out[k] !== null && out[k] !== undefined && out[k] !== '')
+    out[k] = Number(out[k]) * f;
+  // Nested history carries the same money columns and the same obligation.
+  if (Array.isArray(out.values)) out.values = out.values.map((v) => {
+    const nv = { ...v };
+    for (const k of MONEY_KEYS) if (nv[k] !== null && nv[k] !== undefined && nv[k] !== '')
+      nv[k] = Number(nv[k]) * f;
+    return nv;
+  });
+  if (Array.isArray(out.transactions))
+    out.transactions = out.transactions.map((t) => ({ ...t, amount: Number(t.amount) * f }));
+  return out;
+}
+
+/** One line, on every report an investor generates, saying what they hold. */
+function shareBasis(o) {
+  if (!o?.investorShare) return '';
+  return `<div class="rpt-basis">Every figure in this report is <strong>your share</strong> of each
+    policy — ${esc(o.investorShare)}. The whole-policy figures are not shown.</div>`;
+}
+
 /* ------------------------- shared furniture -------------------------- */
 
 function letterhead(title, subtitle, asOf) {
@@ -71,9 +115,10 @@ function footer(note) {
   </div>`;
 }
 
-const confidential = (showBasis) =>
+const confidential = (showBasis, o) =>
   `<div class="rpt-confidential">Confidential${showBasis
-    ? ' — contains cost basis and capital invested' : ''}. For the intended recipient only.</div>`;
+    ? ' — contains cost basis and capital invested' : ''}. For the intended recipient only.</div>
+   ${shareBasis(o)}`;
 
 /** Swap the @page rule so a wide schedule can print landscape. */
 function setPageOrientation(landscape) {
@@ -155,7 +200,7 @@ function buildSummary(d, o) {
 
   return `
     ${letterhead('Portfolio Summary', o.fund ? `Fund ${o.fund}` : 'All funds', o.asOf)}
-    ${confidential(o.showBasis)}
+    ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 6 : 4}">
       ${tile('Policies in force', t.policy_count, `Average insured age ${Math.round(Number(d.ages.avg_age)) || '—'}`)}
@@ -204,7 +249,7 @@ function buildSchedule(rows, o) {
 
   return `
     ${letterhead('Policy Schedule', `${rows.length} policies${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
-    ${confidential(o.showBasis)}
+    ${confidential(o.showBasis, o)}
     <table class="rpt-table rpt-table-tight">
       <thead><tr>
         <th>#</th><th>Last name</th><th>First name</th><th>DOB</th><th class="num">Age</th>
@@ -407,7 +452,7 @@ function buildReturn(d, o, { realized }) {
 
   return `
     ${letterhead(title, `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
-    ${confidential(o.showBasis)}
+    ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
       ${tile(realized ? 'Realized IRR' : 'IRR if matured today', fmtIrr(p.irr), weightedNote)}
@@ -548,7 +593,7 @@ function buildFactSheets(sheets, o) {
     return `
     <section class="rpt-sheet ${idx < sheets.length - 1 ? 'page-break-after' : ''}">
       ${letterhead('Policy Fact Sheet', `${esc(p.carrier_name)} · ${esc(p.policy_number)}`, o.asOf)}
-      ${confidential(o.showBasis)}
+      ${confidential(o.showBasis, o)}
 
       <h2 class="rpt-h2">${esc(insuredOf(p))}</h2>
 
@@ -924,6 +969,16 @@ export function buildOpportunitySheet(o, opts = {}) {
   </section>`;
 }
 
+/** "your 40% of it" for a single holding, "between 8% and 40%" for a book. */
+function describeShare(policies) {
+  const pcts = [...new Set(policies.map((p) => Number(p.my_pct))
+    .filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+  const fmt = (n) => `${Number(n).toFixed(Number(n) % 1 ? 4 : 0)}%`;
+  if (!pcts.length) return 'your recorded percentage of each';
+  if (pcts.length === 1) return fmt(pcts[0]);
+  return `between ${fmt(pcts[0])} and ${fmt(pcts[pcts.length - 1])}, policy by policy`;
+}
+
 export async function reportsView(api, state) {
   const investorUser = state.user?.role === 'investor';
   const [funds, policies] = await Promise.all([
@@ -1029,6 +1084,10 @@ export async function reportsView(api, state) {
 
         const o = {
           asOf: longDate($('#rptAsOf').value),
+          // Named rather than implied: one policy at 40% reads differently
+          // from a book held at several percentages, and the reader is
+          // entitled to know which of those they are looking at.
+          investorShare: investorUser ? describeShare(policies) : null,
           fund: $('#rptFund').value,
           showBasis: $('#rptBasis').checked,
           detail: $('#rptDetail').checked,
@@ -1050,7 +1109,8 @@ export async function reportsView(api, state) {
             });
 
           } else if (r.type === 'schedule') {
-            const rows = await api(`/policies?fund=${encodeURIComponent(o.fund)}&status=`);
+            const raw = await api(`/policies?fund=${encodeURIComponent(o.fund)}&status=`);
+            const rows = investorUser ? raw.map(scaleRow) : raw;
             out.innerHTML = `<div class="rpt-sheet">${buildSchedule(rows, o)}</div>`;
 
           } else if (r.type === 'forecast') {
@@ -1087,7 +1147,10 @@ export async function reportsView(api, state) {
             const picked = [...$('#rptPolicies').selectedOptions].map((op) => Number(op.value));
             const ids = picked.length ? picked : policies.map((p) => p.id);
             const sheets = [];
-            for (const id of ids) sheets.push(await api(`/policies/${id}`));
+            for (const id of ids) {
+              const one = await api(`/policies/${id}`);
+              sheets.push(investorUser ? scaleRow(one) : one);
+            }
             out.innerHTML = buildFactSheets(sheets, o);
             charts = () => sheets.forEach((p) => {
               const el = $(`#rptSheetChart${p.id}`);

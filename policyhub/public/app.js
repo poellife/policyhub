@@ -35,7 +35,6 @@ const state = {
   policies: [],
   filters: { search: '', status: '', fund: '' },
   insuredSearch: '',
-  shareMode: 'mine',   // investors: 'mine' | 'full'
   investorSearch: '',
   investors: [],
   sort: { key: 'insured_last', dir: 1 },
@@ -96,25 +95,21 @@ const insuredName = (p) =>
 const statusBadge = (s) =>
   `<span class="badge ${esc(String(s || '').toLowerCase())}"><span class="dot"></span>${esc(s || 'Unknown')}</span>`;
 
-/** Segmented control shown only to investors. */
+/**
+ * Said plainly, wherever an investor is looking at money.
+ *
+ * This used to be a toggle between "my share" and "full policy". It is not
+ * any more: the full-policy figure is not theirs and showing it invited the
+ * one mistake that matters — reading somebody else's number as your own. So
+ * this states what the figures are instead of offering a choice about it.
+ */
 function shareToggle(pct) {
   if (!isInvestorUser()) return '';
-  const mine = state.shareMode === 'mine';
-  return `
-    <div class="share-toggle" role="group" aria-label="Value basis">
-      <button data-share="mine" class="${mine ? 'on' : ''}">
-        My share${pct != null ? ` · ${Number(pct).toFixed(Number(pct) % 1 ? 4 : 0)}%` : ''}</button>
-      <button data-share="full" class="${mine ? '' : 'on'}">Full policy</button>
-    </div>`;
+  return `<div class="share-note">${pct != null
+    ? `Your share · <strong>${fmtPct(pct)}</strong>`
+    : 'Your share'}</div>`;
 }
-function wireShareToggle() {
-  document.querySelectorAll('[data-share]').forEach((b) =>
-    b.addEventListener('click', () => {
-      if (state.shareMode === b.dataset.share) return;
-      state.shareMode = b.dataset.share;
-      render();
-    }));
-}
+function wireShareToggle() { /* nothing to wire — it is a label, not a control */ }
 
 function toast(msg) {
   const t = document.createElement('div');
@@ -238,12 +233,18 @@ const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?
 const navItems = () =>
   isInvestorUser() ? INVESTOR_NAV : isManagerUser() ? MANAGER_NAV : STAFF_NAV;
 
-/* Display multiplier: an investor viewing "my share" sees every figure scaled
-   by their percentage of that policy. Staff always see the whole policy. */
+/* Display multiplier.
+ *
+ * An investor owns a percentage of a policy, not a policy, and every figure
+ * they are shown is scaled to that percentage — always, with no way to switch
+ * it off. A screen that shows an investor an $800,000 acquisition cost when
+ * they paid $200,000 of it is not a different view of the same truth; it is a
+ * number they will act on and be wrong about. Staff always see the whole
+ * policy, because their job is the whole policy.
+ *
+ * The one thing never scaled is a date. */
 const shareFactor = (p) =>
-  isInvestorUser() && state.shareMode === 'mine' && p?.my_pct != null
-    ? Number(p.my_pct) / 100
-    : 1;
+  isInvestorUser() && p?.my_pct != null ? Number(p.my_pct) / 100 : 1;
 const scaled = (v, p) =>
   v === null || v === undefined || v === '' ? null : Number(v) * shareFactor(p);
 
@@ -449,8 +450,12 @@ function alertRow(a) {
       </div>
       <div class="spacer"></div>
       <div style="text-align:right">
-        <div style="font-variant-numeric:tabular-nums;font-weight:600">${a.premium_required ? fmtExact(a.premium_required) : ''}</div>
-        <div class="meta">${a.next_premium_due ? fmtDate(a.next_premium_due) : ''}</div>
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${
+          a.scheduled ? (a.amount ? fmtExact(a.amount) : '')
+            : (a.premium_required ? fmtExact(a.premium_required) : '')}</div>
+        <div class="meta">${a.scheduled
+          ? `${fmtDate(a.due_date)} · scheduled`
+          : (a.next_premium_due ? fmtDate(a.next_premium_due) : '')}</div>
       </div>
     </div>`;
 }
@@ -530,7 +535,7 @@ async function policiesView() {
     <div class="page-head">
       <div><h1>${isInvestorUser() ? 'My policies' : 'Policies'}</h1>
         <div class="sub">${rows.length} of ${policies.length ? policies.length : 0} shown${
-          isInvestorUser() ? ` · showing ${state.shareMode === 'mine' ? 'your share' : 'full policy values'}` : ''}</div></div>
+          isInvestorUser() ? ' · every figure is your share of each policy' : ''}</div></div>
       <div class="spacer"></div>
       ${shareToggle()}
       <button id="exportBtn">Export CSV</button>
@@ -659,6 +664,13 @@ async function policyView() {
       ${canEditData() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
       ${canEditData() ? '<button class="primary" id="editBtn">Edit policy</button>' : ''}
     </div>
+
+    ${isInvestorUser() && p.my_pct != null ? `
+    <div class="share-banner">
+      You own <strong>${fmtPct(p.my_pct)}</strong> of this policy. Every figure on this page —
+      the death benefit, what has been invested, the premium, the cash value and the return —
+      is <strong>your ${fmtPct(p.my_pct)} share</strong>, not the whole policy.
+    </div>` : ''}
 
     ${p.matured_on ? `
     <div class="card" style="border-left:3px solid var(--text-primary)">
@@ -837,7 +849,7 @@ function overviewTab(p) {
         ${row('Issue date', fmtDate(p.issue_date))}
         ${row('Issue age', p.issue_age ?? dash)}
         ${row('Issue state', esc(p.issue_state) || dash)}
-        ${row('Face amount', money(p.face_amount))}
+        ${row('Face amount', money(scaled(p.face_amount, p)))}
         ${row('Owner / fund', esc(p.fund_code || '—'))}
         ${row('Owner account', esc(p.owner_account) || dash)}
         ${row('Beneficiary', esc(p.beneficiary) || dash)}
@@ -848,9 +860,9 @@ function overviewTab(p) {
       <div class="card-head"><h2>Acquisition &amp; premium</h2></div>
       <div class="card-body"><dl class="kv">
         ${row('Acquired', fmtDate(p.acquisition_date))}
-        ${row('Acquisition cost', money(p.acquisition_cost))}
-        ${row('Total invested', money(p.total_invested))}
-        ${row('Premium required', `${money(p.premium_required)} <span class="muted">${esc(p.premium_mode || '')}</span>`)}
+        ${row('Acquisition cost', money(scaled(p.acquisition_cost, p)))}
+        ${row('Total invested', money(scaled(p.total_invested, p)))}
+        ${row('Premium required', `${money(scaled(p.premium_required, p))} <span class="muted">${esc(p.premium_mode || '')}</span>`)}
         ${row('Next premium due', fmtDate(p.next_premium_due))}
         ${row('Grace period', `${p.grace_period_days || 61} days`)}
         ${row('Values as of', fmtDate(p.value_as_of))}
@@ -949,11 +961,11 @@ function valuesTab(p, values) {
             ? '<tr><td colspan="9"><div class="empty">No snapshots yet. Add one or import a CSV.</div></td></tr>'
             : [...values].reverse().map((v) => `<tr>
                 <td class="strong">${fmtDate(v.as_of_date)}</td>
-                <td class="num">${money(v.account_value, 2)}</td>
-                <td class="num">${money(v.cash_surrender_value, 2)}</td>
-                <td class="num">${money(v.cost_of_insurance, 2)}</td>
-                <td class="num">${money(v.death_benefit)}</td>
-                <td class="num">${money(v.loan_balance, 2)}</td>
+                <td class="num">${money(scaled(v.account_value, p), 2)}</td>
+                <td class="num">${money(scaled(v.cash_surrender_value, p), 2)}</td>
+                <td class="num">${money(scaled(v.cost_of_insurance, p), 2)}</td>
+                <td class="num">${money(scaled(v.death_benefit, p))}</td>
+                <td class="num">${money(scaled(v.loan_balance, p), 2)}</td>
                 <td>${fmtDate(v.date_of_last_withdrawal)}</td>
                 <td class="muted">${esc(v.source)}</td>
                 <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-value="${v.id}">Delete</button>` : ''}</td>
@@ -965,14 +977,20 @@ function valuesTab(p, values) {
 }
 
 function transactionsTab(p) {
+  /* The ledger is the policy's, but an investor paid a percentage of every
+     line in it. Showing the gross figure to somebody who put up an eighth of
+     it is the same mistake as showing them the whole death benefit. */
+  const f = shareFactor(p);
   const byType = {};
-  for (const t of p.transactions) byType[t.txn_type] = (byType[t.txn_type] || 0) + Number(t.amount);
-  const total = p.transactions.reduce((s, t) => s + Number(t.amount), 0);
+  for (const t of p.transactions) byType[t.txn_type] = (byType[t.txn_type] || 0) + Number(t.amount) * f;
+  const total = p.transactions.reduce((s, t) => s + Number(t.amount) * f, 0);
 
   return `
   <div class="grid-2">
     <div class="card">
-      <div class="card-head"><h2>Totals by type</h2></div>
+      <div class="card-head"><h2>Totals by type</h2>${isInvestorUser() && p.my_pct != null
+        ? `<div class="spacer"></div><span class="muted" style="font-size:12px">your ${
+            fmtPct(p.my_pct)} share</span>` : ''}</div>
       <div class="card-body">
         ${Object.keys(byType).length === 0 ? '<div class="empty">No transactions yet</div>' : `
         <table class="data">
@@ -991,6 +1009,8 @@ function transactionsTab(p) {
 
   <div class="card">
     <div class="card-head"><h2>Ledger</h2><div class="spacer"></div>
+      ${isInvestorUser() && p.my_pct != null
+        ? `<span class="muted" style="font-size:12px">every amount is your ${fmtPct(p.my_pct)} share</span>` : ''}
       ${canEditData() ? '<button class="btn-sm primary" id="addTxnBtn">Add transaction</button>' : ''}</div>
     <div class="table-wrap">
       <table class="data">
@@ -1001,7 +1021,7 @@ function transactionsTab(p) {
             : p.transactions.map((t) => `<tr>
                 <td class="strong">${fmtDate(t.txn_date)}</td>
                 <td>${esc(t.txn_type)}</td>
-                <td class="num">${money(t.amount, 2)}</td>
+                <td class="num">${money(Number(t.amount) * f, 2)}</td>
                 <td class="secondary">${esc(t.remarks)}</td>
                 <td class="muted">${esc(t.source)}</td>
                 <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-txn="${t.id}">Delete</button>` : ''}</td>
@@ -1013,6 +1033,35 @@ function transactionsTab(p) {
 }
 
 function servicingTab(p, monthsCovered) {
+  /* An investor gets the dates and what their share of each will cost, and
+     nothing else. Lapse risk, stale carrier data and the follow-up work are
+     the manager's job; an investor reading "account value covers 2.4 months"
+     on a policy they hold 8% of has been handed an alarm they cannot act on. */
+  if (isInvestorUser()) {
+    return `
+    <div class="card">
+      <div class="card-head"><h2>Premium schedule</h2><div class="spacer"></div>
+        ${p.my_pct != null ? `<span class="muted" style="font-size:12px">your ${
+          fmtPct(p.my_pct)} share</span>` : ''}</div>
+      <div class="card-body">
+        <dl class="kv">
+          <dt>Next premium due</dt><dd>${fmtDate(p.next_premium_due)}</dd>
+          <dt>Your share of it</dt><dd>${money(scaled(p.premium_required, p))}</dd>
+          <dt>Paid</dt><dd>${esc(p.premium_mode || '—')}</dd>
+        </dl>
+        <div class="muted" style="font-size:12.5px;margin-top:14px;line-height:1.6">
+          ${p.next_premium_due
+            ? `The full policy premium is ${money(p.premium_required)}; the figure above is your
+               ${p.my_pct != null ? fmtPct(p.my_pct) : ''} of it.`
+            : 'No premium date is scheduled on this policy at the moment.'}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  const steps = p.reminders || [];
+  const open = steps.filter((r) => !r.done_at);
+  const done = steps.filter((r) => r.done_at);
   const due = p.next_premium_due
     ? Math.round((new Date(`${p.next_premium_due}T00:00:00`) - new Date(`${today()}T00:00:00`)) / 86400000)
     : null;
@@ -1031,7 +1080,7 @@ function servicingTab(p, monthsCovered) {
       <div class="card-head"><h2>Premium schedule</h2></div>
       <div class="card-body">
         <dl class="kv">
-          <dt>Premium required</dt><dd>${money(p.premium_required)}</dd>
+          <dt>Premium required</dt><dd>${money(scaled(p.premium_required, p))}</dd>
           <dt>Mode</dt><dd>${esc(p.premium_mode || '—')}</dd>
           <dt>Next due</dt><dd>${fmtDate(p.next_premium_due)}</dd>
           <dt>Grace period</dt><dd>${p.grace_period_days || 61} days</dd>
@@ -1040,23 +1089,68 @@ function servicingTab(p, monthsCovered) {
         </dl>
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
           ${canEditData() ? `<button class="btn-sm primary" id="logPremiumBtn">Log premium payment</button>
-          <button class="btn-sm" id="advanceDueBtn">Advance next due date</button>` : ''}
+          <button class="btn-sm" id="scheduleStepBtn">Schedule next step</button>` : ''}
         </div>
       </div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Status checks</h2></div>
+      <div class="card-head"><h2>Follow-up schedule</h2><div class="spacer"></div>
+        ${open.length ? `<span class="muted" style="font-size:12px">${open.length} outstanding</span>` : ''}</div>
       <div class="card-body flush">
-        ${notes.length === 0
-          ? '<div class="empty">No issues detected.</div>'
-          : notes.map(([sev, text]) => `
-            <div class="alert-row">
-              <span class="sev ${sev}"><span class="ic">${SEV_ICON[sev]}</span></span>
-              <div><div class="who">${esc(text)}</div></div>
-            </div>`).join('')}
+        ${notes.map(([sev, text]) => `
+          <div class="alert-row">
+            <span class="sev ${sev}"><span class="ic">${SEV_ICON[sev]}</span></span>
+            <div><div class="who">${esc(text)}</div></div>
+          </div>`).join('')}
+
+        ${open.map((r) => stepRow(r)).join('')}
+
+        ${notes.length === 0 && open.length === 0
+          ? `<div class="empty">Nothing outstanding.${canEditData()
+              ? ' Use <strong>Schedule next step</strong> to put a premium or a follow-up on the calendar.' : ''}</div>`
+          : ''}
       </div>
+      ${done.length ? `<div class="card-body" style="border-top:1px solid var(--grid)">
+        <details><summary class="muted" style="font-size:12px;cursor:pointer">${
+          done.length} completed</summary>
+        <div style="margin-top:10px">${done.map((r) => stepRow(r)).join('')}</div>
+        </details></div>` : ''}
     </div>
   </div>`;
+}
+
+/**
+ * One line of the follow-up schedule.
+ *
+ * A premium and a piece of work read differently on purpose: the premium
+ * carries a figure because somebody has to find the money, the follow-up
+ * carries only words because there is nothing to find. Both say how far
+ * away they are, since "March" means nothing without today beside it.
+ */
+function stepRow(r) {
+  const d = daysUntil(r.due_date);
+  const isDone = !!r.done_at;
+  const sev = isDone ? 'info' : d < 0 ? 'critical' : d <= 14 ? 'warning' : 'info';
+  const when = isDone ? `done ${fmtDate(String(r.done_at).slice(0, 10))}`
+    : d < 0 ? `${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} overdue`
+      : d === 0 ? 'today' : `in ${d} day${d === 1 ? '' : 's'}`;
+  return `
+    <div class="alert-row step-row ${isDone ? 'step-done' : ''}" data-step="${r.id}">
+      <span class="sev ${sev}"><span class="ic">${SEV_ICON[sev]}</span></span>
+      <div style="flex:1;min-width:0">
+        <div class="who">${r.kind === 'Premium'
+          ? `Premium${r.amount ? ` · about ${fmtExact(r.amount)}` : ''}` : 'Follow-up'}</div>
+        <div class="meta">${fmtDate(r.due_date)} · ${esc(when)}${
+          r.note ? ` · ${esc(r.note)}` : ''}${
+          isDone && r.done_by_name ? ` · ${esc(r.done_by_name)}` : ''}</div>
+      </div>
+      ${canEditData() ? `<div style="white-space:nowrap;display:flex;gap:6px">
+        <button class="btn-sm" data-step-done="${r.id}" data-to="${isDone ? 'false' : 'true'}"
+          >${isDone ? 'Reopen' : 'Done'}</button>
+        ${isDone ? '' : `<button class="btn-sm" data-step-edit="${r.id}">Edit</button>`}
+        <button class="btn-sm btn-danger" data-step-del="${r.id}">Remove</button>
+      </div>` : ''}
+    </div>`;
 }
 
 /* ---------------------------- return / IRR --------------------------- */
@@ -1353,16 +1447,28 @@ function wireDetailTab(p, values, irrData) {
   if (detailTab === 'servicing') {
     $('#logPremiumBtn')?.addEventListener('click', () =>
       openTxnDialog(p, { txn_type: 'Premium Payment', amount: p.premium_required }));
-    $('#advanceDueBtn')?.addEventListener('click', async () => {
-      const base = p.next_premium_due ? new Date(`${p.next_premium_due}T00:00:00`) : new Date();
-      const step = { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 }[p.premium_mode] || 12;
-      base.setMonth(base.getMonth() + step);
-      await api(`/policies/${p.id}`, {
-        method: 'PUT', body: { next_premium_due: base.toISOString().slice(0, 10) },
-      });
-      toast(`Next due date moved to ${base.toLocaleDateString('en-US')}`);
-      render();
-    });
+    $('#scheduleStepBtn')?.addEventListener('click', () => openStepDialog(p));
+
+    document.querySelectorAll('[data-step-edit]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const r = (p.reminders || []).find((x) => String(x.id) === b.dataset.stepEdit);
+        if (r) openStepDialog(p, r);
+      }));
+
+    document.querySelectorAll('[data-step-done]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        await api(`/policy-reminders/${b.dataset.stepDone}`,
+          { method: 'PUT', body: { done: b.dataset.to === 'true' } });
+        toast(b.dataset.to === 'true' ? 'Marked done' : 'Reopened');
+        render();
+      }));
+
+    document.querySelectorAll('[data-step-del]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        await api(`/policy-reminders/${b.dataset.stepDel}`, { method: 'DELETE' });
+        toast('Removed from the schedule');
+        render();
+      }));
   }
 }
 
@@ -1525,11 +1631,11 @@ function openDeletePolicyDialog(p) {
     <table class="data" style="margin-bottom:16px">
       <tbody>
         <tr><td>Insured</td><td class="strong">${esc(insuredName(p))}</td></tr>
-        <tr><td>Death benefit</td><td class="strong">${money(p.death_benefit ?? p.face_amount)}</td></tr>
+        <tr><td>Death benefit</td><td class="strong">${money(scaled(p.death_benefit ?? p.face_amount, p))}</td></tr>
         <tr><td>Value snapshots</td><td class="strong">${vals}</td></tr>
         <tr><td>Ledger entries</td><td class="strong">${txns}</td></tr>
         ${lives ? `<tr><td>Additional lives</td><td class="strong">${lives}</td></tr>` : ''}
-        <tr><td>Capital invested</td><td class="strong">${money(p.total_invested)}</td></tr>
+        <tr><td>Capital invested</td><td class="strong">${money(scaled(p.total_invested, p))}</td></tr>
       </tbody>
     </table>
     <div class="error-box" style="margin-bottom:16px">
@@ -1624,6 +1730,88 @@ function openValueDialog(p) {
   });
 }
 
+/**
+ * Put something on the calendar against this policy.
+ *
+ * Two things go on it. A premium expected at some future date, with an
+ * estimate of what it will be — an illustration that steps up in year nine
+ * is a cash-flow fact worth knowing about in year eight. And anything else
+ * that has a date attached and no figure: chase the change-of-ownership
+ * form, refresh the LE report, call the carrier about the grace period.
+ *
+ * The amount is an estimate and says so. What was actually paid belongs in
+ * the transaction ledger, which is a different act with a different button.
+ */
+function openStepDialog(p, existing = null) {
+  const editing = !!existing;
+  const kind = existing?.kind || 'Premium';
+  // Default to a year out at the stated premium — the commonest case by far,
+  // and a sensible thing to correct rather than a blank form to fill in.
+  const suggestedDate = existing ? dateInput(existing.due_date)
+    : addMonthsIso(dateInput(p.next_premium_due) || today(),
+      { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 }[p.premium_mode] || 12);
+
+  const dlg = openDialog(editing ? 'Edit this step' : 'Schedule next step', `
+    <div class="field">
+      <label>What is it</label>
+      <div class="step-kind">
+        <label class="rpt-choice ${kind === 'Premium' ? 'selected' : ''}">
+          <input type="radio" name="kind" value="Premium" ${kind === 'Premium' ? 'checked' : ''}>
+          <strong>Premium payment</strong>
+          <span class="muted" style="display:block;font-size:12px;margin-top:3px">
+            A premium you expect to pay on this date, with an estimate of the amount.</span>
+        </label>
+        <label class="rpt-choice ${kind === 'Reminder' ? 'selected' : ''}">
+          <input type="radio" name="kind" value="Reminder" ${kind === 'Reminder' ? 'checked' : ''}>
+          <strong>Reminder</strong>
+          <span class="muted" style="display:block;font-size:12px;margin-top:3px">
+            Anything else with a date on it — chase a form, refresh an LE, call the carrier.</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="field-row">
+      ${inputField('Date', 'due_date', suggestedDate, 'date', 'required')}
+      <div class="field" id="stepAmountField">
+        <label>Estimated amount</label>
+        <input name="amount" type="number" step="0.01" min="0"
+               value="${esc(existing?.amount ?? p.premium_required ?? '')}">
+      </div>
+    </div>
+
+    <div class="field"><label id="stepNoteLabel">Note</label>
+      <textarea name="note" rows="3"
+        placeholder="Step-up per the carrier illustration">${esc(existing?.note || '')}</textarea>
+    </div>
+
+    <span class="muted" style="font-size:12px">
+      This goes on the Servicing calendar and stays there until somebody marks it done.
+      The amount is an estimate — what was actually paid is recorded with
+      <strong>Log premium payment</strong>, which is a different thing and belongs in
+      the ledger.
+    </span>
+  `, async (v) => {
+    const body = { due_date: v.due_date, kind: v.kind, amount: v.amount, note: v.note };
+    if (editing) await api(`/policy-reminders/${existing.id}`, { method: 'PUT', body });
+    else await api(`/policies/${p.id}/reminders`, { method: 'POST', body });
+    toast(editing ? 'Schedule updated' : 'Added to the schedule');
+  }, editing ? 'Save' : 'Add to the schedule');
+
+  const sync = () => {
+    const isPremium = $('input[name=kind]:checked', dlg).value === 'Premium';
+    $('#stepAmountField', dlg).style.display = isPremium ? '' : 'none';
+    $('#stepNoteLabel', dlg).textContent = isPremium ? 'Note' : 'What is the reminder for *';
+    $('textarea[name=note]', dlg).placeholder = isPremium
+      ? 'Step-up per the carrier illustration'
+      : 'Chase the change-of-ownership form with the carrier';
+    dlg.querySelectorAll('.step-kind .rpt-choice').forEach((el) =>
+      el.classList.toggle('selected', el.querySelector('input').checked));
+  };
+  dlg.querySelectorAll('input[name=kind]').forEach((el) => el.addEventListener('change', sync));
+  sync();
+  return dlg;
+}
+
 function openTxnDialog(p, preset = {}) {
   const body = `
     <div class="field-row">
@@ -1644,20 +1832,32 @@ function openTxnDialog(p, preset = {}) {
 
 async function servicingView() {
   const svc = await api('/servicing');
-  const upcoming = svc.upcoming.filter((r) => r.next_premium_due);
+  // An investor is shown what is still to come. A date that has already
+  // passed is a servicing matter — somebody is chasing it — and putting it
+  // on an investor's screen reads as a bill they have missed.
+  const upcoming = svc.upcoming.filter((r) => r.next_premium_due
+    && (!isInvestorUser() || String(r.next_premium_due).slice(0, 10) >= today()));
   const grouped = {};
   for (const r of upcoming) {
     const key = String(r.next_premium_due).slice(0, 7);
     (grouped[key] ||= []).push(r);
   }
 
+  const investor = isInvestorUser();
   const html = `
     <div class="page-head">
-      <div><h1>Servicing calendar</h1>
-        <div class="sub">${svc.alerts.length} open ${svc.alerts.length === 1 ? 'alert' : 'alerts'} ·
-          ${upcoming.length} scheduled premium ${upcoming.length === 1 ? 'payment' : 'payments'}</div></div>
+      <div><h1>${investor ? 'Premiums' : 'Servicing calendar'}</h1>
+        <div class="sub">${investor
+          ? `${upcoming.length} upcoming premium ${upcoming.length === 1 ? 'date' : 'dates'} · amounts are your share`
+          : `${svc.alerts.length} open ${svc.alerts.length === 1 ? 'alert' : 'alerts'} ·
+             ${upcoming.length} scheduled premium ${upcoming.length === 1 ? 'payment' : 'payments'}${
+             (svc.scheduled || []).length ? ` · ${svc.scheduled.length} follow-up${
+               svc.scheduled.length === 1 ? '' : 's'} outstanding` : ''}`}</div></div>
+      <div class="spacer"></div>
+      ${shareToggle()}
     </div>
 
+    ${investor ? '' : `
     <div class="card">
       <div class="card-head"><h2>Alerts</h2></div>
       <div class="card-body flush">
@@ -1665,13 +1865,16 @@ async function servicingView() {
           ? '<div class="empty">Nothing needs attention.</div>'
           : svc.alerts.map(alertRow).join('')}
       </div>
-    </div>
+    </div>`}
 
     <div class="card">
-      <div class="card-head"><h2>Upcoming premiums</h2></div>
+      <div class="card-head"><h2>Upcoming premiums</h2>${investor ? `<div class="spacer"></div>
+        <span class="muted" style="font-size:12px">amounts shown are your share</span>` : ''}</div>
       <div class="card-body flush">
         ${Object.keys(grouped).length === 0
-          ? '<div class="empty">No premium due dates recorded. Add them on each policy.</div>'
+          ? `<div class="empty">${investor
+              ? 'No premium dates are scheduled on your policies at the moment.'
+              : 'No premium due dates recorded. Add them on each policy.'}</div>`
           : Object.entries(grouped).sort().map(([month, rows]) => `
             <div style="padding:11px 16px;border-bottom:1px solid var(--grid);background:var(--page)">
               <strong>${new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong>
@@ -2065,6 +2268,43 @@ async function opportunityView() {
       </table></div>
     </div>
 
+    ${(o.impairments || o.mitigating || o.underwriter_note) ? `
+    <div class="card">
+      <div class="card-head"><h2>Life expectancy and the medical picture</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${
+          [o.le_provider && `${esc(o.le_provider)} ${o.le_months || '—'} mo`,
+           o.le_months_2 && `${esc(o.le_provider_2 || 'second report')} ${o.le_months_2} mo`]
+            .filter(Boolean).join(' · ')}${
+          o.records_through ? ` · records through ${fmtDate(o.records_through)}` : ''}</span></div>
+      <div class="card-body">
+        <div class="grid-2">
+          <div>
+            ${o.impairments ? `<div class="eyebrow" style="color:var(--text-muted);margin-bottom:8px"
+              >Factors driving mortality</div>${oppBullets(o.impairments)}` : ''}
+            ${o.mitigating ? `<div class="eyebrow" style="color:var(--text-muted);margin:16px 0 8px"
+              >Mitigating factors</div>${oppBullets(o.mitigating)}` : ''}
+          </div>
+          <div>
+            ${o.underwriter_note ? `<div class="opp-callout">
+              <div class="eyebrow" style="color:var(--text-muted);margin-bottom:8px">Underwriter assessment</div>
+              <div style="font-size:13.5px;line-height:1.6;white-space:pre-wrap">${esc(o.underwriter_note)}</div>
+            </div>` : ''}
+            ${o.le_months_2 ? `<div class="muted" style="font-size:12.5px;line-height:1.6;margin-top:14px">
+              Two independent life-expectancy reports are on file
+              (${esc(o.le_provider || 'first')} ${o.le_months || '—'} months,
+              ${esc(o.le_provider_2 || 'second')} ${o.le_months_2} months). The analysis above runs
+              on ${o.le_months || '—'} months. Reports that agree are worth more than one that
+              simply sounds good.</div>` : ''}
+          </div>
+        </div>
+      </div>
+    </div>` : ''}
+
+    ${o.thesis ? `<div class="card">
+      <div class="card-head"><h2>Investment case</h2></div>
+      <div class="card-body">${oppBullets(o.thesis)}</div>
+    </div>` : ''}
+
     ${o.notes ? `<div class="card"><div class="card-head"><h2>Notes</h2></div>
       <div class="card-body"><div style="font-size:14px;white-space:pre-wrap">${esc(o.notes)}</div></div></div>` : ''}
 
@@ -2285,6 +2525,14 @@ function addMonthsIso(iso, months) {
  * case where the early years really are level; it only ever writes into the
  * boxes, which are then yours to correct.
  */
+/** One bullet per line — the same text the one-pager prints, on screen. */
+function oppBullets(text) {
+  const items = String(text || '')
+    .split('\n').map((l) => l.replace(/^\s*[•\-*]\s*/, '').trim()).filter(Boolean);
+  return items.length
+    ? `<ul class="opp-bullets">${items.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : '';
+}
+
 function openScheduleDialog(o) {
   const start = dateInput(o.premiums?.[0]?.due_date) || dateInput(o.expected_close) || today();
   const seed = (o.premiums || []).length
