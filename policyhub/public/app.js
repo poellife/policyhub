@@ -269,7 +269,7 @@ function shell(inner) {
       </nav>
       <div class="topbar-right">
         <button class="btn-sm btn-icon" id="themeBtn" title="Toggle light / dark">◐</button>
-        <span class="muted" style="font-size:13px">${esc(
+        <span class="muted who" style="font-size:13px">${esc(
           isInvestorUser() && state.user.investor
             ? state.user.investor.name
             : isManagerUser() && state.user.funds?.length

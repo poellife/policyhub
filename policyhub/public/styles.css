@@ -3,6 +3,24 @@
    Visual system follows the Poel Capital site: monochrome, high contrast,
    hairline rules, no shadows, mono uppercase micro-labels, pill actions.
 
+   READABILITY IS MEASURED, NOT JUDGED.
+   Every text step is chosen against the surface it sits on and clears
+   WCAG AA — 4.5:1 for body copy, 3:1 for control boundaries — in both
+   light and dark. `scripts/readability-test.mjs` reads the computed
+   styles back out of the browser and fails the build if any of it slips,
+   so a later "just a shade lighter" cannot quietly undo it. Before
+   changing a colour here, run it.
+
+   Dark mode is chosen rather than flipped: its steps are picked and
+   measured against #181a1d, because inverting a light palette lands
+   every value in the wrong place.
+
+   Colour carries meaning in exactly two places — status (good / warning
+   / serious / critical) and the positive-negative of a figure — and
+   never carries it alone: a status always ships with a dot and its own
+   word, so it survives colourblindness, greyscale printing and a bad
+   monitor.
+
    Chart palette is deliberately a one-hue two-shade ramp (near-black →
    mid gray), not a categorical hue set — the same "1 hue, 2 shades"
    pattern used for before/after comparisons. Validated at surface
@@ -35,64 +53,91 @@
 :root {
   color-scheme: light;
   --surface-1:      #ffffff;
-  --page:           #ffffff;
+  --page:           #fbfbfc;
   --raised:         #ffffff;
-  --sunken:         #f7f7f7;
+  --sunken:         #f4f5f7;
+  /* Text steps are chosen by measured contrast on #ffffff, not by eye:
+     primary 19.8:1, secondary 9.2:1, muted 5.5:1. The old muted grey was
+     3.2:1 — below the 4.5:1 needed for body text, and it was carrying most
+     of the secondary copy in the application. */
   --text-primary:   #0a0a0a;
-  --text-secondary: #5c5c5c;
-  --text-muted:     #8f8f8f;
-  --grid:           #ededed;
-  --axis:           #d6d6d6;
-  --border:         #e6e6e6;
-  --border-strong:  #d0d0d0;
+  --text-secondary: #45484d;
+  --text-muted:     #67696e;
+  --grid:           #e9ebee;
+  --axis:           #c2c5ca;
+  --border:         #e2e4e8;
+  --border-strong:  #c2c5ca;
+  /* A row you are reading, and the row under the cursor. */
+  --stripe:         #fafbfc;
+  --hover:          #f1f3f5;
 
   /* one-hue, two-shade data ramp */
   --series-1: #0a0a0a;
   --series-2: #8f8f8f;
   --series-3: #5c5c5c;
 
-  /* status stays chromatic — meaning must not rest on gray alone */
-  --good:     #0ca30c;
-  --warning:  #d99000;
-  --serious:  #d2691e;
+  /* Status stays chromatic — meaning must not rest on grey alone — and each
+     step now clears 4.5:1 on white so the word beside the dot is readable
+     rather than merely present. Tints are for the badge behind it. */
+  --good:     #0f7d33;
+  --warning:  #8a5a00;
+  --serious:  #b4521a;
   --critical: #c62828;
-  --success-text: #0a7a0a;
+  --success-text: #0f7d33;
+  --good-tint:     #e8f5ec;
+  --warning-tint:  #fbf1de;
+  --serious-tint:  #fbeee5;
+  --critical-tint: #fbeaea;
+  --neutral-tint:  #eef0f3;
 
   --accent:     #0a0a0a;
   --accent-ink: #ffffff;
+  --focus:      #1f5fd0;
 
-  --radius: 4px;
-  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-sm: 4px;
   --pill: 999px;
   --font: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 }
 
+/* Dark mode is chosen, not flipped: each step is picked against #151618
+   and measured there, because inverting a light palette lands every value
+   in the wrong place. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-1:      #131313;
-  --page:           #0d0d0d;
-  --raised:         #1c1c1c;
-  --sunken:         #191919;
-  --text-primary:   #fafafa;
-  --text-secondary: #b0b0b0;
-  --text-muted:     #8f8f8f;
-  --grid:           #262626;
-  --axis:           #3a3a3a;
-  --border:         #292929;
-  --border-strong:  #3d3d3d;
+  --surface-1:      #181a1d;
+  --page:           #101113;
+  --raised:         #1f2124;
+  --sunken:         #1c1e21;
+  --text-primary:   #f5f6f7;
+  --text-secondary: #c3c7cc;
+  --text-muted:     #9aa0a8;
+  --grid:           #2a2d31;
+  --axis:           #454a51;
+  --border:         #2e3237;
+  --border-strong:  #454a51;
+  --stripe:         #1c1e21;
+  --hover:          #24272b;
 
   --series-1: #fafafa;
   --series-2: #8f8f8f;
   --series-3: #c4c4c4;
 
-  --warning:  #fab219;
-  --serious:  #ec835a;
-  --critical: #e05a5a;
-  --success-text: #0ca30c;
+  --good:     #4cc46b;
+  --warning:  #f0b429;
+  --serious:  #f08b5c;
+  --critical: #f0716f;
+  --success-text: #4cc46b;
+  --good-tint:     #16301f;
+  --warning-tint:  #33280d;
+  --serious-tint:  #33210f;
+  --critical-tint: #331a1a;
+  --neutral-tint:  #24272b;
 
   --accent:     #fafafa;
   --accent-ink: #0a0a0a;
+  --focus:      #6fa8ff;
 }
 
 * { box-sizing: border-box; }
@@ -102,26 +147,32 @@ html, body {
   font-family: var(--font);
   background: var(--page);
   color: var(--text-primary);
-  font-size: 14px;
-  letter-spacing: -0.005em;
+  /* 15px, and no negative tracking on body copy. The old 14px at -0.005em
+     was tight enough that long tables of figures ran together. */
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
 }
 
 a { color: var(--text-primary); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-/* Mono micro-label — the "INDEX / DOMAIN / EST." treatment */
+/* Mono micro-label — the "INDEX / DOMAIN / EST." treatment.
+   Kept, because it is the brand, but no longer set in 8.5px light grey:
+   at that size the tracking that makes it look considered is the same
+   tracking that makes it hard to read. */
 .eyebrow, .stat .label, table.data th, .card-head h2, .legend .item,
 .tabs button, .badge {
   font-family: var(--mono);
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.05em;
 }
 
 /* ------------------------------- chrome ------------------------------ */
 
 .topbar {
-  display: flex; align-items: center; gap: 28px;
+  display: flex; align-items: center; gap: 18px;
   height: 62px; padding: 0 26px;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
@@ -139,16 +190,30 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .brand-divider { width: 1px; height: 18px; background: var(--border); }
 .brand-sub {
   font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
-  letter-spacing: 0.11em; color: var(--text-muted); white-space: nowrap;
+  letter-spacing: 0.08em; color: var(--text-muted); white-space: nowrap;
 }
-.nav { display: flex; gap: 4px; margin-left: auto; }
+.nav { display: flex; gap: 2px; margin-left: auto; flex-wrap: nowrap; }
 .nav a {
-  padding: 7px 13px; border-radius: var(--pill);
-  color: var(--text-muted); font-weight: 500; font-size: 14px;
+  padding: 8px 12px; border-radius: var(--pill);
+  color: var(--text-secondary); font-weight: 500; font-size: 14px;
+  white-space: nowrap;
+  transition: background .12s, color .12s;
 }
-.nav a:hover { color: var(--text-primary); text-decoration: none; }
-.nav a.active { color: var(--text-primary); font-weight: 600; }
-.topbar-right { display: flex; align-items: center; gap: 12px; padding-left: 8px; }
+.nav a:hover { color: var(--text-primary); background: var(--hover); text-decoration: none; }
+/* Where you are should be obvious from across the desk, not inferred from a
+   half-step of font weight. */
+.nav a.active {
+  color: var(--accent-ink); background: var(--accent); font-weight: 600;
+}
+.nav a.active:hover { color: var(--accent-ink); background: var(--accent); }
+.topbar-right {
+  display: flex; align-items: center; gap: 10px; padding-left: 10px;
+  white-space: nowrap; flex: none;
+}
+/* Ten menu items and a sign-out button is a lot of horizontal appetite.
+   The strap goes first, then the name — the menu itself never wraps. */
+@media (max-width: 1440px) { .brand-divider, .brand-sub { display: none; } }
+@media (max-width: 1240px) { .topbar-right .who { display: none; } }
 
 .main { padding: 30px 26px 70px; max-width: 1600px; margin: 0 auto; }
 
@@ -157,20 +222,24 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   margin: 0; font-size: 34px; font-weight: 700;
   letter-spacing: -0.035em; line-height: 1.02;
 }
-.page-head .sub { color: var(--text-muted); margin-top: 8px; font-size: 13.5px; }
+.page-head .sub { color: var(--text-secondary); margin-top: 8px; font-size: 14px; }
 .page-head .spacer { flex: 1; }
 
 /* ------------------------------ controls ----------------------------- */
 
 button, .btn {
-  font: inherit; font-family: var(--font); font-weight: 500; font-size: 13.5px;
-  padding: 8px 16px; border-radius: var(--pill);
+  font: inherit; font-family: var(--font); font-weight: 500; font-size: 14px;
+  padding: 9px 17px; border-radius: var(--pill);
   border: 1px solid var(--border-strong);
-  background: transparent; color: var(--text-primary);
+  /* A surface, so a secondary action reads as a control rather than as text
+     that happens to have a ring around it. */
+  background: var(--surface-1); color: var(--text-primary);
   cursor: pointer; white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s;
 }
-button:hover, .btn:hover { border-color: var(--text-primary); text-decoration: none; }
+button:hover, .btn:hover {
+  border-color: var(--text-primary); background: var(--hover); text-decoration: none;
+}
 button:disabled { opacity: .4; cursor: not-allowed; }
 .btn-primary, button.primary {
   background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
@@ -193,12 +262,18 @@ input, select, textarea {
   padding: 8px 10px; width: 100%;
 }
 input:focus, select:focus, textarea:focus {
-  outline: 1.5px solid var(--text-primary); outline-offset: -1px; border-color: transparent;
+  outline: 2px solid var(--focus); outline-offset: -1px; border-color: transparent;
+}
+/* Keyboard focus is a different thing from a mouse click and should look it. */
+button:focus-visible, .btn:focus-visible, a:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+summary:focus-visible, .rpt-choice:has(input:focus-visible) {
+  outline: 2px solid var(--focus); outline-offset: 2px;
 }
 label {
-  display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 500;
-  text-transform: uppercase; letter-spacing: 0.09em;
-  color: var(--text-muted); margin-bottom: 5px;
+  display: block; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); margin-bottom: 6px;
 }
 .field { margin-bottom: 14px; }
 .field-row { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); }
@@ -219,8 +294,9 @@ label {
 .card-head {
   padding: 15px 18px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
+  background: var(--sunken); border-radius: var(--radius) var(--radius) 0 0;
 }
-.card-head h2 { margin: 0; font-size: 10.5px; font-weight: 600; color: var(--text-secondary); }
+.card-head h2 { margin: 0; font-size: 11.5px; font-weight: 600; color: var(--text-primary); }
 .card-head .spacer { flex: 1; }
 .card-body { padding: 18px; }
 .card-body.flush { padding: 0; }
@@ -241,33 +317,39 @@ label {
   border-right: 1px solid var(--border);
 }
 .stat:last-child { border-right: none; }
-.stat .label { font-size: 10px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px; }
+.stat .label { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 10px; }
 .stat .value {
   font-size: 23px; font-weight: 600; letter-spacing: -0.035em; line-height: 1.05;
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .stat .value.hero { font-size: 27px; letter-spacing: -0.04em; }
-.stat .note { font-size: 12px; color: var(--text-muted); margin-top: 8px; letter-spacing: 0; }
+.stat .note { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; letter-spacing: 0; line-height: 1.45; }
 
 /* ------------------------------ tables ------------------------------- */
 
 .table-wrap { overflow-x: auto; }
 .table-wrap.sticky-head { overflow: auto; max-height: calc(100vh - 250px); }
-table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 table.data th {
-  text-align: left; font-size: 10px; font-weight: 500; color: var(--text-muted);
-  padding: 11px 12px; border-bottom: 1px solid var(--axis);
-  background: var(--surface-1); position: sticky; top: 0; z-index: 2; white-space: nowrap;
+  /* The header row was 10px light grey. On a fifteen-column policy grid that
+     is the row you look at most and could read least. */
+  text-align: left; font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  padding: 12px 12px; border-bottom: 1px solid var(--axis);
+  background: var(--sunken); position: sticky; top: 0; z-index: 2; white-space: nowrap;
 }
 table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--text-primary); }
 table.data th .arrow { color: var(--text-primary); margin-left: 3px; }
 table.data td {
-  padding: 10px 12px; border-bottom: 1px solid var(--grid);
+  padding: 11px 12px; border-bottom: 1px solid var(--grid);
   white-space: nowrap; vertical-align: middle;
 }
-table.data tbody tr:hover { background: var(--sunken); }
+/* Banding, then hover. Reading across fifteen columns without a band is how
+   you end up one row off; the hover tint says which row you are actually on. */
+table.data tbody tr:nth-child(even) { background: var(--stripe); }
+table.data tbody tr:hover { background: var(--hover); }
 table.data tbody tr.clickable { cursor: pointer; }
+table.data tbody tr.clickable:hover td.strong { text-decoration: underline; text-underline-offset: 2px; }
 table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.strong { font-weight: 600; }
 table.data tfoot td {
@@ -281,17 +363,20 @@ table.data tfoot td {
 
 /* ------------------------------ badges ------------------------------- */
 
+/* A status you can find at a glance: a tint to catch the eye, a dot, and the
+   word itself. Colour is never the only carrier — the label always says it. */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 9px; border-radius: var(--pill); font-size: 10px; font-weight: 500;
-  border: 1px solid var(--border-strong); color: var(--text-secondary);
-  white-space: nowrap;
+  padding: 4px 10px; border-radius: var(--pill); font-size: 10.5px; font-weight: 600;
+  border: 1px solid transparent; background: var(--neutral-tint);
+  color: var(--text-secondary); white-space: nowrap;
 }
-.badge .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.badge.inforce { color: var(--text-primary); border-color: var(--text-primary); }
-.badge.grace   { color: var(--serious); border-color: var(--serious); }
-.badge.lapsed  { color: var(--critical); border-color: var(--critical); }
-.badge.matured, .badge.sold, .badge.pending { color: var(--text-muted); }
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.badge.inforce { color: var(--good);     background: var(--good-tint); }
+.badge.grace   { color: var(--serious);  background: var(--serious-tint); }
+.badge.lapsed  { color: var(--critical); background: var(--critical-tint); }
+.badge.matured { color: var(--text-primary); background: var(--neutral-tint); }
+.badge.sold, .badge.pending { color: var(--text-muted); background: var(--neutral-tint); }
 
 .sev { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; font-size: 12.5px; }
 .sev .ic {
@@ -309,8 +394,16 @@ table.data tfoot td {
 .alert-row {
   display: flex; align-items: flex-start; gap: 12px;
   padding: 13px 18px; border-bottom: 1px solid var(--grid);
+  border-left: 3px solid transparent;
 }
+/* Severity on the edge of the row as well as on the icon, so a list of
+   twelve alerts sorts itself out before you have read any of them. */
+.alert-row:has(.sev.critical) { border-left-color: var(--critical); background: var(--critical-tint); }
+.alert-row:has(.sev.serious)  { border-left-color: var(--serious); }
+.alert-row:has(.sev.warning)  { border-left-color: var(--warning); }
 .alert-row:last-child { border-bottom: none; }
+.alert-row:hover { background: var(--hover); }
+.alert-row:has(.sev.critical):hover { background: var(--critical-tint); }
 .alert-row .who { font-weight: 600; }
 .alert-row .meta { color: var(--text-muted); font-size: 12.5px; margin-top: 3px; }
 .alert-row .spacer { flex: 1; }
@@ -745,12 +838,15 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
 .nav a.has-badge { color: var(--text-primary); font-weight: 600; }
 .nav-badge {
   display: inline-flex; align-items: center; justify-content: center;
-  min-width: 18px; height: 18px; margin-left: 7px; padding: 0 5px;
+  min-width: 17px; height: 17px; margin-left: 6px; padding: 0 5px;
   border-radius: var(--pill);
   background: var(--accent); color: var(--accent-ink);
-  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
   letter-spacing: 0; vertical-align: middle;
 }
+/* On the tab you are standing on, the count has to invert too or it
+   disappears into the pill behind it. */
+.nav a.active .nav-badge { background: var(--accent-ink); color: var(--accent); }
 
 .opp-card {
   border: 1px solid var(--border);
