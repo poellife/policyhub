@@ -331,8 +331,11 @@ const STAFF_NAV = [
   ['maturities', 'Maturities'],
   ['opportunities', 'Opportunities'],
   ['investors', 'Investors'],
+  ['documents', 'Documents'],
   ['reports', 'Reports'],
-  ['import', 'Import'],
+  // Importing is a setup job rather than a daily one, so it sits under
+  // Settings with the other things you do occasionally. The route is
+  // unchanged, and the dashboard still offers it directly.
   ['settings', 'Settings'],
 ];
 
@@ -4639,7 +4642,9 @@ async function settingsView() {
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
     accountOnly ? Promise.resolve([]) : api('/funds'),
-    api('/documents').catch(() => []),
+    // Staff read the cabinet on the Documents tab; here it is only an
+    // investor's own copies, on the one page they have for them.
+    isInvestorUser() ? api('/documents').catch(() => []) : Promise.resolve([]),
     isInvestorUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
   ]);
   state.funds = funds;
@@ -4664,6 +4669,18 @@ async function settingsView() {
           </form>
         </div>
       </div>
+
+      ${isInvestorUser() ? '' : `
+      <div class="card">
+        <div class="card-head"><h2>Import data</h2><div class="spacer"></div>
+          <a class="btn btn-sm" href="#/import">Open the importer</a></div>
+        <div class="card-body">
+          <span class="muted" style="font-size:13px">Load policies, insureds, carrier statements,
+          transactions and future premiums from a spreadsheet — one file or several. Every import
+          is previewed before anything is written, and re-importing the same file changes nothing,
+          so it is safe to run twice.</span>
+        </div>
+      </div>`}
 
       ${isAdmin ? `
       <div class="card">
@@ -4727,76 +4744,7 @@ async function settingsView() {
       </table></div>
     </div>`}
 
-    ${accountOnly && isInvestorUser() ? '' : `
-    <div class="card">
-      <div class="card-head"><h2>Operating agreements</h2><div class="spacer"></div>
-        <a class="btn btn-sm" href="#/agreements">Open agreements</a></div>
-      <div class="card-body">
-        <span class="muted" style="font-size:13px">Draft a new LLC operating agreement from the
-        standard form, send it to the members, and collect their signatures. Executed copies are
-        filed below, one per member.</span>
-      </div>
-    </div>`}
-
-    <div class="card">
-      <div class="card-head"><h2>Documents</h2><div class="spacer"></div>
-        ${docs.length ? `<span class="muted" style="font-size:12px">${docs.length} on file</span>` : ''}
-        ${canPost ? '<button class="btn-sm primary" id="addDocBtn" style="margin-left:12px">Upload document</button>' : ''}</div>
-
-      ${docs.length > 6 ? `<div class="card-body" style="border-bottom:1px solid var(--grid)">
-        <div class="toolbar" style="margin:0">
-          <input class="grow" id="docSearch" placeholder="Search title, file name, investor…"
-                 value="${esc(state.docFilter?.search || '')}">
-          <select id="docCategory">
-            <option value="">All categories</option>
-            ${DOC_CATEGORIES.map((c) => `<option ${state.docFilter?.category === c ? 'selected' : ''}>${c}</option>`).join('')}
-          </select>
-        </div>
-      </div>` : ''}
-
-      <div class="table-wrap"><table class="data">
-        <thead><tr><th>Document</th><th>Category</th><th class="num">Year</th>
-          ${isInvestorUser() ? '' : '<th>Who it is for</th>'}
-          <th class="num">Size</th><th>Added</th><th></th></tr></thead>
-        <tbody>${docFiltered(docs).length === 0
-          ? `<tr><td colspan="7"><div class="empty">${isInvestorUser()
-              ? 'Nothing has been shared with you yet. Statements, K-1s and agreements will appear here.'
-              : canPost
-                ? 'No documents yet. Post the LLC agreement, subscription documents, K-1s — anything the fund runs on.'
-                : 'No documents yet.'}</div></td></tr>`
-          : docFiltered(docs).map((d) => `<tr>
-              <td class="strong"><a href="#" data-doc-get="${d.id}">${esc(d.title)}</a>
-                <div class="muted" style="font-size:11.5px">${esc(d.file_name)}${
-                  d.notes ? ` · ${esc(d.notes)}` : ''}</div></td>
-              <td>${esc(d.category)}</td>
-              <td class="num">${d.doc_year || '—'}</td>
-              ${isInvestorUser() ? '' : `<td class="secondary">${
-                d.investor_name
-                  ? `${esc(d.investor_name)} ${d.shared
-                      ? '<span class="badge inforce"><span class="dot"></span>shared</span>'
-                      : '<span class="badge">staff only</span>'}`
-                  : d.fund_code ? esc(d.fund_code) : '<span class="muted">whole firm</span>'}</td>`}
-              <td class="num muted">${fmtBytes(d.byte_size)}</td>
-              <td class="muted">${new Date(d.created_at).toLocaleDateString('en-US')}${
-                d.uploaded_by_name ? `<div style="font-size:11.5px">${esc(d.uploaded_by_name)}</div>` : ''}</td>
-              <td style="white-space:nowrap">
-                <button class="btn-sm" data-doc-get="${d.id}">Download</button>
-                ${canPost ? `<button class="btn-sm" data-doc-edit="${d.id}">Edit</button>` : ''}
-                ${['admin', 'manager'].includes(state.user.role)
-                  ? `<button class="btn-sm btn-danger" data-doc-del="${d.id}">Delete</button>` : ''}
-              </td>
-            </tr>`).join('')}</tbody>
-      </table></div>
-
-      ${isInvestorUser() ? '' : `<div class="card-body" style="border-top:1px solid var(--grid)">
-        <span class="muted" style="font-size:12px">
-          A document with nobody named against it is visible to every member of staff. Name an
-          owner entity and it follows that entity; name an investor and it is theirs —
-          but only once <strong>shared</strong> is ticked, so a draft K-1 can sit here safely
-          until it is ready to go out. Files are held in the database and travel with your
-          backups. Up to 15 MB each.</span>
-      </div>`}
-    </div>
+    ${isInvestorUser() ? documentsCard(docs, canPost) : ''}
 
     ${isAdmin ? `
     <div class="card">
@@ -4817,45 +4765,7 @@ async function settingsView() {
   return {
     html,
     after: () => {
-      $('#addDocBtn')?.addEventListener('click', () =>
-        openDocumentDialog(null, funds, investors, render));
-
-      document.querySelectorAll('[data-doc-get]').forEach((b) =>
-        b.addEventListener('click', async (e) => {
-          e.preventDefault();
-          const d = docs.find((x) => x.id === Number(b.dataset.docGet));
-          try { await downloadDocument(b.dataset.docGet, d?.file_name); }
-          catch (err) { alert(err.message); }
-        }));
-
-      document.querySelectorAll('[data-doc-edit]').forEach((b) =>
-        b.addEventListener('click', () =>
-          openDocumentDialog(docs.find((x) => x.id === Number(b.dataset.docEdit)),
-            funds, investors, render)));
-
-      document.querySelectorAll('[data-doc-del]').forEach((b) =>
-        b.addEventListener('click', async () => {
-          const d = docs.find((x) => x.id === Number(b.dataset.docDel));
-          if (!confirm(`Delete "${d?.title}"?\n\nThe file is removed for good.`)) return;
-          try {
-            await api(`/documents/${b.dataset.docDel}`, { method: 'DELETE' });
-            toast('Document deleted');
-            render();
-          } catch (err) { alert(err.message); }
-        }));
-
-      let docTimer;
-      $('#docSearch')?.addEventListener('input', (e) => {
-        clearTimeout(docTimer);
-        docTimer = setTimeout(() => {
-          state.docFilter = { ...(state.docFilter || {}), search: e.target.value };
-          render();
-        }, 250);
-      });
-      $('#docCategory')?.addEventListener('change', (e) => {
-        state.docFilter = { ...(state.docFilter || {}), category: e.target.value };
-        render();
-      });
+      wireDocumentsCard(docs, funds, investors);
 
       $('#pwForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -5066,6 +4976,119 @@ async function openUserDialog(u, funds, onSaved) {
   sync();
 }
 
+/* ------------------------- the document cabinet ----------------------
+ * One card, rendered in two places: on the Documents tab for staff, and
+ * on an investor's Account page, which is the only screen they have for
+ * it. Shared as a function rather than copied, so what an investor sees
+ * cannot drift from what was filed.
+ * ------------------------------------------------------------------- */
+
+function documentsCard(docs, canPost) {
+  return `
+<div class="card">
+  <div class="card-head"><h2>Documents</h2><div class="spacer"></div>
+    ${docs.length ? `<span class="muted" style="font-size:12px">${docs.length} on file</span>` : ''}
+    ${canPost ? '<button class="btn-sm primary" id="addDocBtn" style="margin-left:12px">Upload document</button>' : ''}</div>
+
+  ${docs.length > 6 ? `<div class="card-body" style="border-bottom:1px solid var(--grid)">
+    <div class="toolbar" style="margin:0">
+      <input class="grow" id="docSearch" placeholder="Search title, file name, investor…"
+             value="${esc(state.docFilter?.search || '')}">
+      <select id="docCategory">
+        <option value="">All categories</option>
+        ${DOC_CATEGORIES.map((c) => `<option ${state.docFilter?.category === c ? 'selected' : ''}>${c}</option>`).join('')}
+      </select>
+    </div>
+  </div>` : ''}
+
+  <div class="table-wrap"><table class="data">
+    <thead><tr><th>Document</th><th>Category</th><th class="num">Year</th>
+      ${isInvestorUser() ? '' : '<th>Who it is for</th>'}
+      <th class="num">Size</th><th>Added</th><th></th></tr></thead>
+    <tbody>${docFiltered(docs).length === 0
+      ? `<tr><td colspan="7"><div class="empty">${isInvestorUser()
+          ? 'Nothing has been shared with you yet. Statements, K-1s and agreements will appear here.'
+          : canPost
+            ? 'No documents yet. Post the LLC agreement, subscription documents, K-1s — anything the fund runs on.'
+            : 'No documents yet.'}</div></td></tr>`
+      : docFiltered(docs).map((d) => `<tr>
+          <td class="strong"><a href="#" data-doc-get="${d.id}">${esc(d.title)}</a>
+            <div class="muted" style="font-size:11.5px">${esc(d.file_name)}${
+              d.notes ? ` · ${esc(d.notes)}` : ''}</div></td>
+          <td>${esc(d.category)}</td>
+          <td class="num">${d.doc_year || '—'}</td>
+          ${isInvestorUser() ? '' : `<td class="secondary">${
+            d.investor_name
+              ? `${esc(d.investor_name)} ${d.shared
+                  ? '<span class="badge inforce"><span class="dot"></span>shared</span>'
+                  : '<span class="badge">staff only</span>'}`
+              : d.fund_code ? esc(d.fund_code) : '<span class="muted">whole firm</span>'}</td>`}
+          <td class="num muted">${fmtBytes(d.byte_size)}</td>
+          <td class="muted">${new Date(d.created_at).toLocaleDateString('en-US')}${
+            d.uploaded_by_name ? `<div style="font-size:11.5px">${esc(d.uploaded_by_name)}</div>` : ''}</td>
+          <td style="white-space:nowrap">
+            <button class="btn-sm" data-doc-get="${d.id}">Download</button>
+            ${canPost ? `<button class="btn-sm" data-doc-edit="${d.id}">Edit</button>` : ''}
+            ${['admin', 'manager'].includes(state.user.role)
+              ? `<button class="btn-sm btn-danger" data-doc-del="${d.id}">Delete</button>` : ''}
+          </td>
+        </tr>`).join('')}</tbody>
+  </table></div>
+
+  ${isInvestorUser() ? '' : `<div class="card-body" style="border-top:1px solid var(--grid)">
+    <span class="muted" style="font-size:12px">
+      A document with nobody named against it is visible to every member of staff. Name an
+      owner entity and it follows that entity; name an investor and it is theirs —
+      but only once <strong>shared</strong> is ticked, so a draft K-1 can sit here safely
+      until it is ready to go out. Files are held in the database and travel with your
+      backups. Up to 15 MB each.</span>
+  </div>`}
+</div>`;
+}
+
+/** The handlers for that card. Call from a view's `after`. */
+function wireDocumentsCard(docs, funds, investors) {
+  $('#addDocBtn')?.addEventListener('click', () =>
+    openDocumentDialog(null, funds, investors, render));
+
+  document.querySelectorAll('[data-doc-get]').forEach((b) =>
+    b.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const d = docs.find((x) => x.id === Number(b.dataset.docGet));
+      try { await downloadDocument(b.dataset.docGet, d?.file_name); }
+      catch (err) { alert(err.message); }
+    }));
+
+  document.querySelectorAll('[data-doc-edit]').forEach((b) =>
+    b.addEventListener('click', () =>
+      openDocumentDialog(docs.find((x) => x.id === Number(b.dataset.docEdit)),
+        funds, investors, render)));
+
+  document.querySelectorAll('[data-doc-del]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const d = docs.find((x) => x.id === Number(b.dataset.docDel));
+      if (!confirm(`Delete "${d?.title}"?\n\nThe file is removed for good.`)) return;
+      try {
+        await api(`/documents/${b.dataset.docDel}`, { method: 'DELETE' });
+        toast('Document deleted');
+        render();
+      } catch (err) { alert(err.message); }
+    }));
+
+  let docTimer;
+  $('#docSearch')?.addEventListener('input', (e) => {
+    clearTimeout(docTimer);
+    docTimer = setTimeout(() => {
+      state.docFilter = { ...(state.docFilter || {}), search: e.target.value };
+      render();
+    }, 250);
+  });
+  $('#docCategory')?.addEventListener('change', (e) => {
+    state.docFilter = { ...(state.docFilter || {}), category: e.target.value };
+    render();
+  });
+}
+
 /* --------------------------- agreements ---------------------------- */
 
 /* The operating agreement, on screen.
@@ -5115,6 +5138,80 @@ function agreementSheet(blocks) {
       default: return '';
     }
   }).join('')}</div>`;
+}
+
+/* ---------------------------- documents ------------------------------
+ * The paperwork side of the firm, on one tab: the operating agreements
+ * being drafted and signed, and the cabinet everything is filed in.
+ * They were under Settings, which is the wrong place for work somebody
+ * does weekly — Settings is for things you change once.
+ *
+ * Investors keep their own copies on their Account page and their own
+ * Agreements tab; this is the staff view of both.
+ * ------------------------------------------------------------------- */
+
+async function documentsView() {
+  const canPost = ['admin', 'editor', 'manager'].includes(state.user.role);
+  const [docs, agreements, funds, investors] = await Promise.all([
+    api('/documents').catch(() => []),
+    api('/agreements').catch(() => []),
+    loadFunds(),
+    api('/investors').catch(() => []),
+  ]);
+  const live = agreements.filter((a) => a.status === 'Out for signature');
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Documents</h1>
+        <div class="sub">${agreements.length} operating agreement${
+          agreements.length === 1 ? '' : 's'}${live.length
+          ? ` · ${live.length} out for signature` : ''} · ${docs.length} file${
+          docs.length === 1 ? '' : 's'} on record</div></div>
+      <div class="spacer"></div>
+      ${canEditData() ? '<button class="primary" id="newAgreementBtn">New agreement</button>' : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Operating agreements</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${live.length
+          ? `${live.length} waiting on signatures` : 'nothing out for signature'}</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Agreement</th><th>Effective</th><th>Entity</th>
+          <th class="num">Members</th><th class="num">Signed</th><th>Status</th><th></th></tr></thead>
+        <tbody>${agreements.length === 0
+          ? `<tr><td colspan="7"><div class="empty">No agreements yet.${canEditData()
+              ? ' Draft one from the standard form — the clauses are fixed, you fill in the blanks.'
+              : ''}</div></td></tr>`
+          : agreements.map((a) => `<tr class="clickable" data-agreement="${a.id}">
+              <td class="strong">${esc(a.llc_name || a.title || '—')}</td>
+              <td>${fmtDate(a.effective_date)}</td>
+              <td>${esc(a.fund_code || '—')}</td>
+              <td class="num">${a.member_count}</td>
+              <td class="num">${a.signed_count}<span class="muted"> of ${
+                a.party_count ?? a.member_count}</span></td>
+              <td>${agreementBadge(a.status)}</td>
+              <td class="muted">${a.executed_at ? `executed ${fmtDate(a.executed_at)}`
+                : a.issued_at ? `sent ${fmtDate(a.issued_at)}` : `drafted ${fmtDate(a.created_at)}`}</td>
+            </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px">Draft from the standard form, send it to the
+        members, and collect signatures in their own portals. An executed agreement is filed
+        below automatically, one private copy per member.</span>
+      </div>
+    </div>
+
+    ${documentsCard(docs, canPost)}`;
+
+  return {
+    html,
+    after: () => {
+      wireDocumentsCard(docs, funds, investors);
+      $('#newAgreementBtn')?.addEventListener('click', () => openAgreementDialog(null));
+      document.querySelectorAll('[data-agreement]').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/agreement/${tr.dataset.agreement}`)));
+    },
+  };
 }
 
 async function agreementsView() {
@@ -5562,9 +5659,13 @@ const VIEWS = {
   insureds: insuredsView,
   investors: investorsView,
   investor: investorView,
+  documents: documentsView,
   reports: () => reportsView(api, state),
   import: importView,
-  agreements: agreementsView,
+  // An investor has an Agreements tab of their own; for staff the list
+  // lives on the Documents tab, so an old link lands there rather than on
+  // a second page showing the same thing.
+  agreements: () => (isInvestorUser() ? agreementsView() : documentsView()),
   agreement: agreementView,
   settings: settingsView,
 };

@@ -61,21 +61,50 @@ const page = async (email, pass) => {
 };
 
 const staff = await page(ADMIN.email, ADMIN.password);
-/* Navigate away and back rather than re-issuing the same hash: the router
-   listens for hashchange, so asking for the page you are already on is a
-   no-op and would leave a stale card on screen. */
-const settings = async (p) => {
+/* The cabinet lives on the Documents tab for staff and on an investor's
+   own Account page — one card, two homes. Navigate away and back rather
+   than re-issuing the same hash: the router listens for hashchange, so
+   asking for the page you are already on is a no-op and would leave a
+   stale card on screen. */
+const settings = async (p, investor = false) => {
   await p.goto(`${BASE}/#/dashboard`);
   await p.waitForTimeout(250);
-  await p.goto(`${BASE}/#/settings`);
-  await p.waitForFunction(() => /Settings|Account/.test(document.querySelector('h1')?.textContent || ''));
+  await p.goto(`${BASE}/#/${investor ? 'settings' : 'documents'}`);
+  await p.waitForFunction(() => /Documents|Settings|Account/
+    .test(document.querySelector('h1')?.textContent || ''));
   await p.waitForTimeout(900);
 };
 
-console.log('THE CARD IS THERE');
+console.log('THE TAB IS THERE');
+await staff.goto(`${BASE}/#/dashboard`); await staff.waitForTimeout(400);
+const staffNav = (await staff.$$eval('.nav a', (a) => a.map((x) => x.textContent.trim())));
+check('staff get a Documents tab of their own', staffNav.includes('Documents'),
+  staffNav.join(' / '));
+check('and it sits between the investors and the reports',
+  staffNav.indexOf('Documents') === staffNav.indexOf('Investors') + 1
+  && staffNav.indexOf('Documents') < staffNav.indexOf('Reports'), staffNav.join(' / '));
+
+await settings(staff);
+const tabHeads = await staff.locator('.card .card-head h2').allTextContents();
+check('it holds the agreements and the cabinet, in that order',
+  tabHeads[0] === 'Operating agreements' && tabHeads.includes('Documents'),
+  tabHeads.join(' | '));
+
+/* Both were under Settings; neither should still be. Settings is for the
+   things you change once. */
+await staff.goto(`${BASE}/#/dashboard`); await staff.waitForTimeout(300);
+await staff.goto(`${BASE}/#/settings`); await staff.waitForSelector('#pwForm');
+await staff.waitForTimeout(700);
+const settingsHeads = await staff.locator('.card .card-head h2').allTextContents();
+check('Settings no longer carries the cabinet', !settingsHeads.includes('Documents'),
+  settingsHeads.join(' | '));
+check('nor the agreements', !settingsHeads.some((h) => /agreement/i.test(h)),
+  settingsHeads.join(' | '));
+
+console.log('\nTHE CARD IS THERE');
 await settings(staff);
 const card = staff.locator('.card', { hasText: 'Documents' }).first();
-check('Settings has a Documents section', (await card.count()) === 1);
+check('the Documents tab carries the cabinet', (await card.count()) === 1);
 check('with an upload button', (await staff.locator('#addDocBtn').count()) === 1);
 const empty = (await card.textContent()).replace(/\s+/g, ' ');
 check('and it says what belongs here', /LLC agreement|No documents yet|on file/i.test(empty),
@@ -119,7 +148,7 @@ await staff.screenshot({ path: `${S}/doc1-staff.png`, fullPage: true });
 
 console.log('\nTHE INVESTOR CANNOT SEE A DRAFT');
 const inv = await page(INVESTOR1.email, INVESTOR1.password);
-await settings(inv);
+await settings(inv, true);
 const invCard = inv.locator('.card', { hasText: 'Documents' }).first();
 check('their Account page has a Documents section', (await invCard.count()) === 1);
 check('but the draft is not in it',
@@ -141,7 +170,7 @@ check('the row now reads as shared',
   /shared/i.test(await staff.locator('table.data tr', { hasText: `${PREFIX} K-1 2025` })
     .first().textContent()));
 
-await settings(inv);
+await settings(inv, true);
 const nowSees = (await inv.locator('.card', { hasText: 'Documents' }).first().textContent())
   .replace(/\s+/g, ' ');
 check('and the investor now has it', nowSees.includes(`${PREFIX} K-1 2025`), nowSees.slice(0, 160));
@@ -169,7 +198,7 @@ check('and the file that arrives is the file that was posted',
 
 console.log('\nTHE OTHER INVESTOR NEVER SEES IT');
 const inv2 = await page(INVESTOR2.email, INVESTOR2.password);
-await settings(inv2);
+await settings(inv2, true);
 check('not on their page',
   !(await inv2.locator('.card', { hasText: 'Documents' }).first().textContent())
     .includes(`${PREFIX} K-1 2025`));

@@ -245,7 +245,15 @@ check('editing an insured persists', leCell.includes('84') && leCell.includes('M
 
 /* ---------------------------- import --------------------------- */
 console.log('\nIMPORT');
-await page.click('a[href="#/import"]');
+/* Reached from Settings now rather than from the top menu, since it is a
+   setup job rather than a daily one. */
+await page.click('a[href="#/settings"]');
+await page.waitForSelector('#pwForm');
+await page.waitForTimeout(600);
+check('Settings offers the importer', (await page.locator('a[href="#/import"]').count()) >= 1);
+check('and the menu no longer carries it',
+  (await page.locator('.nav a[href="#/import"]').count()) === 0);
+await page.locator('a[href="#/import"]').first().click();
 await page.waitForSelector('#dropzone');
 // The screen defaults to the master importer; this check is about the
 // single-purpose policies path, which has its own dedicated option.

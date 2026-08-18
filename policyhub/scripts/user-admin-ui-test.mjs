@@ -177,6 +177,13 @@ check('reactivating flips it back', (await rowFor(TEMP).textContent()).includes(
 
 await rowFor(TEMP).locator('[data-del-user]').click();
 await p.waitForTimeout(1200); await gotoSettings();
+/* Wait for the row to go rather than sampling once: the delete round trip
+   and the re-render are both async, and a fixed pause turns a slow moment
+   into a failed assertion about the wrong thing. */
+await p.waitForFunction(
+  (email) => ![...document.querySelectorAll('table.data tbody tr')]
+    .some((tr) => tr.textContent.includes(email)),
+  TEMP, { timeout: 10000 }).catch(() => {});
 check('deleting removes the row', (await rowFor(TEMP).count()) === 0);
 
 console.log('\nPAGE ERRORS');

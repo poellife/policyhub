@@ -19,7 +19,9 @@ async function session(email, pass) {
 console.log('STAFF VIEW');
 const staff = await session(ADMIN.email,ADMIN.password);
 const staffNav = await staff.$$eval('.nav a', a=>a.map(x=>x.textContent.trim()));
-check('staff nav has Investors + Import', staffNav.includes('Investors') && staffNav.includes('Import'), staffNav.join('/'));
+check('staff nav has the sections an investor must never see',
+  ['Investors', 'Insureds', 'Documents', 'Settings'].every((n) => staffNav.includes(n)),
+  staffNav.join('/'));
 await staff.goto(`${BASE}/#/investors`);
 await staff.waitForFunction(()=>document.querySelector('h1')?.textContent==='Investors');
 await staff.waitForTimeout(600);

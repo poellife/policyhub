@@ -13,15 +13,19 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeou
 await p.waitForTimeout(600);
 check('empty dashboard renders', await p.isVisible('.kpi-row'));
 await p.screenshot({path:`${S}/e1-empty-dashboard.png`,fullPage:true});
-for (const [route,label] of [['policies','Policies'],['servicing','Servicing calendar'],['insureds','Insureds'],['import','Import data'],['settings','Settings']]) {
-  await p.click(`a[href="#/${route}"]`);
+// Import is reached from Settings now rather than from the menu, so it is
+// navigated to by hash like any other page rather than clicked in the nav.
+for (const [route,label] of [['policies','Policies'],['servicing','Servicing calendar'],['insureds','Insureds'],['documents','Documents'],['settings','Settings'],['import','Import data']]) {
+  await p.goto(`${BASE}/#/dashboard`); await p.waitForTimeout(200);
+  await p.goto(`${BASE}/#/${route}`);
   await p.waitForFunction(t=>document.querySelector('h1')?.textContent===t,label,{timeout:8000});
   await p.waitForTimeout(400);
   check(`empty ${route} renders`, await p.isVisible('h1'));
 }
 await p.screenshot({path:`${S}/e2-empty-settings.png`,fullPage:true});
 // create a policy by hand on an empty DB
-await p.click('a[href="#/policies"]');
+await p.goto(`${BASE}/#/dashboard`); await p.waitForTimeout(200);
+await p.goto(`${BASE}/#/policies`);
 await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Policies');
 await p.click('#newPolicyBtn'); await p.waitForSelector('dialog[open]');
 await p.fill('dialog input[name="policy_number"]','TEST-001');

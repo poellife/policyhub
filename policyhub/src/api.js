@@ -3145,6 +3145,11 @@ router.get('/agreements', wrap(async (req, res) => {
             f.code AS fund_code, p.policy_number,
             (SELECT COUNT(*)::int FROM agreement_signers s
               WHERE s.agreement_id = a.id AND s.role <> 'Manager')          AS member_count,
+            -- Everybody who has to sign, the manager included: "2 of 3
+            -- signed" is a sentence, "2 signed" against "1 member" is a
+            -- puzzle.
+            (SELECT COUNT(*)::int FROM agreement_signers s
+              WHERE s.agreement_id = a.id)                                  AS party_count,
             (SELECT COUNT(*)::int FROM agreement_signers s
               WHERE s.agreement_id = a.id AND s.signed_at IS NOT NULL)      AS signed_count,
             ${isInvestor(req)

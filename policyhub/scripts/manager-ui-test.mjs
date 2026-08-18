@@ -19,7 +19,10 @@ const pm = await session(MANAGER1.email,MANAGER1.password);
 const nav = await pm.$$eval('.nav a', a=>a.map(x=>x.textContent.trim()));
 check('no Settings tab, only Account', !nav.includes('Settings') && nav.includes('Account'), nav.join('/'));
 check('has the working sections',
-  ['Dashboard','Policies','Servicing','Insureds','Investors','Reports','Import'].every(n=>nav.includes(n)), nav.join('/'));
+  ['Dashboard','Policies','Servicing','Insureds','Investors','Documents','Reports']
+    .every(n=>nav.includes(n)), nav.join('/'));
+// Importing moved under Account, being a setup job rather than a daily one.
+check('and importing is no longer a menu item', !nav.includes('Import'), nav.join('/'));
 const bar = await pm.locator('.topbar-right').textContent();
 check('top bar shows their entity', bar.includes('LCG1'), bar.trim());
 await pm.screenshot({path:`${S}/m1-manager-dashboard.png`,fullPage:true});
@@ -57,8 +60,13 @@ check('account page has no admin panels',
   !settingsTxt.includes('Owner entities') && !settingsTxt.includes('Activity log') && !settingsTxt.includes('Add user'),
   settingsTxt.slice(0,90).replace(/\s+/g,' '));
 check('account page still allows a password change', settingsTxt.includes('Change your password'));
+check('and carries the documents cabinet nowhere near it',
+  !settingsTxt.includes('A document with nobody named against it'),
+  settingsTxt.slice(0, 90).replace(/\s+/g, ' '));
 
 console.log('\nIMPORT IS AVAILABLE');
+check('their account page offers the importer',
+  (await pm.locator('a[href="#/import"]').count()) >= 1);
 await pm.goto(`${BASE}/#/import`); await pm.waitForSelector('#dropzone');
 check('import screen reachable', await pm.isVisible('#dropzone'));
 
