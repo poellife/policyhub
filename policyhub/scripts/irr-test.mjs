@@ -341,5 +341,64 @@ check('a non-numeric policy id is refused',
   (await api(admin, '/policies/abc/irr')).status === 404);
 
 await wipe();
+/* ------------------------------------------------------------------ *
+ * A rate, always
+ *
+ * "IRR if matured today" has to answer its own question. Two things used
+ * to leave a dash on the screen instead: a claim assumed on a day before
+ * the capital that bought the policy had gone out, and a holding period
+ * short enough that the annualised rate sat outside the solver's bracket.
+ * Neither is a reason to show nothing.
+ * ------------------------------------------------------------------ */
+console.log('\nA RATE IS ALWAYS SHOWN FOR A DEATH TODAY');
+const shortPolicy = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-SHORT`, carrier_name: 'Ratecheck Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 2000000,
+  insured_last_name: 'Ratecheck', insured_first_name: 'Rhoda', dob: '1946-12-05' } }));
+const isoAt = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+// The exact shape from the report: a premium today, and the purchase dated
+// a month out, so the assumed claim would otherwise precede its own funding.
+await api(admin, `/policies/${shortPolicy.id}/transactions`, { method: 'POST', body: {
+  txn_date: isoAt(0), txn_type: 'Premium Payment', amount: 50000 } });
+await api(admin, `/policies/${shortPolicy.id}/transactions`, { method: 'POST', body: {
+  txn_date: isoAt(31), txn_type: 'Acquisition Cost', amount: 400000 } });
+
+const shortIrr = await json(await api(admin, `/policies/${shortPolicy.id}/irr`));
+check('a rate is produced, not a dash', shortIrr.result.irr !== null,
+  String(shortIrr.result.irr));
+check('and it is positive — the position is well in profit',
+  shortIrr.result.irr > 0, String(shortIrr.result.irr));
+check('the profit is the whole benefit less the capital',
+  near(shortIrr.result.profit, 2000000 - 450000), String(shortIrr.result.profit));
+check('the multiple is stated too', near(shortIrr.result.multiple, 2000000 / 450000, 1e-6),
+  String(shortIrr.result.multiple));
+check('it is still flagged as a short period, so the screen can say so',
+  shortIrr.result.short_period === true);
+
+const claim = shortIrr.result.flows.find((f) => f.actual === false);
+check('the assumed claim is not dated before the capital that funds it',
+  claim && claim.date >= isoAt(31), `${claim?.date} vs ${isoAt(31)}`);
+check('and it is the death benefit in full', near(claim?.amount, 2000000));
+
+// The same policy with a normal holding period still reads sensibly.
+const longPolicy = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-LONG`, carrier_name: 'Ratecheck Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 2000000,
+  insured_last_name: 'Longhold', insured_first_name: 'Leon', dob: '1944-01-01' } }));
+await api(admin, `/policies/${longPolicy.id}/transactions`, { method: 'POST', body: {
+  txn_date: isoAt(-1461), txn_type: 'Acquisition Cost', amount: 400000 } });
+for (let y = 0; y < 4; y++)
+  await api(admin, `/policies/${longPolicy.id}/transactions`, { method: 'POST', body: {
+    txn_date: isoAt(-1461 + 365 * y), txn_type: 'Premium Payment', amount: 50000 } });
+const longIrr = await json(await api(admin, `/policies/${longPolicy.id}/irr`));
+check('a four-year hold solves to a believable rate',
+  longIrr.result.irr > 0.2 && longIrr.result.irr < 1.0, String(longIrr.result.irr));
+check('and is not flagged short', longIrr.result.short_period === false);
+check('its assumed claim is dated today, since nothing is outstanding',
+  longIrr.result.flows.find((f) => f.actual === false)?.date === longIrr.as_of);
+
+await api(admin, `/policies/${shortPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-SHORT` } });
+await api(admin, `/policies/${longPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-LONG` } });
+
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL IRR CHECKS PASSED');
 process.exit(fails.length ? 1 : 0);

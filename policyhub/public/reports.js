@@ -166,6 +166,12 @@ const REPORTS = {
     blurb: 'IRR on every matured policy from the cheque that actually arrived. What the book has actually returned.',
     landscape: true,
   },
+  investor: {
+    name: 'Investor statements',
+    blurb: 'One page per investor — every position at their percentage, what they have paid in, what is due next, and the return so far. Staff only.',
+    landscape: false,
+    staffOnly: true,
+  },
 };
 
 /* ------------------------------ builders ----------------------------- */
@@ -205,7 +211,10 @@ function buildSummary(d, o) {
     <div class="rpt-tiles" data-count="${o.showBasis ? 6 : 4}">
       ${tile('Policies in force', t.policy_count, `Average insured age ${Math.round(Number(d.ages.avg_age)) || '—'}`)}
       ${tile('Total death benefit', fmtExact(dbTotal), `Face at issue ${fmtExact(t.total_face)}`)}
-      ${tile('Cash surrender value', fmtExact(t.total_csv), `Account value ${fmtExact(t.total_av)}`)}
+      ${o.investorShare
+        ? tile('Unrealized gain', fmtExact(dbTotal - invested),
+            `death benefit less capital invested${invested ? ` · ${(dbTotal / invested).toFixed(2)}×` : ''}`)
+        : tile('Cash surrender value', fmtExact(t.total_csv), `Account value ${fmtExact(t.total_av)}`)}
       ${tile('Annual premium', fmtExact(t.annual_premium), `Cost of insurance ${fmtExact(t.monthly_coi)}/mo`)}
       ${o.showBasis ? tile('Capital invested', fmtExact(invested),
           `${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premium`) : ''}
@@ -236,6 +245,8 @@ function buildSummary(d, o) {
 }
 
 function buildSchedule(rows, o) {
+  // Carrier mechanics are staff columns; see the note on the app's policy list.
+  const mine = !!o.investorShare;
   const tot = rows.reduce((a, p) => {
     a.face += Number(p.face_amount) || 0;
     a.db += Number(p.death_benefit ?? p.face_amount) || 0;
@@ -254,9 +265,9 @@ function buildSchedule(rows, o) {
       <thead><tr>
         <th>#</th><th>Last name</th><th>First name</th><th>DOB</th><th class="num">Age</th>
         <th>Carrier</th><th>Type</th><th>Policy no.</th><th>Issued</th>
-        <th class="num">Death benefit</th><th>Owner</th>
+        <th class="num">Death benefit</th>${mine ? '' : '<th>Owner</th>'}
         <th class="num">Premium</th><th>Mode</th><th>Next due</th>
-        <th class="num">AV</th><th class="num">CSV</th><th class="num">COI</th>
+        ${mine ? '' : '<th class="num">AV</th><th class="num">CSV</th><th class="num">COI</th>'}
         ${o.showBasis ? '<th class="num">Invested</th>' : ''}
         <th>Status</th>
       </tr></thead>
@@ -272,24 +283,24 @@ function buildSchedule(rows, o) {
           <td class="rpt-nowrap">${esc(p.policy_number)}</td>
           <td class="rpt-nowrap">${fmtDate(p.issue_date)}</td>
           <td class="num">${money(p.death_benefit ?? p.face_amount)}</td>
-          <td>${esc(p.fund_code || '—')}</td>
+          ${mine ? '' : `<td>${esc(p.fund_code || '—')}</td>`}
           <td class="num">${money(p.premium_required)}</td>
           <td>${esc(p.premium_mode || '—')}</td>
           <td class="rpt-nowrap">${fmtDate(p.next_premium_due)}</td>
-          <td class="num">${money(p.account_value)}</td>
+          ${mine ? '' : `<td class="num">${money(p.account_value)}</td>
           <td class="num">${money(p.cash_surrender_value)}</td>
-          <td class="num">${money(p.cost_of_insurance)}</td>
+          <td class="num">${money(p.cost_of_insurance)}</td>`}
           ${o.showBasis ? `<td class="num">${money(p.total_invested)}</td>` : ''}
           <td>${esc(p.status)}</td>
         </tr>`).join('')}
       </tbody>
       <tfoot><tr>
         <td colspan="9">Totals — ${rows.length} policies</td>
-        <td class="num">${money(tot.db)}</td><td></td>
+        <td class="num">${money(tot.db)}</td>${mine ? '' : '<td></td>'}
         <td class="num">${money(tot.prem)}</td><td colspan="2"></td>
-        <td class="num">${money(tot.av)}</td>
+        ${mine ? '' : `<td class="num">${money(tot.av)}</td>
         <td class="num">${money(tot.csv)}</td>
-        <td class="num">${money(tot.coi)}</td>
+        <td class="num">${money(tot.coi)}</td>`}
         ${o.showBasis ? `<td class="num">${money(tot.inv)}</td>` : ''}
         <td></td>
       </tr></tfoot>
@@ -573,7 +584,190 @@ function buildReturn(d, o, { realized }) {
     ${footer(title)}`;
 }
 
+/**
+ * One page per investor: the conversation a manager is about to have.
+ *
+ * The order is the order the questions come in. What do I hold. What have I
+ * actually paid. What is coming out of my pocket next. What has it returned.
+ * Every figure is already multiplied by that investor's percentage, because
+ * the alternative is a manager doing arithmetic in their head on a phone
+ * call, and the whole-policy number is right there to be misread.
+ */
+function buildInvestorReport(d, o) {
+  if (!d.investors.length) return `
+    <section class="rpt-sheet">
+      ${letterhead('Investor Statements', 'Nobody to report on', o.asOf)}
+      <div class="rpt-block"><p class="rpt-note">
+        No investors are visible under the current filters. A manager sees the
+        investors holding a position inside their own entities, plus any an
+        administrator has granted them.</p></div>
+      ${footer('')}
+    </section>`;
+
+  return d.investors.map((row, idx) => {
+    const inv = row.investor;
+    const t = row.totals;
+    const live = row.positions.filter((p) => p.status !== 'Matured');
+    const done = row.positions.filter((p) => p.status === 'Matured');
+    const paidTotal = row.paid.reduce((s, x) => s + x.amount, 0);
+
+    return `
+    <section class="rpt-sheet ${idx < d.investors.length - 1 ? 'page-break-after' : ''}">
+      ${letterhead('Investor Statement',
+        `${esc(inv.name)}${o.fund ? ` · Fund ${esc(o.fund)}` : ''}`, o.asOf)}
+      <div class="rpt-confidential">Confidential — investor position and cost basis.
+        For the intended recipient only.</div>
+
+      <h2 class="rpt-h2">${esc(inv.name)}</h2>
+      <div class="opp-sheet-sub">
+        ${esc(inv.investor_type || 'Investor')}${inv.legal_name && inv.legal_name !== inv.name
+          ? ` · ${esc(inv.legal_name)}` : ''}
+        ${inv.email ? ` · ${esc(inv.email)}` : ''}${inv.phone ? ` · ${esc(inv.phone)}` : ''}
+        ${inv.is_active === false ? ' · <strong>inactive</strong>' : ''}
+      </div>
+
+      <div class="rpt-tiles" data-count="5">
+        <div class="rpt-tile"><div class="rpt-tile-label">Positions</div>
+          <div class="rpt-tile-value">${t.position_count}</div>
+          <div class="rpt-tile-note">${t.live_count} in force${
+            t.realized_count ? ` · ${t.realized_count} matured` : ''}</div></div>
+        <div class="rpt-tile"><div class="rpt-tile-label">Death benefit</div>
+          <div class="rpt-tile-value">${fmtExact(t.live_death_benefit)}</div>
+          <div class="rpt-tile-note">their share of policies in force</div></div>
+        <div class="rpt-tile"><div class="rpt-tile-label">Capital paid in</div>
+          <div class="rpt-tile-value">${fmtExact(t.invested)}</div>
+          <div class="rpt-tile-note">${t.multiple ? `${t.multiple.toFixed(2)}× on benefit` : '—'}</div></div>
+        <div class="rpt-tile"><div class="rpt-tile-label">Premiums a year</div>
+          <div class="rpt-tile-value">${fmtExact(t.annual_premium)}</div>
+          <div class="rpt-tile-note">${fmtExact(row.upcoming_12mo)} due in the next 12 months</div></div>
+        <div class="rpt-tile"><div class="rpt-tile-label">Portfolio IRR</div>
+          <div class="rpt-tile-value">${fmtIrr(t.irr)}</div>
+          <div class="rpt-tile-note">${t.short_period
+            ? 'short holding period' : 'if every policy matured today'}</div></div>
+      </div>
+
+      <div class="rpt-block">
+        <h3 class="rpt-h3">Positions in force</h3>
+        <table class="rpt-table rpt-table-tight">
+          <thead><tr>
+            <th>Insured</th><th>Carrier</th><th>Policy no.</th><th>Type</th>
+            ${o.fund ? '' : '<th>Owner</th>'}
+            <th class="num">Share</th><th class="num">Death benefit</th>
+            ${o.showBasis ? '<th class="num">Paid in</th>' : ''}
+            <th class="num">Premium</th><th>Next due</th>
+            <th class="num">IRR</th>
+          </tr></thead>
+          <tbody>${live.length === 0
+            ? `<tr><td colspan="11">No policies in force.</td></tr>`
+            : live.map((p) => `<tr>
+                <td class="strong">${esc(p.insured || '—')}</td>
+                <td>${esc(p.carrier_name)}</td>
+                <td class="rpt-nowrap">${esc(p.policy_number)}</td>
+                <td>${esc(p.product_type || '—')}</td>
+                ${o.fund ? '' : `<td>${esc(p.fund_code || '—')}</td>`}
+                <td class="num">${pctOf(p.pct)}</td>
+                <td class="num">${money(p.death_benefit)}</td>
+                ${o.showBasis ? `<td class="num">${money(p.invested)}</td>` : ''}
+                <td class="num">${money(p.premium_required)}</td>
+                <td class="rpt-nowrap">${fmtDate(p.next_premium_due)}</td>
+                <td class="num strong">${fmtIrr(p.irr)}</td>
+              </tr>`).join('')}</tbody>
+          ${live.length ? `<tfoot><tr>
+            <td colspan="${o.fund ? 5 : 6}">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
+            <td class="num">${money(t.live_death_benefit)}</td>
+            ${o.showBasis ? `<td class="num">${money(live.reduce((s, p) => s + p.invested, 0))}</td>` : ''}
+            <td class="num">${money(t.annual_premium)}</td>
+            <td></td><td class="num">${fmtIrr(t.irr)}</td>
+          </tr></tfoot>` : ''}
+        </table>
+      </div>
+
+      <div class="rpt-cols">
+        ${o.showBasis ? `<div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">What they have paid in</h3>
+          <table class="rpt-kv">
+            ${row.paid.length === 0 ? '<tr><td>Nothing recorded</td><td>—</td></tr>'
+              : row.paid.map((x) => `<tr><td>${esc(x.kind)}</td><td>${money(x.amount)}</td></tr>`).join('')}
+            <tr><td><strong>Total</strong></td><td><strong>${money(paidTotal)}</strong></td></tr>
+          </table>
+          <p class="rpt-note">Their percentage of every entry in each policy's ledger,
+            dated as it was actually paid.</p>
+        </div>` : ''}
+
+        <div class="rpt-block avoid-break">
+          <h3 class="rpt-h3">Premiums coming up</h3>
+          <table class="rpt-table">
+            <thead><tr><th>Due</th><th>Insured</th>
+              <th class="num">Their share</th><th class="num">Full policy</th></tr></thead>
+            <tbody>${row.upcoming.length === 0
+              ? '<tr><td colspan="4">Nothing scheduled.</td></tr>'
+              : row.upcoming.slice(0, 10).map((u) => `<tr>
+                  <td class="strong rpt-nowrap">${fmtDate(u.date)}</td>
+                  <td>${esc(u.insured || u.policy_number)}${u.source === 'scheduled'
+                    ? ' <span class="rpt-dim">scheduled</span>' : ''}</td>
+                  <td class="num strong">${money(u.amount)}</td>
+                  <td class="num muted">${money(u.amount_full)}</td>
+                </tr>`).join('')}</tbody>
+            ${row.upcoming.length ? `<tfoot><tr>
+              <td colspan="2">Next 12 months</td>
+              <td class="num">${money(row.upcoming_12mo)}</td><td></td>
+            </tr></tfoot>` : ''}
+          </table>
+          ${row.upcoming.length > 10 ? `<p class="rpt-note">${row.upcoming.length - 10} further
+            payment${row.upcoming.length - 10 === 1 ? '' : 's'} beyond those shown.</p>` : ''}
+        </div>
+      </div>
+
+      ${done.length ? `<div class="rpt-block avoid-break">
+        <h3 class="rpt-h3">Realized</h3>
+        <table class="rpt-table">
+          <thead><tr><th>Insured</th><th>Policy no.</th><th>Matured</th><th>Paid</th>
+            <th class="num">Their proceeds</th>
+            ${o.showBasis ? '<th class="num">Paid in</th><th class="num">Gain</th>' : ''}
+            <th class="num">IRR</th></tr></thead>
+          <tbody>${done.map((p) => `<tr>
+            <td class="strong">${esc(p.insured || '—')}</td>
+            <td class="rpt-nowrap">${esc(p.policy_number)}</td>
+            <td class="rpt-nowrap">${fmtDate(p.matured_on)}</td>
+            <td class="rpt-nowrap">${p.settled ? fmtDate(p.proceeds_received_on) : 'awaiting'}</td>
+            <td class="num">${p.proceeds_amount == null ? '—' : money(p.proceeds_amount)}</td>
+            ${o.showBasis ? `<td class="num">${money(p.invested)}</td>
+              <td class="num">${money(p.profit)}</td>` : ''}
+            <td class="num strong">${fmtIrr(p.irr)}</td>
+          </tr>`).join('')}</tbody>
+          <tfoot><tr><td colspan="4">Total received</td>
+            <td class="num">${money(t.proceeds)}</td>
+            ${o.showBasis ? '<td></td><td></td>' : ''}<td></td></tr></tfoot>
+        </table>
+      </div>` : ''}
+
+      ${inv.notes ? `<div class="rpt-block avoid-break">
+        <h3 class="rpt-h3">Notes</h3>
+        <p class="rpt-para">${esc(inv.notes)}</p>
+      </div>` : ''}
+
+      <div class="rpt-block">
+        <p class="rpt-note">
+          Every figure on this page is this investor's percentage of the policy beside it,
+          never the whole policy. Percentages are as recorded on the cap table today; a
+          position bought or sold part-way through a year is not pro-rated.
+          ${t.ambiguous ? 'Their combined cash flows change direction more than once, so the portfolio rate is one of several mathematically valid roots. ' : ''}
+          ${t.short_period ? 'At least one position is under three months old, which makes an annualised rate extreme — read the capital and the benefit instead. ' : ''}
+          Rates assume every policy in force matured today and the carrier paid the current
+          death benefit immediately, with no further premiums.
+        </p>
+      </div>
+      ${footer(esc(inv.name))}
+    </section>`;
+  }).join('');
+}
+
+/** A share percentage, without the trailing zeros that read as false precision. */
+const pctOf = (n) => (n === null || n === undefined
+  ? '—' : `${Number(n).toFixed(4).replace(/\.?0+$/, '')}%`);
+
 function buildFactSheets(sheets, o) {
+  const mine = !!o.investorShare;
   return sheets.map((p, idx) => {
     const values = [...(p.values || [])].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
     const recent = [...values].reverse().slice(0, 12);
@@ -601,15 +795,24 @@ function buildFactSheets(sheets, o) {
         <div class="rpt-tile"><div class="rpt-tile-label">Death benefit</div>
           <div class="rpt-tile-value">${fmtExact(p.death_benefit ?? p.face_amount)}</div>
           <div class="rpt-tile-note">Face at issue ${fmtExact(p.face_amount)}</div></div>
-        <div class="rpt-tile"><div class="rpt-tile-label">Cash surrender value</div>
-          <div class="rpt-tile-value">${fmtExact(p.cash_surrender_value)}</div>
-          <div class="rpt-tile-note">AV ${fmtExact(p.account_value)}</div></div>
+        ${o.investorShare
+          ? `<div class="rpt-tile"><div class="rpt-tile-label">Your share</div>
+              <div class="rpt-tile-value">${p.my_pct == null ? '—'
+                : `${Number(p.my_pct).toFixed(4).replace(/\.?0+$/, '')}%`}</div>
+              <div class="rpt-tile-note">of this policy</div></div>`
+          : `<div class="rpt-tile"><div class="rpt-tile-label">Cash surrender value</div>
+              <div class="rpt-tile-value">${fmtExact(p.cash_surrender_value)}</div>
+              <div class="rpt-tile-note">AV ${fmtExact(p.account_value)}</div></div>`}
         <div class="rpt-tile"><div class="rpt-tile-label">Annual premium</div>
           <div class="rpt-tile-value">${fmtExact(p.premium_required)}</div>
           <div class="rpt-tile-note">${esc(p.premium_mode || '')}</div></div>
-        <div class="rpt-tile"><div class="rpt-tile-label">Coverage runway</div>
-          <div class="rpt-tile-value">${runway ? `${runway} mo` : '—'}</div>
-          <div class="rpt-tile-note">Account value ÷ monthly COI</div></div>
+        ${mine
+          ? `<div class="rpt-tile"><div class="rpt-tile-label">Next premium due</div>
+              <div class="rpt-tile-value">${fmtDate(p.next_premium_due)}</div>
+              <div class="rpt-tile-note">${fmtExact(p.premium_required)} · your share</div></div>`
+          : `<div class="rpt-tile"><div class="rpt-tile-label">Coverage runway</div>
+              <div class="rpt-tile-value">${runway ? `${runway} mo` : '—'}</div>
+              <div class="rpt-tile-note">Account value ÷ monthly COI</div></div>`}
         ${o.showBasis ? `<div class="rpt-tile"><div class="rpt-tile-label">Capital invested</div>
           <div class="rpt-tile-value">${fmtExact(p.total_invested)}</div>
           <div class="rpt-tile-note">${fmtExact(p.total_acquisition)} acquisition</div></div>` : ''}
@@ -636,8 +839,8 @@ function buildFactSheets(sheets, o) {
             <tr><td>Mode</td><td>${esc(p.premium_mode || '—')}</td></tr>
             <tr><td>Next due</td><td>${fmtDate(p.next_premium_due)}</td></tr>
             <tr><td>Grace period</td><td>${p.grace_period_days || 61} days</td></tr>
-            <tr><td>Last withdrawal</td><td>${fmtDate(p.date_of_last_withdrawal)}</td></tr>
-            <tr><td>Values as of</td><td>${fmtDate(p.value_as_of)}</td></tr>
+            ${mine ? '' : `<tr><td>Last withdrawal</td><td>${fmtDate(p.date_of_last_withdrawal)}</td></tr>
+            <tr><td>Values as of</td><td>${fmtDate(p.value_as_of)}</td></tr>`}
             ${o.showBasis ? `<tr><td>Acquired</td><td>${fmtDate(p.acquisition_date)}</td></tr>
             <tr><td>Acquisition cost</td><td>${money(p.acquisition_cost)}</td></tr>` : ''}
           </table>
@@ -659,12 +862,12 @@ function buildFactSheets(sheets, o) {
         </table>
       </div>
 
-      ${values.length > 1 ? `<div class="rpt-block avoid-break">
+      ${!mine && values.length > 1 ? `<div class="rpt-block avoid-break">
         <h3 class="rpt-h3">Account value &amp; cash surrender value</h3>
         <div id="rptSheetChart${p.id}"></div>
       </div>` : ''}
 
-      ${recent.length ? `<div class="rpt-block avoid-break">
+      ${!mine && recent.length ? `<div class="rpt-block avoid-break">
         <h3 class="rpt-h3">Recent carrier values</h3>
         <table class="rpt-table">
           <thead><tr><th>As of</th><th class="num">Account value</th>
@@ -973,7 +1176,8 @@ export function buildOpportunitySheet(o, opts = {}) {
 function describeShare(policies) {
   const pcts = [...new Set(policies.map((p) => Number(p.my_pct))
     .filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
-  const fmt = (n) => `${Number(n).toFixed(Number(n) % 1 ? 4 : 0)}%`;
+  // 12.5%, not 12.5000% — trailing zeros read as false precision.
+  const fmt = (n) => `${Number(n).toFixed(4).replace(/\.?0+$/, '')}%`;
   if (!pcts.length) return 'your recorded percentage of each';
   if (pcts.length === 1) return fmt(pcts[0]);
   return `between ${fmt(pcts[0])} and ${fmt(pcts[pcts.length - 1])}, policy by policy`;
@@ -981,11 +1185,12 @@ function describeShare(policies) {
 
 export async function reportsView(api, state) {
   const investorUser = state.user?.role === 'investor';
-  const [funds, policies] = await Promise.all([
+  const [funds, policies, investorList] = await Promise.all([
     // Owner entities are internal reference data; investors are denied them.
     investorUser ? Promise.resolve([])
       : state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
     api('/policies'),
+    investorUser ? Promise.resolve([]) : api('/investors').catch(() => []),
   ]);
   state.funds = funds;
 
@@ -1005,7 +1210,7 @@ export async function reportsView(api, state) {
         <div class="field">
           <label>Report</label>
           <div class="rpt-picker">
-            ${Object.entries(REPORTS).map(([k, v]) => `
+            ${Object.entries(REPORTS).filter(([, v]) => !(v.staffOnly && investorUser)).map(([k, v]) => `
               <label class="rpt-choice ${r.type === k ? 'selected' : ''}">
                 <input type="radio" name="rptType" value="${k}" ${r.type === k ? 'checked' : ''}>
                 <span class="rpt-choice-name">${v.name}</span>
@@ -1034,6 +1239,17 @@ export async function reportsView(api, state) {
             ${policies.map((p) => `<option value="${p.id}">${esc(p.insured_last || '')}${p.insured_first ? `, ${esc(p.insured_first)}` : ''} — ${esc(p.carrier_name)} ${esc(p.policy_number)}</option>`).join('')}
           </select>
           <span class="muted" style="font-size:12px">Nothing selected prints all ${policies.length}. Hold ⌘ or Ctrl to pick several.</span>
+        </div>
+
+        <div class="field" id="rptInvestorField" style="${r.type === 'investor' ? '' : 'display:none'}">
+          <label>Investors to include</label>
+          <select id="rptInvestors" multiple size="7">
+            ${investorList.map((i) => `<option value="${i.id}">${esc(i.name)}${
+              i.position_count ? ` — ${i.position_count} position${i.position_count === 1 ? '' : 's'}` : ''}</option>`).join('')}
+          </select>
+          <span class="muted" style="font-size:12px">
+            Nothing selected prints all ${investorList.length}. One page each, so pick the
+            person you are meeting rather than the whole list.</span>
         </div>
 
         <div class="field-row" style="align-items:center">
@@ -1070,6 +1286,7 @@ export async function reportsView(api, state) {
         $('#rptMonthsField').style.display = r.type === 'forecast' ? '' : 'none';
         $('#rptDetailField').style.display = r.type === 'forecast' ? '' : 'none';
         $('#rptPolicyField').style.display = r.type === 'factsheet' ? '' : 'none';
+        $('#rptInvestorField').style.display = r.type === 'investor' ? '' : 'none';
         document.querySelectorAll('.rpt-choice').forEach((el) =>
           el.classList.toggle('selected', el.querySelector('input').checked));
       };
@@ -1142,6 +1359,12 @@ export async function reportsView(api, state) {
                 valueFmt: (v) => `${v >= 0 ? '' : '−'}${Math.abs(v).toFixed(1)}%`,
               });
             };
+
+          } else if (r.type === 'investor') {
+            const picked = [...$('#rptInvestors').selectedOptions].map((op) => op.value);
+            const d = await api(`/reports/investors?fund=${encodeURIComponent(o.fund)}`
+              + `&investor_ids=${picked.join(',')}`);
+            out.innerHTML = buildInvestorReport(d, o);
 
           } else {
             const picked = [...$('#rptPolicies').selectedOptions].map((op) => Number(op.value));

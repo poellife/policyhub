@@ -187,6 +187,36 @@ for (const id of [d?.insured_id].filter(Boolean))
   await api(`/insureds/${id}`, { method: 'PUT', body: { date_of_death: null } });
 await api(`/policies/${policy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-1` } });
 
+console.log('\nA SHORT HOLD STILL SHOWS A RATE');
+/* The screen must answer "IRR if matured today" with a number. A few weeks
+   annualised is an extreme figure rather than an unknown one, so it is
+   capped for display and explained underneath — never left as a dash. */
+const shortP = await json(await api('/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-SHORT`, carrier_name: 'Screen Rate Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 2000000,
+  insured_last_name: 'Shortscreen', insured_first_name: 'Sonia', dob: '1946-12-05' } }));
+const at = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+await api(`/policies/${shortP.id}/transactions`, { method: 'POST', body: {
+  txn_date: at(0), txn_type: 'Premium Payment', amount: 50000 } });
+await api(`/policies/${shortP.id}/transactions`, { method: 'POST', body: {
+  txn_date: at(31), txn_type: 'Acquisition Cost', amount: 400000 } });
+
+await p.goto(`${BASE}/#/policy/${shortP.id}`);
+await p.waitForSelector('.tabs'); await p.waitForTimeout(600);
+await p.locator('.tabs button', { hasText: 'Return' }).first().click();
+await p.waitForTimeout(1800);
+const rateText = (await p.locator('.kpi-row').last().textContent()).replace(/\s+/g, ' ');
+check('the headline is not a dash', !/IRR if matured today\s*—/.test(rateText),
+  rateText.slice(0, 120));
+check('a percentage is shown', /%/.test(rateText), rateText.slice(0, 120));
+const shortBody = (await p.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('and the short-period caveat explains it',
+  /under three months old/i.test(shortBody) && /rate is still shown/i.test(shortBody));
+check('the profit and multiple are there to quote instead',
+  /\$1,550,000\.00/.test(shortBody) && /4\.44×/.test(shortBody));
+await p.screenshot({ path: `${S}/irr-short.png`, fullPage: true });
+await api(`/policies/${shortP.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-SHORT` } });
+
 console.log('\nERRORS:', errs.length ? errs.join('\n  ') : 'none');
 check('no page errors', errs.length === 0);
 await br.close();

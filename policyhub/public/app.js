@@ -339,6 +339,18 @@ async function dashboardView() {
   const t = sum.totals;
   const critical = svc.alerts.filter((a) => a.severity === 'critical').length;
   const annualPremium = Number(t.monthly_coi) * 12;
+  // What an investor is shown instead of servicing alerts: what is coming and
+  // what their part of it costs.
+  const todayIso = today();
+  const upcomingMine = (svc.upcoming || [])
+    .filter((r) => r.next_premium_due && String(r.next_premium_due).slice(0, 10) >= todayIso)
+    .sort((a, b) => String(a.next_premium_due).localeCompare(String(b.next_premium_due)));
+  const nextDue = upcomingMine[0] || null;
+  // What an investor is shown where the carrier mechanics used to be: the
+  // spread between what they have put in and what the policies would pay.
+  const gain = Number(t.total_death_benefit) - Number(t.total_invested);
+  const multiple = Number(t.total_invested) > 0
+    ? Number(t.total_death_benefit) / Number(t.total_invested) : null;
 
   const html = `
     <div class="page-head">
@@ -364,6 +376,12 @@ async function dashboardView() {
         <div class="value">${fmtExact(t.total_invested)}</div>
         <div class="note">${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premiums</div>
       </div>
+      ${isInvestorUser() ? `
+      <div class="stat">
+        <div class="label">Unrealized gain</div>
+        <div class="value" style="${gain >= 0 ? '' : 'color:var(--critical)'}">${fmtExact(gain)}</div>
+        <div class="note">death benefit less capital invested${multiple ? ` · ${multiple.toFixed(2)}×` : ''}</div>
+      </div>` : `
       <div class="stat">
         <div class="label">Cash surrender value</div>
         <div class="value">${fmtExact(t.total_csv)}</div>
@@ -373,7 +391,7 @@ async function dashboardView() {
         <div class="label">Cost of insurance</div>
         <div class="value">${fmtExact(t.monthly_coi)}<span style="font-size:15px;color:var(--text-muted)">/mo</span></div>
         <div class="note">≈ ${fmtExact(annualPremium)} per year</div>
-      </div>
+      </div>`}
       <div class="stat">
         <div class="label">Portfolio IRR</div>
         <div class="value">${fmtIrr(sum.irr?.irr)}</div>
@@ -381,11 +399,17 @@ async function dashboardView() {
           ? `if every policy matured today · ${(sum.irr.days / 365).toFixed(1)} yr span`
           : 'no dated cash flows yet'}</div>
       </div>
+      ${isInvestorUser() ? `
+      <div class="stat">
+        <div class="label">Next premium due</div>
+        <div class="value">${nextDue ? fmtDate(nextDue.next_premium_due) : '—'}</div>
+        <div class="note">${nextDue ? `${fmtExact(nextDue.premium_required)} · your share` : 'nothing scheduled'}</div>
+      </div>` : `
       <div class="stat">
         <div class="label">Needs attention</div>
         <div class="value" style="${critical ? 'color:var(--critical)' : ''}">${svc.alerts.length}</div>
         <div class="note">${critical} critical</div>
-      </div>
+      </div>`}
     </div>
 
     <div class="grid-2">
@@ -401,6 +425,23 @@ async function dashboardView() {
       </div>
     </div>
 
+    ${isInvestorUser() ? `
+    <div class="card">
+      <div class="card-head"><h2>Premiums coming up</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">your share</span>
+        <a href="#/servicing" style="font-size:13px;margin-left:12px">See all →</a></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Due</th><th>Insured</th><th>Policy</th><th class="num">Your share</th></tr></thead>
+        <tbody>${upcomingMine.length === 0
+          ? '<tr><td colspan="4"><div class="empty">No premium dates are scheduled on your policies.</div></td></tr>'
+          : upcomingMine.slice(0, 8).map((r) => `<tr class="clickable" data-id="${r.id}">
+              <td class="strong">${fmtDate(r.next_premium_due)}</td>
+              <td>${esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim())}</td>
+              <td class="secondary">${esc(r.carrier_name)} ${esc(r.policy_number)}</td>
+              <td class="num">${fmtExact(r.premium_required)}</td>
+            </tr>`).join('')}</tbody>
+      </table></div>
+    </div>` : `
     <div class="card">
       <div class="card-head"><h2>Alerts</h2><div class="spacer"></div>
         <a href="#/servicing" style="font-size:13px">Open servicing calendar →</a></div>
@@ -409,11 +450,13 @@ async function dashboardView() {
           ? '<div class="empty">Nothing needs attention right now.</div>'
           : svc.alerts.slice(0, 12).map(alertRow).join('')}
       </div>
-    </div>`;
+    </div>`}`;
 
   return {
     html,
     after: () => {
+      document.querySelectorAll('tr.clickable').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       lineChart($('#chartCapital'), {
         points: sum.capitalDeployed.map((r) => ({
           x: `${r.month}-01`,
@@ -492,9 +535,23 @@ const MY_SHARE_COLUMN = {
   value: (p) => Number(p.my_pct),
   cell: (p) => `<span class="strong">${Number(p.my_pct).toFixed(Number(p.my_pct) % 1 ? 4 : 0)}%</span>`,
 };
+/* Account value, cash surrender value and cost of insurance are how a policy
+   is administered, not how an investment performs. An investor is not going to
+   surrender the policy — they hold a percentage of a death benefit — so these
+   invite a question nobody can act on, and a cash value quoted next to a
+   purchase price reads like a valuation, which it is not. They are staff
+   columns. */
+const CARRIER_MECHANICS = [
+  'account_value', 'cash_surrender_value', 'cost_of_insurance',
+  // Dated by the same carrier statements, and meaningless without them.
+  'value_as_of', 'date_of_last_withdrawal',
+];
+
 const policyColumns = () =>
-  isInvestorUser() ? [...POLICY_COLUMNS.slice(0, 1), MY_SHARE_COLUMN, ...POLICY_COLUMNS.slice(1)]
-                   : POLICY_COLUMNS;
+  isInvestorUser()
+    ? [...POLICY_COLUMNS.slice(0, 1), MY_SHARE_COLUMN, ...POLICY_COLUMNS.slice(1)]
+        .filter((c) => !CARRIER_MECHANICS.includes(c.key))
+    : POLICY_COLUMNS;
 
 function sortPolicies(rows) {
   const { key, dir } = state.sort;
@@ -575,9 +632,9 @@ async function policiesView() {
             <td class="num">${fmtExact(totals.db)}</td>
             <td></td>
             <td class="num">${fmtExact(totals.prem)}</td>
-            <td class="num">${fmtExact(totals.av)}</td>
+            ${isInvestorUser() ? '' : `<td class="num">${fmtExact(totals.av)}</td>
             <td class="num">${fmtExact(totals.csv)}</td>
-            <td class="num">${fmtExact(totals.coi)}</td>
+            <td class="num">${fmtExact(totals.coi)}</td>`}
             <td class="num">${fmtExact(totals.inv)}</td>
             <td colspan="3"></td>
           </tr></tfoot>` : ''}
@@ -603,8 +660,15 @@ async function policiesView() {
         }));
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
-      $('#exportBtn').addEventListener('click', () =>
-        exportCsv('policies.csv', rows, [
+      $('#exportBtn').addEventListener('click', () => {
+        // The export has to obey the same two rules as the screen: an
+        // investor's figures are their share, and the carrier mechanics are
+        // not theirs to have. A spreadsheet outlives the page it came from.
+        const mine = isInvestorUser();
+        const f = (r) => shareFactor(r);
+        const cash = (key) => ({ header: key, get: (r) => Number(r[key === 'AV' ? 'account_value'
+          : key === 'CSV' ? 'cash_surrender_value' : 'cost_of_insurance'] || 0) * f(r) });
+        exportCsv(mine ? 'my-policies.csv' : 'policies.csv', rows, [
           { header: 'Policy Number', key: 'policy_number' },
           { header: 'Last Name', key: 'insured_last' },
           { header: 'First Name', key: 'insured_first' },
@@ -612,20 +676,22 @@ async function policiesView() {
           { header: 'Carrier Name', key: 'carrier_name' },
           { header: 'Product Type', key: 'product_type' },
           { header: 'Issue Date', key: 'issue_date' },
-          { header: 'Basic Face', key: 'face_amount' },
-          { header: 'Death Benefit', key: 'death_benefit' },
-          { header: 'Owner', key: 'fund_code' },
-          { header: 'Premium Required', key: 'premium_required' },
+          ...(mine ? [{ header: 'Your Share %', key: 'my_pct' }] : []),
+          { header: 'Basic Face', get: (r) => Number(r.face_amount || 0) * f(r) },
+          { header: 'Death Benefit', get: (r) => Number(r.death_benefit ?? r.face_amount ?? 0) * f(r) },
+          ...(mine ? [] : [{ header: 'Owner', key: 'fund_code' }]),
+          { header: 'Premium Required', get: (r) => Number(r.premium_required || 0) * f(r) },
           { header: 'Premium Mode', key: 'premium_mode' },
           { header: 'Next Premium Due', key: 'next_premium_due' },
-          { header: 'Values As Of', key: 'value_as_of' },
-          { header: 'AV', key: 'account_value' },
-          { header: 'CSV', key: 'cash_surrender_value' },
-          { header: 'COI', key: 'cost_of_insurance' },
-          { header: 'Total Invested', key: 'total_invested' },
-          { header: 'Date Of Last Withdrawal', key: 'date_of_last_withdrawal' },
+          ...(mine ? [] : [
+            { header: 'Values As Of', key: 'value_as_of' },
+            cash('AV'), cash('CSV'), cash('COI'),
+          ]),
+          { header: 'Total Invested', get: (r) => Number(r.total_invested || 0) * f(r) },
+          ...(mine ? [] : [{ header: 'Date Of Last Withdrawal', key: 'date_of_last_withdrawal' }]),
           { header: 'Status', key: 'status' },
-        ]));
+        ]);
+      });
       $('#newPolicyBtn')?.addEventListener('click', () => openPolicyDialog());
       wireShareToggle();
     },
@@ -646,9 +712,13 @@ async function policyView() {
   const av = Number(p.account_value) || 0;
   const monthsCovered = coi > 0 ? av / coi : null;
 
-  const tabs = [['overview', 'Overview'], ['values', 'Value history'],
+  // Value history is entirely account value, cash surrender value and cost of
+  // insurance — carrier administration, not investment performance. There is
+  // nothing left of the tab once those are taken out, so it goes.
+  const tabs = [['overview', 'Overview'],
+                ...(isInvestorUser() ? [] : [['values', 'Value history']]),
                 ['transactions', 'Transactions'], ['return', 'Return / IRR'],
-                ['servicing', 'Servicing']];
+                ['servicing', isInvestorUser() ? 'Premiums' : 'Servicing']];
 
   const html = `
     <div class="page-head">
@@ -697,16 +767,26 @@ async function policyView() {
       <div class="stat"><div class="label">Invested to date</div>
         <div class="value">${fmtExact(scaled(p.total_invested, p))}</div>
         <div class="note">${fmtExact(scaled(p.total_acquisition, p))} acquisition · ${fmtExact(scaled(p.total_premiums, p))} premium</div></div>
+      ${isInvestorUser() ? `
+      <div class="stat"><div class="label">Your position</div>
+        <div class="value">${p.my_pct != null ? fmtPct(p.my_pct) : '—'}</div>
+        <div class="note">acquired ${p.acquisition_date ? fmtDate(p.acquisition_date) : '—'}</div></div>` : `
       <div class="stat"><div class="label">Cash surrender value</div>
         <div class="value">${fmtExact(scaled(p.cash_surrender_value, p))}</div>
-        <div class="note">AV ${fmtExact(scaled(p.account_value, p))} · as of ${p.value_as_of ? fmtDate(p.value_as_of) : '—'}</div></div>
+        <div class="note">AV ${fmtExact(scaled(p.account_value, p))} · as of ${p.value_as_of ? fmtDate(p.value_as_of) : '—'}</div></div>`}
       <div class="stat"><div class="label">Insured age</div>
         <div class="value">${age ?? '—'}</div>
         <div class="note">${p.insured_dob ? `Born ${fmtDate(p.insured_dob)}` : 'No date of birth on file'}</div></div>
+      ${isInvestorUser() ? `
+      <div class="stat"><div class="label">Next premium due</div>
+        <div class="value" style="font-size:22px">${nextPremium(p) ? fmtDate(nextPremium(p).date) : '—'}</div>
+        <div class="note">${nextPremium(p)
+          ? `${fmtExact(scaled(p.premium_required, p))} · your share`
+          : 'nothing scheduled'}</div></div>` : `
       <div class="stat"><div class="label">Coverage runway</div>
         <div class="value" style="${monthsCovered !== null && monthsCovered < 6 ? 'color:var(--critical)' : ''}">${
           monthsCovered === null ? '—' : `${monthsCovered.toFixed(1)}<span style="font-size:15px;color:var(--text-muted)"> mo</span>`}</div>
-        <div class="note">Account value ÷ monthly COI</div></div>
+        <div class="note">Account value ÷ monthly COI</div></div>`}
     </div>
 
     <div class="tabs">
@@ -733,7 +813,7 @@ async function policyView() {
 }
 
 function renderDetailTab(p, values, monthsCovered, irrData) {
-  if (detailTab === 'values') return valuesTab(p, values);
+  if (detailTab === 'values') return isInvestorUser() ? overviewTab(p) : valuesTab(p, values);
   if (detailTab === 'transactions') return transactionsTab(p);
   if (detailTab === 'return') return returnTab(p, irrData);
   if (detailTab === 'servicing') return servicingTab(p, monthsCovered);
@@ -863,7 +943,10 @@ function overviewTab(p) {
         ${row('Acquisition cost', money(scaled(p.acquisition_cost, p)))}
         ${row('Total invested', money(scaled(p.total_invested, p)))}
         ${row('Premium required', `${money(scaled(p.premium_required, p))} <span class="muted">${esc(p.premium_mode || '')}</span>`)}
-        ${row('Next premium due', fmtDate(p.next_premium_due))}
+        ${row('Next premium due', nextPremium(p)
+          ? `${fmtDate(nextPremium(p).date)}${nextPremium(p).scheduled
+              ? ' <span class="muted">scheduled</span>' : ''}`
+          : fmtDate(null))}
         ${row('Grace period', `${p.grace_period_days || 61} days`)}
         ${row('Values as of', fmtDate(p.value_as_of))}
       </dl>
@@ -1032,29 +1115,72 @@ function transactionsTab(p) {
   </div>`;
 }
 
+/**
+ * The soonest premium actually coming on a policy.
+ *
+ * A policy carries one next-due date from the carrier, but a premium put on
+ * the follow-up schedule by hand is just as real and may fall sooner. Whoever
+ * is reading the page wants the earlier of the two, and wants to know which
+ * kind it is.
+ */
+function nextPremium(p) {
+  const todayIso = today();
+  const options = [];
+  if (p.next_premium_due && String(p.next_premium_due).slice(0, 10) >= todayIso)
+    options.push({ date: String(p.next_premium_due).slice(0, 10), scheduled: false });
+  for (const r of p.reminders || [])
+    if (r.kind === 'Premium' && !r.done_at && String(r.due_date).slice(0, 10) >= todayIso)
+      options.push({ date: String(r.due_date).slice(0, 10), scheduled: true });
+  options.sort((a, b) => (a.date < b.date ? -1 : 1));
+  // Nothing ahead: fall back to the carrier date so a lapsed one still shows.
+  return options[0]
+    || (p.next_premium_due ? { date: String(p.next_premium_due).slice(0, 10), scheduled: false } : null);
+}
+
 function servicingTab(p, monthsCovered) {
   /* An investor gets the dates and what their share of each will cost, and
      nothing else. Lapse risk, stale carrier data and the follow-up work are
      the manager's job; an investor reading "account value covers 2.4 months"
      on a policy they hold 8% of has been handed an alarm they cannot act on. */
   if (isInvestorUser()) {
+    const f = shareFactor(p);
+    // Anything scheduled by hand joins the carrier's own next-due date, so the
+    // investor sees one list of what is coming rather than two half-lists.
+    const planned = (p.reminders || [])
+      .filter((r) => r.kind === 'Premium' && !r.done_at)
+      .map((r) => ({ date: String(r.due_date).slice(0, 10), amount: Number(r.amount) * f,
+                     full: Number(r.amount), note: r.note, scheduled: true }));
+    const carrier = p.next_premium_due
+      ? [{ date: String(p.next_premium_due).slice(0, 10),
+           amount: Number(p.premium_required || 0) * f,
+           full: Number(p.premium_required || 0), note: '', scheduled: false }]
+      : [];
+    const all = [...carrier, ...planned].sort((a, b) => (a.date < b.date ? -1 : 1));
+
     return `
     <div class="card">
-      <div class="card-head"><h2>Premium schedule</h2><div class="spacer"></div>
+      <div class="card-head"><h2>Premiums coming up</h2><div class="spacer"></div>
         ${p.my_pct != null ? `<span class="muted" style="font-size:12px">your ${
           fmtPct(p.my_pct)} share</span>` : ''}</div>
-      <div class="card-body">
-        <dl class="kv">
-          <dt>Next premium due</dt><dd>${fmtDate(p.next_premium_due)}</dd>
-          <dt>Your share of it</dt><dd>${money(scaled(p.premium_required, p))}</dd>
-          <dt>Paid</dt><dd>${esc(p.premium_mode || '—')}</dd>
-        </dl>
-        <div class="muted" style="font-size:12.5px;margin-top:14px;line-height:1.6">
-          ${p.next_premium_due
-            ? `The full policy premium is ${money(p.premium_required)}; the figure above is your
-               ${p.my_pct != null ? fmtPct(p.my_pct) : ''} of it.`
-            : 'No premium date is scheduled on this policy at the moment.'}
-        </div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Due</th><th class="num">Your share</th>
+          <th class="num">Full policy</th><th></th></tr></thead>
+        <tbody>${all.length === 0
+          ? '<tr><td colspan="4"><div class="empty">No premium dates are scheduled on this policy at the moment.</div></td></tr>'
+          : all.map((r) => `<tr>
+              <td class="strong">${fmtDate(r.date)}</td>
+              <td class="num strong">${money(r.amount)}</td>
+              <td class="num muted">${money(r.full)}</td>
+              <td class="secondary">${r.scheduled
+                ? `<span class="muted">scheduled${r.note ? ` · ${esc(r.note)}` : ''}</span>`
+                : `<span class="muted">${esc(p.premium_mode || 'next due')}</span>`}</td>
+            </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px;line-height:1.6">
+          Amounts beyond the next carrier date are estimates from the policy illustration and
+          will move. Your column is ${p.my_pct != null ? fmtPct(p.my_pct) : 'your percentage'}
+          of the full policy premium beside it.</span>
       </div>
     </div>`;
   }
@@ -1082,7 +1208,10 @@ function servicingTab(p, monthsCovered) {
         <dl class="kv">
           <dt>Premium required</dt><dd>${money(scaled(p.premium_required, p))}</dd>
           <dt>Mode</dt><dd>${esc(p.premium_mode || '—')}</dd>
-          <dt>Next due</dt><dd>${fmtDate(p.next_premium_due)}</dd>
+          <dt>Next due</dt><dd>${nextPremium(p)
+            ? `${fmtDate(nextPremium(p).date)}${nextPremium(p).scheduled
+                ? ' <span class="muted">scheduled</span>' : ''}`
+            : fmtDate(null)}</dd>
           <dt>Grace period</dt><dd>${p.grace_period_days || 61} days</dd>
           <dt>Last withdrawal</dt><dd>${fmtDate(p.date_of_last_withdrawal)}</dd>
           <dt>Values as of</dt><dd>${fmtDate(p.value_as_of)}</dd>
@@ -1170,8 +1299,9 @@ function returnTab(p, d) {
 
   const caveats = [];
   if (r.short_period) caveats.push(
-    'This position is under three months old. Annualising a short holding period ' +
-    'magnifies small timing differences — read the profit and the multiple, not the rate.');
+    'This position is under three months old. The rate is still shown, but annualising ' +
+    'a few weeks stretches them over a whole year and produces an extreme number — the ' +
+    'profit and the multiple beside it are the figures to quote.');
   if (r.ambiguous) caveats.push(
     'Cash flows change direction more than once (a withdrawal between premiums, ' +
     'for example), so more than one rate can satisfy the equation. The one shown ' +

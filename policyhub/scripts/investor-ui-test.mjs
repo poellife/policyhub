@@ -142,12 +142,43 @@ if (full.cost) {
   check('not the whole purchase price', true, 'none recorded');
 }
 
+console.log('\nNO CASH OR ACCOUNT VALUES ANYWHERE');
+/* Account value, cash surrender value and cost of insurance are how a policy
+   is administered. An investor holds a percentage of a death benefit and is
+   never going to surrender the contract, so these only invite a question
+   nobody can act on — and a cash value beside a purchase price reads like a
+   valuation, which it is not. */
+const CASHY = /cash surrender|account value|cost of insurance|coverage runway/i;
+check('not on the policy page', !CASHY.test(detailText), (detailText.match(CASHY) || [''])[0]);
+check('and there is no value-history tab',
+  (await inv.locator('.tabs button', { hasText: 'Value history' }).count()) === 0,
+  (await inv.$$eval('.tabs button', (b) => b.map((x) => x.textContent.trim()))).join('/'));
+check('asking for it by hand does not open it', await (async () => {
+  await inv.goto(`${BASE}/#/policy/${openId}?tab=values`);
+  await inv.waitForSelector('.tabs'); await inv.waitForTimeout(700);
+  return !CASHY.test((await inv.locator('.main').textContent()));
+})());
+await inv.goto(`${BASE}/#/policies`); await inv.waitForSelector('table.data'); await inv.waitForTimeout(700);
+check('not a column on their policy list',
+  !CASHY.test(await inv.locator('table.data thead').textContent()),
+  await inv.locator('table.data thead').textContent());
+await inv.goto(`${BASE}/#/dashboard`); await inv.waitForSelector('.kpi-row'); await inv.waitForTimeout(800);
+check('and not a tile on their portfolio',
+  !CASHY.test(await inv.locator('.kpi-row').textContent()),
+  await inv.locator('.kpi-row').textContent().then((t) => t.replace(/\s+/g, ' ').slice(0, 150)));
+check('staff still have them', await staff.evaluate(async () => {
+  const r = await fetch('/api/analytics/summary').then((x) => x.json());
+  return r.totals.total_csv !== undefined;
+}));
+await inv.goto(`${BASE}/#/policy/${openId}`); await inv.waitForSelector('.tabs'); await inv.waitForTimeout(700);
+
 console.log('\nTHEIR SERVICING TAB IS DATES, NOT SERVICING WORK');
-await inv.locator('.tabs button', { hasText: 'Servicing' }).first().click();
+await inv.locator('.tabs button', { hasText: 'Premiums' }).first().click();
 await inv.waitForTimeout(800);
 const svcTab = (await inv.locator('.main .card').first().textContent()).replace(/\s+/g, ' ');
-check('it shows the next premium date', /Next premium due/i.test(svcTab));
-check('and their share of it', /Your share of it/i.test(svcTab));
+check('it lists the premiums coming up', /Premiums coming up/i.test(svcTab), svcTab.slice(0, 120));
+check('with their share beside the full policy figure',
+  /Your share/i.test(svcTab) && /Full policy/i.test(svcTab));
 check('with no lapse-risk commentary',
   !/cost of insurance|Coverage runway|No value update/i.test(svcTab), svcTab.slice(0, 200));
 check('no follow-up schedule', !/Follow-up schedule/i.test(svcTab));
@@ -203,6 +234,20 @@ check('the totals are their share', anyMoney(sched, schedFace.mine),
   `${money(schedFace.mine)} of ${money(schedFace.whole)}`);
 check('and not the whole book', !anyMoney(sched, schedFace.whole),
   money(schedFace.whole));
+check('the statement drops the carrier-value columns too',
+  !/\bAV\b|\bCSV\b|\bCOI\b/.test(await inv.locator('.rpt-sheet thead').textContent()),
+  await inv.locator('.rpt-sheet thead').textContent());
+
+// A fact sheet is the most detailed thing an investor can print.
+await inv.click('.rpt-choice:has(input[value="factsheet"])');
+await inv.click('#rptGenerate');
+await inv.waitForSelector('.rpt-sheet', { timeout: 25000 });
+await inv.waitForTimeout(1500);
+const facts = (await inv.locator('.rpt-output').textContent()).replace(/\s+/g, ' ');
+check('nor does the fact sheet carry cash or account values',
+  !/cash surrender|account value|coverage runway|recent carrier values/i.test(facts),
+  (facts.match(/cash surrender|account value|coverage runway|recent carrier values/i) || [''])[0]);
+check('it states the basis as well', /Every figure in this report is your share/i.test(facts));
 await inv.screenshot({ path: `${S}/i10-investor-statement.png`, fullPage: true });
 
 await inv.goto(`${BASE}/#/settings`); await inv.waitForSelector('#pwForm'); await inv.waitForTimeout(500);

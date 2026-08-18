@@ -65,8 +65,22 @@ export function xirr(rawFlows, { lo = -0.999999, hi = 1000, tol = 1e-12, maxIter
 
   let fLo = npv(flows, lo, from);
   let fHi = npv(flows, hi, from);
-  if (!Number.isFinite(fLo) || !Number.isFinite(fHi)) return null;
-  if (fLo * fHi > 0) return null;             // no root in a sane range
+  if (!Number.isFinite(fLo)) return null;
+
+  /* Widen the upper bound until the sign changes.
+   *
+   * A policy held five weeks that returns four times its capital really does
+   * annualise to an astronomical rate — the arithmetic is not wrong, the year
+   * is just a long way away. Refusing to solve because 1000 was not enough
+   * leaves a dash on the screen where a number belongs; the display caps the
+   * absurd end at ">9,999%" instead, which is honest and still a number. */
+  let guard = 0;
+  while (Number.isFinite(fHi) && fLo * fHi > 0 && hi < 1e18 && guard++ < 60) {
+    hi *= 1000;
+    fHi = npv(flows, hi, from);
+  }
+  if (!Number.isFinite(fHi)) return null;
+  if (fLo * fHi > 0) return null;             // genuinely no root: see analyzeFlows
 
   // `tol` bounds the RATE, not the NPV. An NPV threshold would have to be
   // scaled to the size of the flows to mean anything — a residual of one

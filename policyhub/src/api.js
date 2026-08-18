@@ -2,7 +2,7 @@ import express from 'express';
 // The IRR engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
-import { analyzeFlows, ledgerFlows, today } from '../public/irr.js';
+import { analyzeFlows, ledgerFlows, today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
@@ -467,12 +467,15 @@ router.get('/policies/:id', wrap(async (req, res) => {
     q(`SELECT pi.id AS link_id, pi.role, pi.notes AS link_notes, i.*
          FROM policy_insureds pi JOIN insureds i ON i.id = pi.insured_id
         WHERE pi.policy_id = $1 ORDER BY pi.id`, [req.params.id]),
-    // Servicing notes are staff business; an investor's payload carries none.
-    isInvestor(req) ? Promise.resolve({ rows: [] }) : q(
-      `SELECT r.*, u.full_name AS done_by_name
+    /* A scheduled premium is money the investor will be asked for, so it
+       belongs in front of them. The rest of the follow-up schedule — chase
+       this form, call that carrier — is servicing work and stays internal. */
+    q(`SELECT r.*, u.full_name AS done_by_name
          FROM policy_reminders r LEFT JOIN users u ON u.id = r.done_by
         WHERE r.policy_id = $1
-        ORDER BY (r.done_at IS NOT NULL), r.due_date, r.id`, [req.params.id]),
+          AND ($2::boolean IS NOT TRUE OR (r.kind = 'Premium' AND r.done_at IS NULL))
+        ORDER BY (r.done_at IS NOT NULL), r.due_date, r.id`,
+      [req.params.id, isInvestor(req)]),
   ]);
   // Staff see the whole cap table; an investor sees only their own line.
   const owners = await q(
@@ -1487,14 +1490,22 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
  * death: carriers take weeks to pay, and that delay is a real cost to the
  * return, not an accounting nicety.
  */
-function terminalFlow(p, asOf) {
+function terminalFlow(p, asOf, lastOutflow = null) {
   const benefit = Number(p.benefit) || 0;
   if (p.status === 'Lapsed') return null;
   if (p.proceeds_amount != null)
     return { date: p.proceeds_received_on || p.matured_on || asOf,
              amount: Number(p.proceeds_amount), label: 'Death benefit received', actual: true };
   if (!benefit) return null;
-  return { date: asOf, amount: benefit, actual: false,
+  /* You cannot be paid before you have paid.
+   *
+   * A policy acquired next month, asked "what if the insured died today",
+   * produces a claim dated before the purchase that funds it — and no rate
+   * satisfies flows that arrive before the money that bought them, so the
+   * screen showed a dash. Anchoring the assumption at the last outflow keeps
+   * the timeline coherent and the question answerable. */
+  const at = lastOutflow && lastOutflow > asOf ? lastOutflow : asOf;
+  return { date: at, amount: benefit, actual: false,
            label: p.status === 'Matured' ? 'Death benefit (claim outstanding)' : 'Death benefit if matured today' };
 }
 
@@ -1547,7 +1558,9 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
   for (const p of policies) {
     const factor = Number(p.factor) || 0;
     const flows = ledgerFlows(ledger.get(p.id) || [], factor);
-    const terminal = terminalFlow(p, asOf);
+    const lastOut = flows.reduce(
+      (d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
+    const terminal = terminalFlow(p, asOf, lastOut);
     if (terminal) flows.push({ ...terminal, amount: terminal.amount * factor });
     byPolicy.set(p.id, flows);
     combined.push(...flows);
@@ -1583,7 +1596,9 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
   const asOf = today();
   const base = ledgerFlows(txns, factor);
 
-  const terminal = terminalFlow(p, asOf);
+  const lastOutflow = base.reduce(
+    (d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
+  const terminal = terminalFlow(p, asOf, lastOutflow);
   const withTerminal = terminal
     ? [...base, { ...terminal, amount: terminal.amount * factor }]
     : base;
@@ -1719,8 +1734,14 @@ router.get('/servicing', wrap(async (req, res) => {
     [scope, funds]
   );
 
+  /* Investors get dates, not servicing work.
+     Lapse risk, stale carrier statements and overdue premiums are things
+     somebody here is already chasing. On an investor's screen they are an
+     alarm about a policy they hold a fraction of and cannot act on, and the
+     only effect is a phone call. They see what is coming and what it costs
+     them; the rest is the manager's job. */
   const alerts = [];
-  for (const p of rows) {
+  for (const p of (isInvestor(req) ? [] : rows)) {
     const name = p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim();
     const d = p.days_until_due;
 
@@ -1765,19 +1786,26 @@ router.get('/servicing', wrap(async (req, res) => {
      written six months ago is only useful if it comes back at you on the day
      it matters, and the servicing screen is where somebody is already
      looking. Investors get none of these — they are internal work. */
-  let steps = { rows: [] };
+  /* For staff this is the next 45 days of work. For an investor it is every
+     scheduled premium still ahead, whenever it falls, weighted to their share
+     — they are being told what they will be asked to fund, not chased. */
+  const steps = await q(
+    `SELECT r.id AS reminder_id, r.due_date, r.kind, r.note,
+            r.amount * (CASE WHEN $1::int IS NULL THEN 1 ELSE ${shareOf('pl.id', 1)} / 100.0 END)
+                                                        AS amount,
+            r.amount                                    AS amount_full,
+            ${shareOf('pl.id', 1)}                      AS my_pct,
+            (r.due_date - CURRENT_DATE) AS days_until_due,
+            pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
+            pl.insured_first, pl.insured_last, pl.status
+       FROM policy_reminders r JOIN policy_latest pl ON pl.id = r.policy_id
+      WHERE r.done_at IS NULL
+        AND ($1::int IS NULL OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
+        AND ($1::int IS NOT NULL OR r.due_date <= CURRENT_DATE + 45)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      ORDER BY r.due_date`,
+    [scope, funds]);
   if (!isInvestor(req)) {
-    steps = await q(
-      `SELECT r.id AS reminder_id, r.due_date, r.kind, r.amount, r.note,
-              (r.due_date - CURRENT_DATE) AS days_until_due,
-              pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
-              pl.insured_first, pl.insured_last, pl.status
-         FROM policy_reminders r JOIN policy_latest pl ON pl.id = r.policy_id
-        WHERE r.done_at IS NULL
-          AND r.due_date <= CURRENT_DATE + 45
-          AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
-        ORDER BY r.due_date`,
-      [scope, funds]);
     for (const r of steps.rows) {
       const name = r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
       const d = r.days_until_due;
@@ -2091,6 +2119,172 @@ const MODE_MONTHS = { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 };
  * calendar month. A due date already in the past is reported in the current
  * month and flagged overdue rather than silently rolled forward.
  */
+/**
+ * One statement per investor, for the people who run the book.
+ *
+ * The investor portal answers "what do I hold". This answers the question a
+ * manager actually gets asked on the phone — what has this person put in,
+ * what do they own, what is coming out of their pocket next, and what has it
+ * returned so far — with every figure already multiplied by their percentage
+ * so nobody is doing arithmetic in their head while talking.
+ *
+ * Staff only, and scoped: a manager sees the investors they may reach and
+ * only the positions inside their own entities, so the totals on this
+ * document are the totals *they* are responsible for.
+ */
+router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
+  const fund = str(req.query.fund);
+  const wanted = String(req.query.investor_ids || '')
+    .split(',').map((n) => parseInt(n, 10)).filter(Number.isInteger);
+  const funds = fundScope(req);
+  const granted = grantedInvestors(req);
+  const asOf = today();
+
+  const { rows: investors } = await q(
+    `SELECT inv.id, inv.name, inv.legal_name, inv.investor_type, inv.email, inv.phone,
+            inv.is_active, inv.notes
+       FROM investors inv
+      WHERE ($1::int[] IS NULL OR inv.id = ANY($1))
+        AND ($2::int[] IS NULL OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
+              SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
+               WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
+      ORDER BY inv.name`,
+    [wanted.length ? wanted : null, funds, granted]);
+  if (!investors.length) return res.json({ as_of: asOf, investors: [] });
+
+  const ids = investors.map((i) => i.id);
+  const { rows: positions } = await q(
+    `SELECT pi.investor_id, pi.pct, pi.acquired_on, pi.notes AS position_notes,
+            pl.id, pl.policy_number, pl.carrier_name, pl.product_type, pl.fund_code,
+            pl.display_name, pl.insured_first, pl.insured_last, pl.insured_dob,
+            pl.status, pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
+            pl.face_amount, COALESCE(pl.death_benefit, pl.face_amount) AS death_benefit,
+            pl.premium_required, pl.premium_mode, pl.next_premium_due, pl.le_months
+       FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
+      WHERE pi.investor_id = ANY($1)
+        AND ($2 = '' OR pl.fund_code = $2)
+        AND ($3::int[] IS NULL OR pl.fund_id = ANY($3))
+      ORDER BY pl.insured_last, pl.policy_number`,
+    [ids, fund, funds]);
+
+  const policyIds = [...new Set(positions.map((p) => p.id))];
+  const [{ rows: txns }, { rows: steps }] = policyIds.length
+    ? await Promise.all([
+      q(`SELECT policy_id, txn_date, txn_type, amount FROM transactions
+          WHERE policy_id = ANY($1) ORDER BY txn_date, id`, [policyIds]),
+      q(`SELECT policy_id, due_date, amount, note FROM policy_reminders
+          WHERE policy_id = ANY($1) AND kind = 'Premium' AND done_at IS NULL
+            AND due_date >= CURRENT_DATE
+          ORDER BY due_date`, [policyIds]),
+    ])
+    : [{ rows: [] }, { rows: [] }];
+
+  const ledger = new Map();
+  for (const t of txns) {
+    if (!ledger.has(t.policy_id)) ledger.set(t.policy_id, []);
+    ledger.get(t.policy_id).push(t);
+  }
+  const planned = new Map();
+  for (const r of steps) {
+    if (!planned.has(r.policy_id)) planned.set(r.policy_id, []);
+    planned.get(r.policy_id).push(r);
+  }
+
+  const byInvestor = new Map(investors.map((i) => [i.id, []]));
+  for (const p of positions) byInvestor.get(p.investor_id)?.push(p);
+
+  const out = investors.map((inv) => {
+    const mine = byInvestor.get(inv.id) || [];
+    const allFlows = [];
+    const paid = {};          // what has actually left this investor, by kind
+    const upcoming = [];      // what is due to leave next
+
+    const rows = mine.map((p) => {
+      const factor = Number(p.pct) / 100;
+      const flows = ledgerFlows(ledger.get(p.id) || [], factor);
+      for (const t of ledger.get(p.id) || []) {
+        if (!OUTFLOW_TYPES.includes(t.txn_type)) continue;
+        paid[t.txn_type] = (paid[t.txn_type] || 0) + Number(t.amount) * factor;
+      }
+      const lastOut = flows.reduce(
+        (d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
+      const terminal = terminalFlow(
+        { ...p, benefit: p.death_benefit }, asOf, lastOut);
+      const withTerminal = terminal
+        ? [...flows, { ...terminal, amount: terminal.amount * factor }] : flows;
+      allFlows.push(...withTerminal);
+      const a = analyzeFlows(withTerminal);
+
+      if (p.status !== 'Matured' && p.next_premium_due)
+        upcoming.push({ policy_id: p.id, policy_number: p.policy_number,
+          insured: p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim(),
+          date: String(p.next_premium_due).slice(0, 10),
+          amount: Number(p.premium_required || 0) * factor,
+          amount_full: Number(p.premium_required || 0),
+          source: p.premium_mode || 'carrier' });
+      for (const r of planned.get(p.id) || [])
+        upcoming.push({ policy_id: p.id, policy_number: p.policy_number,
+          insured: p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim(),
+          date: String(r.due_date).slice(0, 10),
+          amount: Number(r.amount || 0) * factor,
+          amount_full: Number(r.amount || 0),
+          source: 'scheduled', note: r.note });
+
+      return {
+        id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
+        product_type: p.product_type, fund_code: p.fund_code, status: p.status,
+        insured: p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim(),
+        insured_dob: p.insured_dob, le_months: p.le_months,
+        pct: Number(p.pct), acquired_on: p.acquired_on,
+        face_amount: Number(p.face_amount || 0) * factor,
+        death_benefit: Number(p.death_benefit || 0) * factor,
+        premium_required: Number(p.premium_required || 0) * factor,
+        premium_mode: p.premium_mode, next_premium_due: p.next_premium_due,
+        matured_on: p.matured_on,
+        proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
+        proceeds_received_on: p.proceeds_received_on,
+        settled: p.proceeds_amount != null,
+        invested: a.invested, returned: a.returned, profit: a.profit,
+        multiple: a.multiple, irr: a.irr, days: a.days,
+        short_period: a.short_period, ambiguous: a.ambiguous,
+      };
+    });
+
+    const overall = analyzeFlows(allFlows);
+    const live = rows.filter((r) => r.status !== 'Matured');
+    const realized = rows.filter((r) => r.status === 'Matured');
+    upcoming.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+    return {
+      investor: inv,
+      positions: rows,
+      totals: {
+        position_count: rows.length,
+        live_count: live.length,
+        realized_count: realized.length,
+        death_benefit: rows.reduce((s, r) => s + r.death_benefit, 0),
+        live_death_benefit: live.reduce((s, r) => s + r.death_benefit, 0),
+        invested: rows.reduce((s, r) => s + r.invested, 0),
+        annual_premium: live.reduce((s, r) => s + r.premium_required, 0),
+        proceeds: realized.reduce((s, r) => s + (r.proceeds_amount || 0), 0),
+        irr: overall.irr,
+        multiple: overall.multiple,
+        profit: overall.profit,
+        short_period: overall.short_period,
+        ambiguous: overall.ambiguous,
+      },
+      paid: Object.entries(paid).map(([kind, amount]) => ({ kind, amount }))
+        .sort((a, b) => b.amount - a.amount),
+      upcoming: upcoming.slice(0, 24),
+      upcoming_12mo: upcoming
+        .filter((u) => u.date <= addMonths(asOf, 12))
+        .reduce((s, u) => s + u.amount, 0),
+    };
+  });
+
+  res.json({ as_of: asOf, fund, investors: out });
+}));
+
 router.get('/reports/premium-forecast', wrap(async (req, res) => {
   const months = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
   const fund = str(req.query.fund);

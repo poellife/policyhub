@@ -17,7 +17,8 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeou
 await p.click('a[href="#/reports"]');
 await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Reports');
 await p.waitForSelector('#rptGenerate');
-check('reports page renders', (await p.locator('.rpt-choice').count())===6);
+check('reports page renders', (await p.locator('.rpt-choice').count())===7,
+  `${await p.locator('.rpt-choice').count()} report types`);
 await p.screenshot({path:`${SHOTS}/r0-reports-picker.png`,fullPage:true});
 
 const run = async (type, label, opts={}) => {
@@ -146,6 +147,21 @@ for (const f of fs.readdirSync(SHOTS).filter(f=>f.startsWith('pdf-'))) {
   console.log(`  ${f}: ${kb} KB`);
   if (kb < 5) fails.push(`${f} suspiciously small`);
 }
+
+console.log('\nINVESTOR STATEMENTS');
+const s7 = await run('investor', 'investor statements');
+check('one page per investor, named', /Investor Statement/i.test(s7));
+check('positions in force are listed', /POSITIONS IN FORCE/i.test(s7));
+check('with what they have paid in broken out', /WHAT THEY HAVE PAID IN/i.test(s7));
+check('and what is due next', /PREMIUMS COMING UP/i.test(s7));
+check('their share sits beside the full policy figure',
+  /THEIR SHARE/i.test(s7) && /FULL POLICY/i.test(s7));
+check('a portfolio rate is given', /PORTFOLIO IRR/i.test(s7));
+check('and the basis is stated plainly',
+  /percentage of the policy beside it,\s+never the whole policy/i.test(s7));
+check('the picker offers investors to choose from',
+  (await p.locator('#rptInvestors option').count()) > 0,
+  `${await p.locator('#rptInvestors option').count()} options`);
 
 console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
 check('no page errors', errs.length===0);

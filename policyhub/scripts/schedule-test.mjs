@@ -153,6 +153,61 @@ check('but present on an admin\'s',
 check('a manager can work the schedule inside their own',
   (await api(pm1, `/policies/${policy.id}/reminders`)).status === 200);
 
+console.log('\nAN INVESTOR SEES SCHEDULED PREMIUMS, BUT NOT THE REST');
+/* A premium put on the schedule by hand is money the investor will be asked
+   for, so it has to reach them. "Chase the change-of-ownership form" is work
+   and stays here. */
+const shared = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-3`, carrier_name: 'Schedule Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 4000000, premium_required: 40000, premium_mode: 'Annual',
+  next_premium_due: iso(300),
+  insured_last_name: 'Sharedcase', insured_first_name: 'Nia', dob: '1941-01-01' } }));
+const me1 = (await json(await api(inv1, '/auth/me'))).investor.id;
+await api(admin, `/policies/${shared.id}/investors`,
+  { method: 'POST', body: { investor_id: me1, pct: 25 } });
+await api(admin, `/policies/${shared.id}/reminders`, { method: 'POST', body: {
+  due_date: iso(60), kind: 'Premium', amount: 52000, note: 'Step-up per the illustration' } });
+await api(admin, `/policies/${shared.id}/reminders`, { method: 'POST', body: {
+  due_date: iso(20), kind: 'Reminder', note: 'Chase the change-of-ownership form' } });
+
+const invView = await json(await api(inv1, `/policies/${shared.id}`));
+const invSteps = invView.reminders || [];
+check('the scheduled premium reaches the investor', invSteps.length === 1,
+  invSteps.map((r) => r.kind).join(','));
+check('and it is the premium, not the errand', invSteps[0]?.kind === 'Premium');
+check('the follow-up work stays internal',
+  !invSteps.some((r) => /change-of-ownership/.test(r.note || '')));
+check('staff still see both',
+  ((await json(await api(admin, `/policies/${shared.id}`))).reminders || []).length === 2);
+
+const invSvc = await json(await api(inv1, '/servicing'));
+const mineSteps = (invSvc.scheduled || []).filter((r) => r.policy_number === `${PREFIX}-3`);
+check('it is on their premiums screen', mineSteps.length === 1,
+  `${mineSteps.length} of ${(invSvc.scheduled || []).length}`);
+check('weighted to their 25%', near(mineSteps[0]?.amount, 52000 * 0.25),
+  `${mineSteps[0]?.amount} of ${mineSteps[0]?.amount_full}`);
+check('with the full-policy figure alongside it',
+  near(mineSteps[0]?.amount_full, 52000));
+check('an investor gets no errands on their calendar',
+  !(invSvc.scheduled || []).some((r) => r.kind === 'Reminder'));
+check('and no servicing alerts at all', (invSvc.alerts || []).length === 0,
+  `${(invSvc.alerts || []).length} alerts`);
+// One 300 days out is beyond a staff window but still ahead, so it counts.
+check('a premium far in the future still reaches them',
+  (invSvc.scheduled || []).every((r) => r.days_until_due >= 0));
+
+console.log('\nCASH AND ACCOUNT VALUES ARE NOT THEIRS TO HAVE');
+await api(admin, `/policies/${shared.id}/values`, { method: 'POST', body: {
+  as_of_date: iso(-30), account_value: 91000, cash_surrender_value: 74000,
+  cost_of_insurance: 3100, death_benefit: 4000000 } });
+const invAfter = await json(await api(inv1, `/policies/${shared.id}`));
+check('the API still carries them — the screen is what withholds them',
+  invAfter.cash_surrender_value !== undefined);
+check('so the removal is a display decision, tested in the browser suite', true,
+  'see investor-ui-test');
+
+await api(admin, `/policies/${shared.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-3` } });
+
 console.log('\nREMOVING ONE');
 check('a step can be deleted',
   (await api(admin, `/policy-reminders/${premRow.id}`, { method: 'DELETE' })).status === 200);
