@@ -3684,18 +3684,207 @@ async function handleFiles(files) {
 
 /* ------------------------------ settings ----------------------------- */
 
+/* ----------------------------- documents ----------------------------- */
+
+const DOC_CATEGORIES = [
+  'LLC Agreement', 'Subscription Agreement', 'K-1', 'Tax', 'Statement',
+  'Policy Document', 'Correspondence', 'Other',
+];
+
+/** Bytes as a person would say them. */
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+  return `${(b / 1048576).toFixed(b < 10485760 ? 1 : 0)} MB`;
+}
+
+/** The search box only appears once the cabinet is big enough to need it. */
+function docFiltered(docs) {
+  const f = state.docFilter || {};
+  const term = String(f.search || '').toLowerCase();
+  return docs.filter((d) => {
+    if (f.category && d.category !== f.category) return false;
+    if (!term) return true;
+    return [d.title, d.file_name, d.notes, d.investor_name, d.category]
+      .some((v) => String(v || '').toLowerCase().includes(term));
+  });
+}
+
+/**
+ * Download through fetch rather than a plain link.
+ *
+ * The session is a cookie, so a link would work — but it would also open a
+ * new tab that shows an error page as raw JSON if anything is wrong, and
+ * say nothing useful when a document has been unshared underneath you.
+ * This keeps the failure inside the application.
+ */
+async function downloadDocument(id, fallbackName = 'document') {
+  const res = await fetch(`/api/documents/${id}/download`, { credentials: 'same-origin' });
+  if (!res.ok) {
+    let msg = 'That document could not be downloaded.';
+    try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+    throw new Error(msg);
+  }
+  const disp = res.headers.get('Content-Disposition') || '';
+  const named = /filename="([^"]+)"/.exec(disp)?.[1] || fallbackName;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = named;
+  document.body.appendChild(a); a.click(); a.remove();
+  // Revoke on the next tick: revoking synchronously races the download in
+  // some browsers and produces an empty file.
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/**
+ * Post a document, or correct one already posted.
+ *
+ * Who it is for is the only question that matters here, so it is asked
+ * plainly rather than hidden behind a set of optional fields: the firm, an
+ * owning entity, or one investor. Sharing is a separate, explicit tick,
+ * because a K-1 exists for weeks before anybody should see it.
+ */
+function openDocumentDialog(existing, funds, investors, onSaved) {
+  const editing = !!existing;
+  const thisYear = new Date().getFullYear();
+  const target = editing
+    ? (existing.investor_id ? 'investor' : existing.fund_id ? 'fund' : 'firm')
+    : 'firm';
+
+  const dlg = openDialog(editing ? `Edit ${existing.title}` : 'Upload a document', `
+    ${editing ? '' : `
+    <div class="field">
+      <label>File *</label>
+      <input type="file" name="file" required
+             accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.gif,.tif,.tiff,.zip">
+      <span class="muted" style="font-size:12px">Up to 15 MB. PDF, Word, Excel, PowerPoint,
+        images and zip archives.</span>
+    </div>`}
+
+    <div class="field-row">
+      ${inputField('Title', 'title', existing?.title || '', 'text',
+        editing ? 'required' : 'placeholder="Leave blank to use the file name"')}
+      <div class="field"><label>Category</label>
+        <select name="category">
+          ${DOC_CATEGORIES.map((c) => `<option ${
+            (existing?.category || 'LLC Agreement') === c ? 'selected' : ''}>${c}</option>`).join('')}
+        </select></div>
+      ${inputField('Year', 'doc_year', existing?.doc_year ?? '', 'number',
+        `min=1990 max=${thisYear + 2} placeholder="${thisYear - 1}"`)}
+    </div>
+
+    <div class="dlg-section">Who it is for</div>
+    <div class="field">
+      <div class="step-kind">
+        <label class="rpt-choice ${target === 'firm' ? 'selected' : ''}">
+          <input type="radio" name="target" value="firm" ${target === 'firm' ? 'checked' : ''}>
+          <strong>The whole firm</strong>
+          <span class="muted" style="display:block;font-size:12px;margin-top:3px">
+            Every member of staff can see it. No investor can.</span>
+        </label>
+        <label class="rpt-choice ${target === 'fund' ? 'selected' : ''}">
+          <input type="radio" name="target" value="fund" ${target === 'fund' ? 'checked' : ''}>
+          <strong>An owner entity</strong>
+          <span class="muted" style="display:block;font-size:12px;margin-top:3px">
+            Follows the entity — its managers see it, others do not.</span>
+        </label>
+        <label class="rpt-choice ${target === 'investor' ? 'selected' : ''}">
+          <input type="radio" name="target" value="investor" ${target === 'investor' ? 'checked' : ''}>
+          <strong>One investor</strong>
+          <span class="muted" style="display:block;font-size:12px;margin-top:3px">
+            A K-1, a statement, a signed subscription.</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="field" id="docFundField" style="display:none">
+      <label>Owner entity</label>
+      <select name="fund_id">
+        ${funds.map((f) => `<option value="${f.id}" ${
+          Number(existing?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}${
+          f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="field" id="docInvestorField" style="display:none">
+      <label>Investor</label>
+      <select name="investor_id">
+        ${investors.map((i) => `<option value="${i.id}" ${
+          Number(existing?.investor_id) === Number(i.id) ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}
+      </select>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;text-transform:none;
+                    font-family:var(--font);font-size:13.5px;letter-spacing:0;color:var(--text-primary)">
+        <input type="checkbox" name="shared" ${existing?.shared ? 'checked' : ''}
+               style="width:auto;margin:0"> Share it with them now
+      </label>
+      <span class="muted" style="font-size:12px">
+        Until this is ticked the document is staff-only, so a draft can sit here safely.
+        Once ticked it appears under Documents when they sign in.</span>
+    </div>
+
+    <div class="field"><label>Notes</label>
+      <input name="notes" value="${esc(existing?.notes || '')}"
+             placeholder="Executed 12 March, countersigned"></div>
+  `, async (v) => {
+    const chosen = dlg.querySelector('input[name=target]:checked').value;
+    const body = {
+      title: v.title, category: v.category, doc_year: v.doc_year, notes: v.notes,
+      fund_id: chosen === 'fund' ? v.fund_id : '',
+      investor_id: chosen === 'investor' ? v.investor_id : '',
+      shared: chosen === 'investor' && v.shared === 'on',
+    };
+    if (editing) {
+      await api(`/documents/${existing.id}`, { method: 'PUT', body });
+      toast('Document updated');
+    } else {
+      const input = dlg.querySelector('input[type=file]');
+      const file = input.files?.[0];
+      if (!file) throw new Error('Choose a file to upload.');
+      if (file.size > 15 * 1024 * 1024)
+        throw new Error(`That file is ${fmtBytes(file.size)}. The limit is 15 MB.`);
+      const fd = new FormData();
+      fd.append('file', file);
+      for (const [k, val] of Object.entries(body)) fd.append(k, val === null ? '' : String(val));
+      const res = await fetch('/api/documents', { method: 'POST', body: fd, credentials: 'same-origin' });
+      if (!res.ok) {
+        let msg = 'Upload failed.';
+        try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+        throw new Error(msg);
+      }
+      toast('Document posted');
+    }
+    onSaved?.();
+  }, editing ? 'Save' : 'Upload');
+
+  const sync = () => {
+    const chosen = dlg.querySelector('input[name=target]:checked').value;
+    $('#docFundField', dlg).style.display = chosen === 'fund' ? '' : 'none';
+    $('#docInvestorField', dlg).style.display = chosen === 'investor' ? '' : 'none';
+    dlg.querySelectorAll('.step-kind .rpt-choice').forEach((el) =>
+      el.classList.toggle('selected', el.querySelector('input').checked));
+  };
+  dlg.querySelectorAll('input[name=target]').forEach((el) => el.addEventListener('change', sync));
+  sync();
+  return dlg;
+}
+
 async function settingsView() {
   const isAdmin = state.user.role === 'admin';
   const canEdit = ['admin', 'editor'].includes(state.user.role);
   // Anything beyond the password panel is off-limits to scoped accounts.
   const accountOnly = isInvestorUser() || isManagerUser();
   const investorUser = accountOnly;
-  const [users, audit, funds] = await Promise.all([
+  const [users, audit, funds, docs, investors] = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
     accountOnly ? Promise.resolve([]) : api('/funds'),
+    api('/documents').catch(() => []),
+    isInvestorUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
   ]);
   state.funds = funds;
+  const canPost = ['admin', 'editor', 'manager'].includes(state.user.role);
 
   const html = `
     <div class="page-head"><div><h1>${accountOnly ? 'Account' : 'Settings'}</h1>
@@ -3776,6 +3965,66 @@ async function settingsView() {
       </table></div>
     </div>`}
 
+    <div class="card">
+      <div class="card-head"><h2>Documents</h2><div class="spacer"></div>
+        ${docs.length ? `<span class="muted" style="font-size:12px">${docs.length} on file</span>` : ''}
+        ${canPost ? '<button class="btn-sm primary" id="addDocBtn" style="margin-left:12px">Upload document</button>' : ''}</div>
+
+      ${docs.length > 6 ? `<div class="card-body" style="border-bottom:1px solid var(--grid)">
+        <div class="toolbar" style="margin:0">
+          <input class="grow" id="docSearch" placeholder="Search title, file name, investor…"
+                 value="${esc(state.docFilter?.search || '')}">
+          <select id="docCategory">
+            <option value="">All categories</option>
+            ${DOC_CATEGORIES.map((c) => `<option ${state.docFilter?.category === c ? 'selected' : ''}>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>` : ''}
+
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Document</th><th>Category</th><th class="num">Year</th>
+          ${isInvestorUser() ? '' : '<th>Who it is for</th>'}
+          <th class="num">Size</th><th>Added</th><th></th></tr></thead>
+        <tbody>${docFiltered(docs).length === 0
+          ? `<tr><td colspan="7"><div class="empty">${isInvestorUser()
+              ? 'Nothing has been shared with you yet. Statements, K-1s and agreements will appear here.'
+              : canPost
+                ? 'No documents yet. Post the LLC agreement, subscription documents, K-1s — anything the fund runs on.'
+                : 'No documents yet.'}</div></td></tr>`
+          : docFiltered(docs).map((d) => `<tr>
+              <td class="strong"><a href="#" data-doc-get="${d.id}">${esc(d.title)}</a>
+                <div class="muted" style="font-size:11.5px">${esc(d.file_name)}${
+                  d.notes ? ` · ${esc(d.notes)}` : ''}</div></td>
+              <td>${esc(d.category)}</td>
+              <td class="num">${d.doc_year || '—'}</td>
+              ${isInvestorUser() ? '' : `<td class="secondary">${
+                d.investor_name
+                  ? `${esc(d.investor_name)} ${d.shared
+                      ? '<span class="badge inforce"><span class="dot"></span>shared</span>'
+                      : '<span class="badge">staff only</span>'}`
+                  : d.fund_code ? esc(d.fund_code) : '<span class="muted">whole firm</span>'}</td>`}
+              <td class="num muted">${fmtBytes(d.byte_size)}</td>
+              <td class="muted">${new Date(d.created_at).toLocaleDateString('en-US')}${
+                d.uploaded_by_name ? `<div style="font-size:11.5px">${esc(d.uploaded_by_name)}</div>` : ''}</td>
+              <td style="white-space:nowrap">
+                <button class="btn-sm" data-doc-get="${d.id}">Download</button>
+                ${canPost ? `<button class="btn-sm" data-doc-edit="${d.id}">Edit</button>` : ''}
+                ${['admin', 'manager'].includes(state.user.role)
+                  ? `<button class="btn-sm btn-danger" data-doc-del="${d.id}">Delete</button>` : ''}
+              </td>
+            </tr>`).join('')}</tbody>
+      </table></div>
+
+      ${isInvestorUser() ? '' : `<div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12px">
+          A document with nobody named against it is visible to every member of staff. Name an
+          owner entity and it follows that entity; name an investor and it is theirs —
+          but only once <strong>shared</strong> is ticked, so a draft K-1 can sit here safely
+          until it is ready to go out. Files are held in the database and travel with your
+          backups. Up to 15 MB each.</span>
+      </div>`}
+    </div>
+
     ${isAdmin ? `
     <div class="card">
       <div class="card-head"><h2>Activity log</h2><div class="spacer"></div>
@@ -3795,6 +4044,46 @@ async function settingsView() {
   return {
     html,
     after: () => {
+      $('#addDocBtn')?.addEventListener('click', () =>
+        openDocumentDialog(null, funds, investors, render));
+
+      document.querySelectorAll('[data-doc-get]').forEach((b) =>
+        b.addEventListener('click', async (e) => {
+          e.preventDefault();
+          const d = docs.find((x) => x.id === Number(b.dataset.docGet));
+          try { await downloadDocument(b.dataset.docGet, d?.file_name); }
+          catch (err) { alert(err.message); }
+        }));
+
+      document.querySelectorAll('[data-doc-edit]').forEach((b) =>
+        b.addEventListener('click', () =>
+          openDocumentDialog(docs.find((x) => x.id === Number(b.dataset.docEdit)),
+            funds, investors, render)));
+
+      document.querySelectorAll('[data-doc-del]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const d = docs.find((x) => x.id === Number(b.dataset.docDel));
+          if (!confirm(`Delete "${d?.title}"?\n\nThe file is removed for good.`)) return;
+          try {
+            await api(`/documents/${b.dataset.docDel}`, { method: 'DELETE' });
+            toast('Document deleted');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
+
+      let docTimer;
+      $('#docSearch')?.addEventListener('input', (e) => {
+        clearTimeout(docTimer);
+        docTimer = setTimeout(() => {
+          state.docFilter = { ...(state.docFilter || {}), search: e.target.value };
+          render();
+        }, 250);
+      });
+      $('#docCategory')?.addEventListener('change', (e) => {
+        state.docFilter = { ...(state.docFilter || {}), category: e.target.value };
+        render();
+      });
+
       $('#pwForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         try {

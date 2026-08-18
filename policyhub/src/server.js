@@ -8,7 +8,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 
 import { initDb, explainDbError } from './db.js';
-import api, { wrap } from './api.js';
+import api, { wrap, storeDocument } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 
@@ -68,6 +68,17 @@ const oneAtATime = (req, res, next) => {
   res.on('close', () => importing.delete(req.user.uid));
   next();
 };
+
+/* Documents are a different shape of upload from a CSV import: one file at a
+   time, larger, and stored rather than parsed. A signed LLC agreement or a
+   scanned K-1 runs past 5 MB often enough to be annoying, and only one is
+   held in memory at once, so this gets its own limit. */
+const docUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 12 },
+});
+app.post('/api/documents', authenticate, requireRole('admin', 'editor', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeDocument));
 
 app.post('/api/import/preview', authenticate, canImport, oneAtATime, files,
   wrap(async (req, res) => {

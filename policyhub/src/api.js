@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash } from 'node:crypto';
 // The IRR engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
@@ -604,6 +605,209 @@ router.delete('/policies/:id', blockInvestors, adminOrManager, inPolicyScope('id
   res.json({ ok: true, deleted: {
     policy_number: p.policy_number, values: p.value_count, transactions: p.txn_count } });
 }));
+
+/* ------------------------------------------------------------------ *
+ * documents
+ *
+ * The paperwork the fund runs on: LLC agreements, subscription
+ * documents, K-1s, carrier letters. Small in number, awkward in
+ * visibility -- some belong to the firm, some to one owning entity, and
+ * a K-1 belongs to exactly one person and nobody else.
+ * ------------------------------------------------------------------ */
+
+const DOC_CATEGORIES = [
+  'LLC Agreement', 'Subscription Agreement', 'K-1', 'Tax', 'Statement',
+  'Policy Document', 'Correspondence', 'Other',
+];
+
+/**
+ * What a document may be, on the way in.
+ *
+ * A whitelist rather than a blocklist, and deliberately without text/html
+ * or svg: those execute in a browser, and a file somebody uploaded is a
+ * file somebody chose. Everything is served as an attachment as well, so
+ * neither measure is load-bearing on its own.
+ */
+const DOC_TYPES = new Map([
+  ['pdf',  'application/pdf'],
+  ['doc',  'application/msword'],
+  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['xls',  'application/vnd.ms-excel'],
+  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ['ppt',  'application/vnd.ms-powerpoint'],
+  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ['csv',  'text/csv'],
+  ['txt',  'text/plain'],
+  ['rtf',  'application/rtf'],
+  ['png',  'image/png'],
+  ['jpg',  'image/jpeg'],
+  ['jpeg', 'image/jpeg'],
+  ['gif',  'image/gif'],
+  ['tif',  'image/tiff'],
+  ['tiff', 'image/tiff'],
+  ['zip',  'application/zip'],
+]);
+
+const docExt = (name) => String(name || '').toLowerCase().split('.').pop();
+
+/** Strip any path, and any control character, a client may have volunteered. */
+const safeName = (name) => String(name || 'document')
+  .replace(/[\\/]/g, '_')
+  .replace(/[\x00-\x1f\x7f]/g, '')
+  .trim().slice(0, 200) || 'document';
+
+/**
+ * WHERE fragment for the documents a caller may see.
+ *
+ * An investor sees only what is addressed to them AND marked shared -- a
+ * draft K-1 sitting against their name is not theirs until somebody says
+ * so. A manager sees the firm's documents plus anything belonging to their
+ * own entities or to an investor they may reach. Other staff see the
+ * cabinet.
+ */
+function documentScope(req) {
+  if (isInvestor(req))
+    return { sql: 'd.investor_id = $1 AND d.shared IS TRUE', params: [Number(req.user.iid) || -1] };
+  const funds = fundScope(req);
+  if (funds === null) return { sql: 'TRUE', params: [] };
+  const granted = grantedInvestors(req);
+  return {
+    sql: `(d.fund_id IS NULL OR d.fund_id = ANY($1))
+          AND (d.investor_id IS NULL
+               OR d.investor_id = ANY(COALESCE($2::int[], '{}'))
+               OR EXISTS (SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
+                           WHERE pj.investor_id = d.investor_id AND pp.fund_id = ANY($1)))`,
+    params: [funds, granted],
+  };
+}
+
+router.get('/documents', wrap(async (req, res) => {
+  const scope = documentScope(req);
+  const n = scope.params.length;
+  const search = str(req.query.search);
+  const category = str(req.query.category);
+  const { rows } = await q(
+    `SELECT * FROM document_list d
+      WHERE ${scope.sql}
+        AND ($${n + 1} = '' OR d.title ILIKE '%'||$${n + 1}||'%'
+             OR d.file_name ILIKE '%'||$${n + 1}||'%'
+             OR d.notes ILIKE '%'||$${n + 1}||'%'
+             OR d.investor_name ILIKE '%'||$${n + 1}||'%')
+        AND ($${n + 2} = '' OR d.category = $${n + 2})
+      ORDER BY d.doc_year DESC NULLS LAST, d.created_at DESC`,
+    [...scope.params, search, category]);
+  res.json(rows);
+}));
+
+router.get('/documents/categories', wrap(async (req, res) => res.json(DOC_CATEGORIES)));
+
+/** The bytes. Always as an attachment, never rendered in place. */
+router.get('/documents/:id/download', wrap(async (req, res) => {
+  const scope = documentScope(req);
+  const { rows } = await q(
+    `SELECT d.file_name, d.mime_type, d.byte_size, doc.content
+       FROM document_list d JOIN documents doc ON doc.id = d.id
+      WHERE d.id = $${scope.params.length + 1} AND ${scope.sql}`,
+    [...scope.params, req.params.id]);
+  const doc = rows[0];
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+  await audit(req.user.uid, 'document', Number(req.params.id), 'read', doc.file_name);
+  /* Content-Disposition: attachment, with nosniff beside it. Between them a
+     stored file cannot be talked into executing in the browser as this
+     origin, which is the whole risk in letting people upload and each other
+     download. */
+  res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Length', doc.byte_size);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${safeName(doc.file_name).replace(/"/g, '')}"`);
+  res.send(doc.content);
+}));
+
+router.put('/documents/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const scope = documentScope(req);
+  const { rows: found } = await q(
+    `SELECT d.id FROM document_list d
+      WHERE d.id = $${scope.params.length + 1} AND ${scope.sql}`,
+    [...scope.params, req.params.id]);
+  if (!found[0]) return res.status(404).json({ error: 'Document not found' });
+
+  const category = DOC_CATEGORIES.includes(str(req.body.category))
+    ? str(req.body.category) : 'Other';
+  const investorId = int(req.body.investor_id);
+  if (investorId && (await investorsOutOfScope(req, [investorId])).length)
+    return res.status(403).json({ error: 'That investor is not one of yours' });
+
+  const { rows } = await q(
+    `UPDATE documents SET title = $1, category = $2, doc_year = $3, notes = $4,
+            fund_id = $5, investor_id = $6, shared = $7, updated_at = now()
+      WHERE id = $8 RETURNING id`,
+    [str(req.body.title) || 'Untitled', category, int(req.body.doc_year), str(req.body.notes),
+     int(req.body.fund_id), investorId,
+     req.body.shared === true || req.body.shared === 'true', req.params.id]);
+  await audit(req.user.uid, 'document', rows[0].id, 'update', str(req.body.title));
+  res.json({ ok: true });
+}));
+
+router.delete('/documents/:id', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const scope = documentScope(req);
+    const { rows } = await q(
+      `SELECT d.id, d.title FROM document_list d
+        WHERE d.id = $${scope.params.length + 1} AND ${scope.sql}`,
+      [...scope.params, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Document not found' });
+    await q('DELETE FROM documents WHERE id = $1', [req.params.id]);
+    await audit(req.user.uid, 'document', Number(req.params.id), 'delete', rows[0].title);
+    res.json({ ok: true });
+  }));
+
+/**
+ * Store an uploaded document. Called from server.js, which owns multer --
+ * exported rather than routed here so the byte limits and the parser stay
+ * together with the other upload routes.
+ */
+export async function storeDocument(req, res) {
+  const file = (req.files?.file || [])[0] || (req.files?.files || [])[0];
+  if (!file) return res.status(400).json({ error: 'Choose a file to upload' });
+
+  const ext = docExt(file.originalname);
+  if (!DOC_TYPES.has(ext))
+    return res.status(400).json({
+      error: `A .${ext} file cannot be stored here. Accepted: ${[...DOC_TYPES.keys()].join(', ')}.` });
+  if (!file.buffer?.length) return res.status(400).json({ error: 'That file is empty' });
+
+  const funds = fundScope(req);
+  const fundId = int(req.body.fund_id);
+  if (funds && fundId && !funds.includes(fundId))
+    return res.status(403).json({ error: 'That owner entity is not one of yours' });
+  const investorId = int(req.body.investor_id);
+  if (investorId && (await investorsOutOfScope(req, [investorId])).length)
+    return res.status(403).json({ error: 'That investor is not one of yours' });
+
+  const category = DOC_CATEGORIES.includes(str(req.body.category))
+    ? str(req.body.category) : 'Other';
+  // The mime type comes from the extension just whitelisted, never from the
+  // browser: a client is free to claim anything, and often does.
+  const mime = DOC_TYPES.get(ext);
+  const checksum = createHash('sha256').update(file.buffer).digest('hex');
+
+  const { rows } = await q(
+    `INSERT INTO documents (title, category, doc_year, notes, fund_id, investor_id,
+                            policy_id, shared, file_name, mime_type, byte_size,
+                            checksum, content, uploaded_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+    [str(req.body.title) || safeName(file.originalname), category, int(req.body.doc_year),
+     str(req.body.notes), fundId, investorId, int(req.body.policy_id),
+     req.body.shared === 'true' || req.body.shared === true,
+     safeName(file.originalname), mime, file.buffer.length, checksum, file.buffer, req.user.uid]);
+
+  await audit(req.user.uid, 'document', rows[0].id, 'create',
+    `${category} - ${safeName(file.originalname)} - ${file.buffer.length} bytes`);
+  res.status(201).json({ id: rows[0].id, ok: true });
+}
 
 /* ------------------------------------------------------------------ *
  * scheduled next steps

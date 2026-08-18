@@ -559,3 +559,74 @@ CREATE INDEX IF NOT EXISTS idx_policy_reminders_policy ON policy_reminders (poli
 -- load, so that is the index worth having.
 CREATE INDEX IF NOT EXISTS idx_policy_reminders_open
   ON policy_reminders (due_date) WHERE done_at IS NULL;
+
+
+/* ====================================================================
+   Documents
+   ====================================================================
+
+   The paperwork a life-settlement fund runs on: the LLC agreement, the
+   subscription documents, a K-1 for each investor each year, the odd
+   carrier letter. Small in number, awkward in every other way — some
+   belong to the firm, some to one owning entity, and some to exactly
+   one person and nobody else.
+
+   The bytes live in the database rather than on disk. A container
+   filesystem is thrown away on every redeploy, so a file written there
+   is a file lost, and object storage would mean an account, a set of
+   credentials and a second thing to keep alive. A K-1 is a few hundred
+   kilobytes; the whole cabinet fits comfortably in a column, is backed
+   up with everything else, and cannot drift out of sync with the record
+   that points at it.
+
+   Visibility is the reason this table has as many columns as it does:
+     fund_id     — the owning entity it belongs to, or null for the firm
+     investor_id — the one investor it is about, or null for nobody
+     shared      — whether that investor may see it at all
+   A K-1 is investor_id = them, shared = true. A draft of the same K-1 is
+   the same row with shared = false, and only staff can see it.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS documents (
+  id            SERIAL PRIMARY KEY,
+  title         TEXT NOT NULL,
+  category      TEXT NOT NULL DEFAULT 'Other',
+  doc_year      INTEGER,                       -- K-1s and statements are annual
+  notes         TEXT NOT NULL DEFAULT '',
+
+  fund_id       INTEGER REFERENCES funds(id)     ON DELETE SET NULL,
+  investor_id   INTEGER REFERENCES investors(id) ON DELETE CASCADE,
+  policy_id     INTEGER REFERENCES policies(id)  ON DELETE CASCADE,
+  shared        BOOLEAN NOT NULL DEFAULT FALSE, -- may the investor see it
+
+  file_name     TEXT NOT NULL,
+  mime_type     TEXT NOT NULL DEFAULT 'application/octet-stream',
+  byte_size     INTEGER NOT NULL,
+  -- SHA-256 of the bytes: lets the same file be recognised on re-upload
+  -- without comparing megabytes, and proves nothing changed underneath.
+  checksum      TEXT NOT NULL DEFAULT '',
+  content       BYTEA NOT NULL,
+
+  uploaded_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_documents_investor ON documents (investor_id);
+CREATE INDEX IF NOT EXISTS idx_documents_fund     ON documents (fund_id);
+CREATE INDEX IF NOT EXISTS idx_documents_category ON documents (category, doc_year);
+
+/* Listing the cabinet must never drag the cabinet into memory. Every list
+   query reads this view; only a download touches `content`. */
+CREATE OR REPLACE VIEW document_list AS
+SELECT d.id, d.title, d.category, d.doc_year, d.notes,
+       d.fund_id, d.investor_id, d.policy_id, d.shared,
+       d.file_name, d.mime_type, d.byte_size, d.checksum,
+       d.uploaded_by, d.created_at, d.updated_at,
+       f.code  AS fund_code,
+       i.name  AS investor_name,
+       p.policy_number,
+       u.full_name AS uploaded_by_name
+  FROM documents d
+  LEFT JOIN funds f      ON f.id = d.fund_id
+  LEFT JOIN investors i  ON i.id = d.investor_id
+  LEFT JOIN policies p   ON p.id = d.policy_id
+  LEFT JOIN users u      ON u.id = d.uploaded_by;
