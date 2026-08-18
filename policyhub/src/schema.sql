@@ -245,6 +245,17 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS proceeds_amount NUMERIC(16,2);
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS proceeds_received_on DATE;
 CREATE INDEX IF NOT EXISTS idx_policies_matured ON policies (matured_on);
 
+-- ---------------------------------------------------------------------
+--  Case files
+--
+--  The file room for a policy usually lives somewhere else already —
+--  Dropbox, a shared drive, the servicer's own portal. Rather than ask
+--  anyone to move it, a policy carries a link to it, and everyone with
+--  sight of the policy gets the same link. Only the address is stored;
+--  who may open it is decided by the folder's own sharing settings.
+-- ---------------------------------------------------------------------
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
+
 -- The rule, as a function, so the trigger and any report agree by construction.
 CREATE OR REPLACE FUNCTION policy_maturity_date(p_id INTEGER)
 RETURNS DATE LANGUAGE sql STABLE AS $$
@@ -370,6 +381,7 @@ SELECT
   i.first_name  AS insured_first,
   i.last_name   AS insured_last,
   i.dob         AS insured_dob,
+  i.gender      AS insured_gender,
   i.date_of_death,
   i.le_months,
   f.code        AS fund_code,
@@ -471,6 +483,14 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS mitigating TEXT NOT NULL DEFA
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS underwriter_note TEXT NOT NULL DEFAULT '';
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS thesis TEXT NOT NULL DEFAULT '';
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS records_through DATE;
+
+-- What the carrier says the policy is worth today. Account value is what
+-- keeps the contract alive; cash surrender value is what walking away is
+-- worth, and it is the floor under the price being asked. Both are quoted
+-- as at a stated date, because a value with no date is not a value.
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS account_value NUMERIC(16,2);
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS cash_surrender_value NUMERIC(16,2);
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS values_as_of DATE;
 
 -- The premium schedule as offered. Beyond its last row the projection
 -- continues at the same annual rate, which the analysis states on its face.
@@ -630,3 +650,68 @@ SELECT d.id, d.title, d.category, d.doc_year, d.notes,
   LEFT JOIN investors i  ON i.id = d.investor_id
   LEFT JOIN policies p   ON p.id = d.policy_id
   LEFT JOIN users u      ON u.id = d.uploaded_by;
+
+-- ---------------------------------------------------------------------
+--  Operating agreements
+--
+--  A new LLC agreement is not a new document — it is the same clauses
+--  with different blanks filled in. So only the blanks are stored, in
+--  `terms`, and the text is rendered from the template on demand. That
+--  keeps every agreement in step with counsel's language and makes it
+--  impossible for a clause to be quietly different in one copy.
+--
+--  What is stored, and never re-derived, is `body_hash`: the digest of
+--  the exact text at the moment the agreement was issued for signature.
+--  A signature is a signature of *that* text. If the template is ever
+--  revised, the hash on an executed agreement no longer matches what
+--  the template would produce today — which is the correct and visible
+--  answer, rather than a silent rewrite of what somebody signed.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agreements (
+  id            SERIAL PRIMARY KEY,
+  template      TEXT NOT NULL DEFAULT 'llc_operating_v1',
+  title         TEXT NOT NULL DEFAULT '',
+  fund_id       INTEGER REFERENCES funds(id) ON DELETE SET NULL,
+  policy_id     INTEGER REFERENCES policies(id) ON DELETE SET NULL,
+  -- Draft | Out for signature | Executed | Void
+  status        TEXT NOT NULL DEFAULT 'Draft',
+  terms         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  body_hash     TEXT,
+  issued_at     TIMESTAMPTZ,
+  issued_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  executed_at   TIMESTAMPTZ,
+  void_reason   TEXT NOT NULL DEFAULT '',
+  document_id   INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_agreements_fund   ON agreements (fund_id);
+CREATE INDEX IF NOT EXISTS idx_agreements_status ON agreements (status);
+
+-- One row per party. The signature itself is four columns: what they
+-- typed, when, from where, and against which text — an electronic
+-- signature is worth exactly as much as the record of how it was taken.
+CREATE TABLE IF NOT EXISTS agreement_signers (
+  id            SERIAL PRIMARY KEY,
+  agreement_id  INTEGER NOT NULL REFERENCES agreements(id) ON DELETE CASCADE,
+  investor_id   INTEGER REFERENCES investors(id) ON DELETE CASCADE,
+  role          TEXT NOT NULL DEFAULT 'Member',   -- Member | Manager
+  name          TEXT NOT NULL DEFAULT '',
+  email         TEXT NOT NULL DEFAULT '',
+  address       TEXT NOT NULL DEFAULT '',
+  contribution  NUMERIC(16,2),
+  pct           NUMERIC(9,6),
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  signed_at     TIMESTAMPTZ,
+  signed_name   TEXT,
+  signed_ip     TEXT,
+  signed_agent  TEXT,
+  signed_hash   TEXT,
+  declined_at   TIMESTAMPTZ,
+  decline_note  TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agreement_signer_once
+  ON agreement_signers (agreement_id, investor_id) WHERE investor_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_agreement_signers_investor
+  ON agreement_signers (investor_id);

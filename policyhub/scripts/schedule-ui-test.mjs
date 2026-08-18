@@ -87,7 +87,8 @@ check('premium is the default kind',
 check('and the estimated amount is shown for it',
   await p.locator('#stepAmountField').isVisible());
 check('pre-filled from the policy premium',
-  Number(await p.locator('dialog[open] input[name="amount"]').inputValue()) === 24000,
+  // The field groups thousands as you type, so read it the way a person does.
+  (await p.locator('dialog[open] input[name="amount"]').inputValue()) === '24,000',
   await p.locator('dialog[open] input[name="amount"]').inputValue());
 const dlgText = (await p.locator('dialog[open]').textContent()).replace(/\s+/g, ' ');
 check('the dialog says the amount is an estimate', /amount is an estimate/i.test(dlgText));
@@ -164,7 +165,7 @@ await premRow.locator('[data-step-edit]').click();
 await p.waitForSelector('dialog[open] input[name="amount"]');
 await p.waitForTimeout(400);
 check('editing loads the values back in',
-  Number(await p.locator('dialog[open] input[name="amount"]').inputValue()) === 31500.75);
+  (await p.locator('dialog[open] input[name="amount"]').inputValue()) === '31,500.75');
 await p.fill('dialog[open] input[name="amount"]', '28000');
 await p.click('dialog[open] button[type=submit]');
 await p.waitForTimeout(1500); await servicingTab();

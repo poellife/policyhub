@@ -150,9 +150,14 @@ check('with no staff-only column to confuse them',
 await inv.screenshot({ path: `${S}/doc2-investor.png`, fullPage: true });
 
 console.log('\nDOWNLOADING IT');
+/* Download this suite's own row rather than whichever happens to be first:
+   the cabinet is shared with everything else the investor has been given,
+   and "the first document" is not a stable thing to assert about. */
 const wait = inv.waitForEvent('download', { timeout: 15000 });
 await inv.locator('.card', { hasText: 'Documents' }).first()
-  .locator('[data-doc-get]').first().click();
+  .locator('tr', { hasText: `${PREFIX} K-1 2025` }).first()
+  .locator('[data-doc-get]').first()
+  .click();
 const dl = await wait;
 check('the download starts', !!dl);
 check('under the name it was filed as', /\.pdf$/i.test(dl.suggestedFilename()),

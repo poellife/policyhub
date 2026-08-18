@@ -102,8 +102,10 @@ await inv.waitForTimeout(600);
 const mine = inv.locator('.opp-card', { hasText: PREFIX });
 check('both offers are listed', (await mine.count()) === 2,
   `${await mine.count()} of ${await inv.locator('.opp-card').count()} cards`);
-const tightCard = inv.locator('.opp-card', { hasText: 'Lastchance' });
-const openCard = inv.locator('.opp-card', { hasText: 'Openfield' });
+/* An investor is shown initials rather than the insured's name, so the
+   cards are found by policy number the way the reader would find them. */
+const tightCard = inv.locator('.opp-card', { hasText: `${PREFIX}-TIGHT` });
+const openCard = inv.locator('.opp-card', { hasText: `${PREFIX}-OPEN` });
 check('the nearly-gone one is marked urgent',
   await tightCard.evaluate((el) => el.classList.contains('urgent')));
 check('the wide-open one is not',
@@ -156,7 +158,7 @@ console.log('\nTHE OTHER INVESTOR SEES THE REMAINDER MOVE');
 const inv2 = await page(INVESTOR2.email, INVESTOR2.password);
 await inv2.goto(`${BASE}/#/opportunities`); await inv2.waitForSelector('.opp-card');
 await inv2.waitForTimeout(700);
-const other = (await inv2.locator('.opp-card', { hasText: 'Openfield' }).textContent()).replace(/\s+/g, ' ');
+const other = (await inv2.locator('.opp-card', { hasText: `${PREFIX}-OPEN` }).textContent()).replace(/\s+/g, ' ');
 check('75% now reads as available to them too', /75% still available/.test(other), other.slice(0, 120));
 check('without naming who took the rest', !new RegExp(name1.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(other));
 
@@ -164,7 +166,7 @@ console.log('\nASKING FOR MORE THAN IS LEFT');
 // Investor 1 holds none of the tight offer, so 18% really is their ceiling.
 await inv.goto(`${BASE}/#/opportunities`); await inv.waitForSelector('.opp-card');
 await inv.waitForTimeout(600);
-await inv.locator('.opp-card', { hasText: 'Lastchance' }).locator('a.btn').first().click();
+await inv.locator('.opp-card', { hasText: `${PREFIX}-TIGHT` }).locator('a.btn').first().click();
 await inv.waitForSelector('#takePct', { timeout: 10000 }); await inv.waitForTimeout(500);
 const max = await inv.locator('#takePct').getAttribute('max');
 check('the field is capped at what remains', Math.abs(Number(max) - 18) < 0.01, max);
@@ -178,7 +180,7 @@ check('and the server refuses it too', /Only 18%/.test(refusal), refusal.trim() 
 console.log('\nCHANGING A REQUEST YOU ALREADY HOLD');
 // Investor 2 holds 82% of that same offer. Their own holding must not count
 // against them, or they could never reduce it.
-await inv2.locator('.opp-card', { hasText: 'Lastchance' }).locator('a.btn').first().click();
+await inv2.locator('.opp-card', { hasText: `${PREFIX}-TIGHT` }).locator('a.btn').first().click();
 await inv2.waitForSelector('#takePct', { timeout: 10000 }); await inv2.waitForTimeout(500);
 const myMax = await inv2.locator('#takePct').getAttribute('max');
 check('their ceiling includes what they already hold', Math.abs(Number(myMax) - 100) < 0.01, myMax);
@@ -371,12 +373,12 @@ check('which it does', (await staff.locator('.opp-card', { hasText: 'Closedeal' 
 console.log('\nTHE INVESTOR NOW HOLDS IT');
 await inv.goto(`${BASE}/#/policies`); await inv.waitForSelector('table.data'); await inv.waitForTimeout(900);
 const invPolicies = (await inv.locator('.main').textContent()).replace(/\s+/g, ' ');
-check("it is in the investor's own policy list", /Closedeal/.test(invPolicies),
-  invPolicies.slice(0, 200));
+check("it is in the investor's own policy list",
+  new RegExp(`${PREFIX}-DONE`).test(invPolicies), invPolicies.slice(0, 200));
 check('showing their share', /30(\.0)?%/.test(invPolicies));
 await inv.goto(`${BASE}/#/opportunities`); await inv.waitForTimeout(900);
 check('and it is no longer offered to them as an opportunity',
-  (await inv.locator('.opp-card', { hasText: 'Closedeal' }).count()) === 0);
+  (await inv.locator('.opp-card', { hasText: `${PREFIX}-DONE` }).count()) === 0);
 await inv.screenshot({ path: `${S}/oi10-investor-holds.png`, fullPage: true });
 
 // Clean up the policy this created.

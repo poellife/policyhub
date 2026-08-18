@@ -53,6 +53,37 @@ check('chart hover tooltip appears', await page.isVisible('.tooltip'));
 await page.screenshot({ path: `${SHOTS}/03-dashboard-tooltip.png` });
 await page.mouse.move(5, 5);
 
+/* The dashboard can be narrowed to one owner entity. The test that matters
+   is not that the figure changes — it is that the parts add back up to the
+   whole, and that the alerts below move with the headline rather than
+   staying on the full book. */
+const fundPicker = page.locator('#dashFund');
+check('the dashboard offers an entity filter', (await fundPicker.count()) === 1);
+check('starting on all entities', (await fundPicker.inputValue()) === '');
+const entities = (await fundPicker.locator('option').allTextContents()).map((x) => x.trim());
+check('with an explicit "all" rather than a blank line',
+  /^All entities$/.test(entities[0] || ''), entities.join(' | '));
+
+const readHero = async () => Number(
+  (await page.locator('.stat .value.hero').first().textContent()).replace(/[^0-9.]/g, ''));
+const whole = await readHero();
+let parts = 0;
+for (const code of entities.slice(1).map((e) => e.split(' — ')[0])) {
+  await fundPicker.selectOption(code);
+  await page.waitForSelector('.kpi-row'); await page.waitForTimeout(700);
+  parts += await readHero();
+}
+check('the entities add back up to the whole book', Math.abs(parts - whole) < 1,
+  `${parts} against ${whole}`);
+const narrowedAlerts = await page.locator('.alert-row').count();
+await fundPicker.selectOption('');
+await page.waitForSelector('.kpi-row'); await page.waitForTimeout(700);
+check('and choosing all puts the whole book back', Math.abs(await readHero() - whole) < 1);
+check('the alerts narrow with it rather than staying on the full book',
+  narrowedAlerts <= (await page.locator('.alert-row').count()),
+  `${narrowedAlerts} narrowed vs ${await page.locator('.alert-row').count()} overall`);
+await page.screenshot({ path: `${SHOTS}/03b-dashboard-entity.png`, fullPage: true });
+
 /* --------------------------- policies -------------------------- */
 console.log('\nPOLICIES');
 await page.click('a[href="#/policies"]');
@@ -68,7 +99,10 @@ await page.click('th[data-key="face_amount"]');
 await page.waitForTimeout(200);
 await page.click('th[data-key="face_amount"]');
 await page.waitForTimeout(300);
-const faces = await page.$$eval('table.data tbody tr td:nth-child(9)',
+// Find the column by its key rather than by position: columns get added.
+const faceCol = await page.$$eval('table.data thead th',
+  (ths) => ths.findIndex((th) => th.dataset.key === 'face_amount') + 1);
+const faces = await page.$$eval(`table.data tbody tr td:nth-child(${faceCol})`,
   (tds) => tds.map((td) => Number(td.textContent.replace(/[^0-9.]/g, '')) || 0));
 check('sort by face works', faces.every((v, i) => i === 0 || faces[i - 1] >= v),
   `${faces[0]} first of ${faces.length}`);
@@ -202,7 +236,8 @@ await page.screenshot({ path: `${SHOTS}/10-insureds.png`, fullPage: true });
 await page.click('[data-edit-insured]');
 await page.waitForSelector('dialog[open]');
 await page.fill('dialog input[name="le_months"]', '84');
-await page.fill('dialog input[name="state"]', 'MI');
+// The state is a list now, not something you can mistype.
+await page.selectOption('dialog select[name="state"]', 'MI');
 await page.click('dialog button[type=submit]');
 await page.waitForTimeout(1000);
 const leCell = await page.locator('table.data tbody tr').first().textContent();

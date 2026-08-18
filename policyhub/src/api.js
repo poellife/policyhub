@@ -5,6 +5,11 @@ import { createHash } from 'node:crypto';
 // would eventually disagree with this one.
 import { analyzeFlows, ledgerFlows, today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
+// The agreement template is under public/ for the same reason the IRR engine
+// is: the browser renders it for preview, and a second copy of the clauses
+// would eventually differ from the one that was signed.
+import { renderAgreement, canonicalText, AGREEMENT_FIELDS } from '../public/agreement-template.js';
+import { agreementPdf } from './agreement-pdf.js';
 import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
@@ -138,6 +143,23 @@ const int = (v) => {
 };
 const str = (v) => (v === null || v === undefined ? '' : String(v).trim());
 
+/**
+ * A link somebody will click. Only http and https survive: a stored
+ * `javascript:` address would run in the reader's session the moment they
+ * clicked it, so the scheme is checked here rather than trusted at render
+ * time. A bare `dropbox.com/...` is read as https, since that is what the
+ * person pasting it means.
+ */
+const url = (v) => {
+  const s = str(v);
+  if (!s) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(s) ? s : `https://${s}`;
+  let u;
+  try { u = new URL(withScheme); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  return u.href.slice(0, 2000);
+};
+
 /** Accepts 07/06/1929, 1929-07-06, 7-6-29 etc. Returns YYYY-MM-DD or null. */
 export const date = (v) => {
   if (!v) return null;
@@ -178,6 +200,7 @@ const POLICY_FIELDS = {
   premium_required: num, premium_mode: str, next_premium_due: date,
   grace_period_days: int,
   acquisition_date: date, acquisition_cost: num, notes: str,
+  documents_url: url,
 };
 
 const INSURED_FIELDS = {
@@ -245,6 +268,94 @@ router.post('/users/:id/password', authenticate, blockScoped,
 // Everything below requires a session AND a fresh read of the account.
 // authenticate is the pair; nothing may sit between its two halves.
 router.use(authenticate);
+
+/* ------------------------------------------------------------------ *
+ * de-identification for investors
+ * ------------------------------------------------------------------ */
+
+/**
+ * An investor is entitled to know what they own. They are not entitled to
+ * know who is insured under it, and a name attached to a life expectancy and
+ * a set of impairments is health information about an identifiable person.
+ * So the name is reduced to initials before it leaves the building.
+ *
+ * This is done once, at the edge, rather than at each of the twenty-odd
+ * places a name is selected. A screen added next year is covered by default;
+ * a screen someone forgets to mask is not a possibility. It also covers what
+ * the browser does downstream — every export, print and report is built from
+ * this response, so none of them can carry a name the API never sent.
+ */
+const NAME_KEYS = new Set([
+  'display_name', 'insured', 'insured_name', 'primary_insured',
+  'insured_first', 'insured_last', 'first_name', 'last_name',
+  'insured_first_name', 'insured_last_name',
+]);
+const FIRST_KEYS = ['insured_first', 'first_name', 'insured_first_name'];
+const LAST_KEYS = ['insured_last', 'last_name', 'insured_last_name'];
+const WHOLE_KEYS = ['display_name', 'insured', 'insured_name', 'primary_insured'];
+
+const initialOf = (v) => {
+  const t = str(v).replace(/[^\p{L}]/gu, '');
+  return t ? `${t[0].toUpperCase()}.` : '';
+};
+
+/** "Margaret", "Ashford" -> { first: "M.", last: "A.", whole: "M. A." } */
+function initialsFor(row) {
+  let first = initialOf(FIRST_KEYS.map((k) => row[k]).find((v) => str(v)));
+  let last = initialOf(LAST_KEYS.map((k) => row[k]).find((v) => str(v)));
+  if (!first && !last) {
+    const whole = str(WHOLE_KEYS.map((k) => row[k]).find((v) => str(v)));
+    const parts = whole.split(/[\s,]+/).filter(Boolean);
+    if (parts.length === 1) last = initialOf(parts[0]);
+    else if (parts.length > 1) {
+      // "Ashford, Margaret" reads the other way round from "Margaret Ashford".
+      const reversed = /,/.test(whole);
+      first = initialOf(reversed ? parts[1] : parts[0]);
+      last = initialOf(reversed ? parts[0] : parts[parts.length - 1]);
+    }
+  }
+  return { first, last, whole: [first, last].filter(Boolean).join(' ') || '—' };
+}
+
+function deidentify(value, seen = new WeakSet()) {
+  if (Array.isArray(value)) return value.map((v) => deidentify(v, seen));
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = deidentify(v, seen);
+
+  const named = [...NAME_KEYS].filter((k) => k in out);
+  if (named.length) {
+    const { first, last, whole } = initialsFor(value);
+    /* A first-name field keeps the first initial and a last-name field the
+       last one, so a screen with two columns reads "H." and "F." while a
+       screen that composes them still reads "H. F." — and so does one that
+       prints display_name. No caller has to know it is looking at a mask. */
+    for (const k of FIRST_KEYS) if (k in out && out[k] !== null) out[k] = first || whole;
+    for (const k of LAST_KEYS) if (k in out && out[k] !== null) out[k] = last || whole;
+    for (const k of WHOLE_KEYS) if (k in out && out[k] !== null) out[k] = whole;
+    if (!WHOLE_KEYS.some((k) => k in out)) out.display_name = whole;
+  }
+  return out;
+}
+
+/*
+ * One exception, set per-response rather than per-route so it has to be
+ * asked for: an operating agreement. The member is a party to it, the
+ * document names what the LLC was formed to hold, and the clauses are
+ * rendered as prose that no field-level mask could reach — half-masking
+ * it would leave the summary and the body disagreeing about the same
+ * document. Whether the insured is named at all is a drafting decision,
+ * made once when the agreement is written, and the field is optional.
+ */
+router.use((req, res, next) => {
+  if (!isInvestor(req)) return next();
+  const send = res.json.bind(res);
+  res.json = (body) => (res.locals.identified ? send(body) : send(deidentify(body)));
+  next();
+});
 
 /**
  * Every route parameter in this API is a database serial. Reject anything that
@@ -959,6 +1070,11 @@ router.delete('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res
 router.get('/analytics/summary', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
+  /* Narrow the whole dashboard to one owner entity. Blank means the book
+     as a whole, which is what a person means by "all". The filter sits
+     inside the scope predicate rather than replacing it, so choosing an
+     entity can only ever show less than the reader is already allowed. */
+  const fund = str(req.query.fund);
   // For an investor every money figure is multiplied by their percentage, so
   // the dashboard reads as *their* portfolio rather than the whole book.
   const w = `(${shareOf('pl.id', 1)} / 100.0)`;
@@ -977,24 +1093,27 @@ router.get('/analytics/summary', wrap(async (req, res) => {
          COALESCE(SUM(pl.total_premiums * ${w}),0)                 AS total_premiums,
          COALESCE(SUM(pl.cost_of_insurance * ${w}),0)              AS monthly_coi
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}`, [scope, funds]),
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis} AND ($3 = '' OR pl.fund_code = $3)`, [scope, funds, fund]),
     q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
               COALESCE(SUM(pl.face_amount * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}
-        GROUP BY pl.carrier_name ORDER BY face DESC`, [scope, funds]),
+          AND ($3 = '' OR pl.fund_code = $3)
+        GROUP BY pl.carrier_name ORDER BY face DESC`, [scope, funds, fund]),
     q(`SELECT to_char(date_trunc('month', t.txn_date),'YYYY-MM') AS month,
               SUM(t.amount * (COALESCE((SELECT pix.pct FROM policy_investors pix
                     WHERE pix.policy_id = t.policy_id AND pix.investor_id = $1), 100) / 100.0)) AS amount
          FROM transactions t
         WHERE t.txn_type IN ('Acquisition Cost','Premium Payment','Fee','Servicing','Commission')
           AND ${visibleTo('t.policy_id', '(SELECT fund_id FROM policies WHERE id = t.policy_id)', 1, 2)}
-        GROUP BY 1 ORDER BY 1`, [scope, funds]),
+          AND ($3 = '' OR (SELECT f.code FROM funds f
+                 WHERE f.id = (SELECT fund_id FROM policies WHERE id = t.policy_id)) = $3)
+        GROUP BY 1 ORDER BY 1`, [scope, funds, fund]),
     q(`SELECT
          COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
          COUNT(*) FILTER (WHERE pl.insured_dob IS NOT NULL)::int AS with_dob
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}`, [scope, funds]),
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis} AND ($3 = '' OR pl.fund_code = $3)`, [scope, funds, fund]),
   ]);
 
   // Running total of capital deployed. Months with no activity are filled in
@@ -1021,10 +1140,11 @@ router.get('/analytics/summary', wrap(async (req, res) => {
   // returned if every remaining insured died this morning". Realized
   // policies contribute the cheque that actually arrived, on the day it
   // arrived, so this converges on the true number as the book runs off.
-  const { combined } = await portfolioFlows(req);
+  const { combined } = await portfolioFlows(req, { fund });
   const irr = analyzeFlows(combined);
 
   res.json({
+    fund,
     totals: totals.rows[0],
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
@@ -1095,6 +1215,8 @@ const OPP_FIELDS = {
   // The one-pager's narrative. Free text, one bullet per line.
   le_provider_2: str, le_months_2: int, impairments: str, mitigating: str,
   underwriter_note: str, thesis: str, records_through: date,
+  // The carrier's current statement of what the policy holds.
+  account_value: num, cash_surrender_value: num, values_as_of: date,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -1111,9 +1233,14 @@ async function loadOpportunity(req, id) {
 
   const [prem, shares, commits] = await Promise.all([
     q('SELECT * FROM opportunity_premiums WHERE opportunity_id = $1 ORDER BY due_date', [id]),
-    q(`SELECT s.investor_id, i.name FROM opportunity_shares s
+    /* Who this was shown to, and when. Sharing is the moment an
+       opportunity leaves the office, so it is recorded rather than
+       inferred from who happens to have access today. */
+    q(`SELECT s.investor_id, i.name, s.shared_at, u.full_name AS shared_by_name
+         FROM opportunity_shares s
          JOIN investors i ON i.id = s.investor_id
-        WHERE s.opportunity_id = $1 ORDER BY i.name`, [id]),
+         LEFT JOIN users u ON u.id = s.shared_by
+        WHERE s.opportunity_id = $1 ORDER BY s.shared_at, i.name`, [id]),
     q(`SELECT c.*, i.name AS investor_name FROM opportunity_commitments c
          JOIN investors i ON i.id = c.investor_id
         WHERE c.opportunity_id = $1 ORDER BY c.requested_at`, [id]),
@@ -1646,6 +1773,20 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
            VALUES ($1,$2,'Acquisition Cost',$3,'Funded from opportunity','app')`,
           [policyId, acquired, o.asking_price]);
 
+      /* The carrier values quoted in the deal become the policy's opening
+         statement, so a newly funded policy is not blank until the next
+         statement arrives — the servicing alerts have something to read on
+         day one. Dated as quoted, not as funded: it is the carrier's figure
+         on the carrier's date. */
+      if (o.account_value != null || o.cash_surrender_value != null)
+        await client.query(
+          `INSERT INTO policy_values (policy_id, as_of_date, account_value,
+                                      cash_surrender_value, death_benefit, notes)
+           VALUES ($1,$2,$3,$4,$5,'Quoted on the opportunity')
+           ON CONFLICT DO NOTHING`,
+          [policyId, o.values_as_of || acquired, o.account_value,
+           o.cash_surrender_value, o.face_amount]);
+
       for (const c of o.commitments.filter((x) => x.status === 'Confirmed')) {
         await client.query(
           `INSERT INTO policy_investors (policy_id, investor_id, pct, acquired_on, notes)
@@ -1735,7 +1876,7 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
   const { rows: policies } = await q(
     `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on, pl.fund_code,
             pl.carrier_name, pl.product_type, pl.display_name,
-            pl.insured_first, pl.insured_last, pl.insured_dob,
+            pl.insured_first, pl.insured_last, pl.insured_dob, pl.insured_gender,
             pl.proceeds_amount, pl.proceeds_received_on, pl.face_amount,
             COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
             (${shareOf('pl.id', 1)}) AS my_pct,
@@ -1846,7 +1987,7 @@ router.get('/maturities', wrap(async (req, res) => {
   const [rows, totals] = await Promise.all([
     q(`SELECT pl.id, pl.policy_number, pl.carrier_name, pl.product_type,
               pl.fund_code, pl.display_name, pl.insured_first, pl.insured_last,
-              pl.insured_dob, pl.status,
+              pl.insured_dob, pl.insured_gender, pl.status,
               pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
               pl.face_amount, ${benefit}          AS death_benefit,
               pl.total_invested, pl.total_acquisition, pl.total_premiums,
@@ -1921,9 +2062,11 @@ router.put('/policies/:id/proceeds', canEdit, inPolicyScope('id'), wrap(async (r
 router.get('/servicing', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
+  // Same entity filter the dashboard uses, so the two agree when one is set.
+  const fund = str(req.query.fund);
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
-            pl.insured_first, pl.insured_last,
+            pl.insured_first, pl.insured_last, pl.insured_gender,
             pl.status, pl.premium_mode, pl.next_premium_due, pl.grace_period_days,
             pl.face_amount, pl.account_value, pl.cash_surrender_value, pl.cost_of_insurance,
             pl.value_as_of, pl.date_of_last_withdrawal,
@@ -1933,9 +2076,10 @@ router.get('/servicing', wrap(async (req, res) => {
             (pl.next_premium_due - CURRENT_DATE) AS days_until_due
        FROM policy_latest pl
       WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND ($3 = '' OR pl.fund_code = $3)
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY pl.next_premium_due NULLS LAST`,
-    [scope, funds]
+    [scope, funds, fund]
   );
 
   /* Investors get dates, not servicing work.
@@ -2001,7 +2145,7 @@ router.get('/servicing', wrap(async (req, res) => {
             ${shareOf('pl.id', 1)}                      AS my_pct,
             (r.due_date - CURRENT_DATE) AS days_until_due,
             pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
-            pl.insured_first, pl.insured_last, pl.status
+            pl.insured_first, pl.insured_last, pl.insured_gender, pl.status
        FROM policy_reminders r JOIN policy_latest pl ON pl.id = r.policy_id
       WHERE r.done_at IS NULL
         AND ($1::int IS NULL OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
@@ -2089,7 +2233,7 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
   const positions = await q(
     `SELECT pi.id AS link_id, pi.pct, pi.acquired_on, pi.notes AS link_notes,
             pl.id, pl.policy_number, pl.carrier_name, pl.product_type, pl.status,
-            pl.insured_first, pl.insured_last, pl.display_name, pl.fund_code,
+            pl.insured_first, pl.insured_last, pl.insured_gender, pl.display_name, pl.fund_code,
             pl.face_amount, pl.death_benefit, pl.cash_surrender_value,
             pl.account_value, pl.cost_of_insurance, pl.premium_required,
             pl.total_invested
@@ -2361,7 +2505,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
     `SELECT pi.investor_id, pi.pct, pi.acquired_on, pi.notes AS position_notes,
             pl.id, pl.policy_number, pl.carrier_name, pl.product_type, pl.fund_code,
             pl.display_name, pl.insured_first, pl.insured_last, pl.insured_dob,
-            pl.status, pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
+            pl.insured_gender, pl.status, pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
             pl.face_amount, COALESCE(pl.death_benefit, pl.face_amount) AS death_benefit,
             pl.premium_required, pl.premium_mode, pl.next_premium_due, pl.le_months
        FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
@@ -2497,7 +2641,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   const funds = fundScope(req);
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
-            pl.insured_first, pl.insured_last,
+            pl.insured_first, pl.insured_last, pl.insured_gender,
             pl.fund_code, pl.premium_mode, pl.next_premium_due, pl.status,
             pl.face_amount, pl.cost_of_insurance, pl.account_value,
             ${shareOf('pl.id', 2)} AS my_pct,
@@ -2677,7 +2821,25 @@ export async function resolveInsured(body) {
       LIMIT 1`,
     [last, first, dob]
   );
-  if (found[0]) return found[0].id;
+  if (found[0]) {
+    /* Fill in what the record does not have yet. Somebody entering a policy
+       knows the sex and the state of the person they are entering; if the
+       insured was created by an import that carried neither, this is the
+       moment it becomes known. Nothing already recorded is overwritten —
+       correcting a value is what the insured's own form is for. */
+    const fill = {
+      gender: str(body.gender) || null,
+      state: str(body.state) || null,
+      le_months: int(body.le_months),
+    };
+    const sets = Object.entries(fill).filter(([, v]) => v !== null && v !== '');
+    if (sets.length)
+      await q(
+        `UPDATE insureds SET ${sets.map(([k], i) => `${k} = COALESCE(${k}, $${i + 1})`).join(', ')}
+          WHERE id = $${sets.length + 1}`,
+        [...sets.map(([, v]) => v), found[0].id]);
+    return found[0].id;
+  }
 
   const { rows } = await q(
     `INSERT INTO insureds (first_name, last_name, display_name, dob, gender, state, le_months)
@@ -2686,6 +2848,465 @@ export async function resolveInsured(body) {
      str(body.gender) || null, str(body.state) || null, int(body.le_months)]
   );
   return rows[0].id;
+}
+
+/* ------------------------------------------------------------------ *
+ * operating agreements
+ *
+ * A manager fills in the blanks, names the members, and issues it. Each
+ * member then signs it in their own portal. Three rules make that worth
+ * anything:
+ *
+ *   - the text is frozen at issue, by hash. Editing an agreement that is
+ *     out for signature is refused, because the alternative is a member
+ *     bound to words they never read.
+ *   - a signature records who, when, from where, and against which text.
+ *   - only the person the signature belongs to can make it. Nobody signs
+ *     on anybody else's behalf, manager included.
+ * ------------------------------------------------------------------ */
+
+const AGREEMENT_STATUSES = ['Draft', 'Out for signature', 'Executed', 'Void'];
+const TERM_KEYS = new Set(AGREEMENT_FIELDS.map((f) => f.key));
+
+/** Only the blanks the template knows about, coerced to their own type. */
+function cleanTerms(input) {
+  const out = {};
+  for (const field of AGREEMENT_FIELDS) {
+    const raw = input?.[field.key];
+    if (raw === undefined) continue;
+    if (field.type === 'pct' || field.type === 'int') {
+      const n = num(raw);
+      if (n !== null) out[field.key] = field.type === 'int' ? Math.round(n) : n;
+    } else if (field.type === 'date') {
+      const d = date(raw);
+      if (d) out[field.key] = d;
+    } else {
+      const v = str(raw);
+      if (v) out[field.key] = v.slice(0, 500);
+    }
+  }
+  return out;
+}
+
+/** The agreement, its parties, and the text as it stands. */
+async function loadAgreement(id) {
+  const { rows } = await q(
+    `SELECT a.*, f.code AS fund_code, p.policy_number,
+            u.full_name AS created_by_name, iu.full_name AS issued_by_name
+       FROM agreements a
+       LEFT JOIN funds f     ON f.id = a.fund_id
+       LEFT JOIN policies p  ON p.id = a.policy_id
+       LEFT JOIN users u     ON u.id = a.created_by
+       LEFT JOIN users iu    ON iu.id = a.issued_by
+      WHERE a.id = $1`, [id]);
+  const a = rows[0];
+  if (!a) return null;
+  const { rows: signers } = await q(
+    `SELECT s.*, i.name AS investor_name
+       FROM agreement_signers s
+       LEFT JOIN investors i ON i.id = s.investor_id
+      WHERE s.agreement_id = $1
+      ORDER BY (s.role = 'Manager') DESC, s.sort_order, s.id`, [id]);
+  a.signers = signers;
+  a.blocks = renderAgreement(a.terms || {}, signers);
+  a.current_hash = createHash('sha256').update(canonicalText(a.blocks)).digest('hex');
+  a.signed_count = signers.filter((x) => x.signed_at).length;
+  a.member_count = signers.filter((x) => x.role !== 'Manager').length;
+  return a;
+}
+
+/** Which agreements this reader may see at all. */
+function agreementScope(req) {
+  if (isInvestor(req))
+    return {
+      sql: `a.status <> 'Draft' AND EXISTS (SELECT 1 FROM agreement_signers s
+             WHERE s.agreement_id = a.id AND s.investor_id = $1)`,
+      params: [Number(req.user.iid) || -1],
+    };
+  const funds = fundScope(req);
+  if (funds === null) return { sql: 'TRUE', params: [] };
+  return { sql: '(a.fund_id IS NULL OR a.fund_id = ANY($1))', params: [funds] };
+}
+
+const canSeeAgreement = async (req, id) => {
+  const scope = agreementScope(req);
+  const { rows } = await q(
+    `SELECT 1 FROM agreements a WHERE a.id = $${scope.params.length + 1} AND ${scope.sql}`,
+    [...scope.params, id]);
+  return rows.length > 0;
+};
+
+/** The blanks, so the form can be built from the template rather than guessed. */
+router.get('/agreement-template', blockInvestors, wrap(async (req, res) => {
+  res.json({ fields: AGREEMENT_FIELDS });
+}));
+
+router.get('/agreements', wrap(async (req, res) => {
+  const scope = agreementScope(req);
+  const { rows } = await q(
+    `SELECT a.id, a.title, a.status, a.fund_id, a.policy_id, a.issued_at, a.executed_at,
+            a.created_at, a.terms->>'llc_name' AS llc_name,
+            a.terms->>'effective_date' AS effective_date,
+            f.code AS fund_code, p.policy_number,
+            (SELECT COUNT(*)::int FROM agreement_signers s
+              WHERE s.agreement_id = a.id AND s.role <> 'Manager')          AS member_count,
+            (SELECT COUNT(*)::int FROM agreement_signers s
+              WHERE s.agreement_id = a.id AND s.signed_at IS NOT NULL)      AS signed_count,
+            ${isInvestor(req)
+              ? `(SELECT s.signed_at FROM agreement_signers s
+                   WHERE s.agreement_id = a.id AND s.investor_id = $1)`
+              : 'NULL::timestamptz'}                                        AS my_signed_at
+       FROM agreements a
+       LEFT JOIN funds f    ON f.id = a.fund_id
+       LEFT JOIN policies p ON p.id = a.policy_id
+      WHERE ${scope.sql}
+      ORDER BY a.created_at DESC`, scope.params);
+  res.json(rows);
+}));
+
+router.get('/agreements/:id', wrap(async (req, res) => {
+  res.locals.identified = true;      // a party reads their own agreement whole
+  if (!(await canSeeAgreement(req, req.params.id)))
+    return res.status(404).json({ error: 'Agreement not found' });
+  const a = await loadAgreement(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Agreement not found' });
+  /* An investor is shown the document and their own line on it. Who else
+     was asked, what they put in and what they hold is somebody else's
+     business — except on the Schedule, which is part of the agreement
+     they are signing and which they are entitled to read in full. */
+  if (isInvestor(req)) {
+    const mine = Number(req.user.iid);
+    a.me = a.signers.find((s) => s.investor_id === mine) || null;
+    a.signers = a.signers.map((s) => ({
+      id: s.id, role: s.role, name: s.name, pct: s.pct, contribution: s.contribution,
+      signed_at: s.signed_at, is_me: s.investor_id === mine,
+    }));
+  }
+  res.json(a);
+}));
+
+router.post('/agreements', blockInvestors, requireRole('admin', 'manager'), wrap(async (req, res) => {
+  const funds = fundScope(req);
+  const fundId = int(req.body.fund_id);
+  if (funds && fundId && !funds.includes(fundId))
+    return res.status(403).json({ error: 'That owner entity is not one of yours' });
+  const terms = cleanTerms(req.body.terms);
+  const { rows } = await q(
+    `INSERT INTO agreements (title, fund_id, policy_id, terms, created_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [str(req.body.title) || terms.llc_name || 'Operating agreement',
+     fundId, int(req.body.policy_id), JSON.stringify(terms), req.user.uid]);
+  await audit(req.user.uid, 'agreement', rows[0].id, 'create', terms.llc_name || '');
+  res.status(201).json({ id: rows[0].id });
+}));
+
+router.put('/agreements/:id', blockInvestors, requireRole('admin', 'manager'), wrap(async (req, res) => {
+  if (!(await canSeeAgreement(req, req.params.id)))
+    return res.status(404).json({ error: 'Agreement not found' });
+  const { rows: cur } = await q('SELECT status FROM agreements WHERE id = $1', [req.params.id]);
+  if (cur[0].status !== 'Draft')
+    return res.status(409).json({
+      error: 'This agreement has already gone out for signature. Recall it first — anyone who has '
+        + 'signed will have to sign again, which is the point.' });
+
+  const terms = cleanTerms(req.body.terms);
+  const fundId = int(req.body.fund_id);
+  const funds = fundScope(req);
+  if (funds && fundId && !funds.includes(fundId))
+    return res.status(403).json({ error: 'That owner entity is not one of yours' });
+  await q(
+    `UPDATE agreements SET title = $1, fund_id = $2, policy_id = $3, terms = $4, updated_at = now()
+      WHERE id = $5`,
+    [str(req.body.title) || terms.llc_name || 'Operating agreement',
+     fundId, int(req.body.policy_id), JSON.stringify(terms), req.params.id]);
+  await audit(req.user.uid, 'agreement', Number(req.params.id), 'update', terms.llc_name || '');
+  res.json({ ok: true });
+}));
+
+/** Replace the list of parties. Draft only, for the same reason. */
+router.put('/agreements/:id/signers', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await canSeeAgreement(req, req.params.id)))
+      return res.status(404).json({ error: 'Agreement not found' });
+    const { rows: cur } = await q('SELECT status, terms FROM agreements WHERE id = $1', [req.params.id]);
+    if (cur[0].status !== 'Draft')
+      return res.status(409).json({ error: 'Recall the agreement before changing who is on it' });
+
+    const incoming = Array.isArray(req.body.signers) ? req.body.signers : [];
+    const investorIds = incoming.map((s) => int(s.investor_id)).filter(Boolean);
+    const barred = await investorsOutOfScope(req, investorIds);
+    if (barred.length)
+      return res.status(403).json({
+        error: 'You can only put investors on an agreement if they are in your own entities, or '
+          + 'an administrator has given you access to them.' });
+
+    const seen = new Set();
+    const rows = [];
+    for (const s of incoming) {
+      const investorId = int(s.investor_id);
+      if (investorId && seen.has(investorId)) continue;
+      if (investorId) seen.add(investorId);
+      const name = str(s.name);
+      if (!name && !investorId) continue;
+      rows.push({
+        investor_id: investorId,
+        role: s.role === 'Manager' ? 'Manager' : 'Member',
+        name, email: str(s.email), address: str(s.address),
+        contribution: num(s.contribution), pct: num(s.pct),
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM agreement_signers WHERE agreement_id = $1', [req.params.id]);
+      for (const [i, r] of rows.entries())
+        await client.query(
+          `INSERT INTO agreement_signers (agreement_id, investor_id, role, name, email, address,
+                                          contribution, pct, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [req.params.id, r.investor_id, r.role, r.name, r.email, r.address,
+           r.contribution, r.pct, i]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
+      `${rows.length} part${rows.length === 1 ? 'y' : 'ies'}`);
+    res.json({ ok: true, signers: rows.length });
+  }));
+
+/**
+ * Issue it. This is the moment the text stops moving: the rendered
+ * document is hashed and the hash is stored, and every signature from
+ * here on is checked against it.
+ */
+router.post('/agreements/:id/issue', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await canSeeAgreement(req, req.params.id)))
+      return res.status(404).json({ error: 'Agreement not found' });
+    const a = await loadAgreement(req.params.id);
+    if (a.status !== 'Draft')
+      return res.status(409).json({ error: 'This agreement is already out for signature' });
+
+    const missing = AGREEMENT_FIELDS.filter((f) => f.required && !str(a.terms?.[f.key]))
+      .map((f) => f.label);
+    if (missing.length)
+      return res.status(400).json({ error: `Still to fill in: ${missing.join(', ')}.` });
+    if (!a.signers.some((s) => s.role !== 'Manager'))
+      return res.status(400).json({ error: 'Add at least one member before sending it out' });
+
+    await q(
+      `UPDATE agreements SET status = 'Out for signature', body_hash = $1,
+                             issued_at = now(), issued_by = $2, updated_at = now()
+        WHERE id = $3`, [a.current_hash, req.user.uid, req.params.id]);
+    await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
+      `issued to ${a.member_count} member(s) · ${a.current_hash.slice(0, 16)}`);
+    res.json({ ok: true, body_hash: a.current_hash, sent_to: a.member_count });
+  }));
+
+/** Pull it back to draft. Signatures already given are cleared, and said so. */
+router.post('/agreements/:id/recall', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await canSeeAgreement(req, req.params.id)))
+      return res.status(404).json({ error: 'Agreement not found' });
+    const { rows: cur } = await q('SELECT status FROM agreements WHERE id = $1', [req.params.id]);
+    if (cur[0].status === 'Executed')
+      return res.status(409).json({
+        error: 'This agreement is fully executed. Void it and issue a replacement rather than '
+          + 'unpicking signatures.' });
+    const { rowCount } = await q(
+      `UPDATE agreement_signers SET signed_at = NULL, signed_name = NULL, signed_ip = NULL,
+                                    signed_agent = NULL, signed_hash = NULL,
+                                    declined_at = NULL, decline_note = ''
+        WHERE agreement_id = $1 AND (signed_at IS NOT NULL OR declined_at IS NOT NULL)`,
+      [req.params.id]);
+    await q(
+      `UPDATE agreements SET status = 'Draft', body_hash = NULL, issued_at = NULL,
+                             executed_at = NULL, updated_at = now()
+        WHERE id = $1`, [req.params.id]);
+    await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
+      `recalled to draft, ${rowCount} signature(s) cleared`);
+    res.json({ ok: true, cleared: rowCount });
+  }));
+
+router.post('/agreements/:id/void', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await canSeeAgreement(req, req.params.id)))
+      return res.status(404).json({ error: 'Agreement not found' });
+    const reason = str(req.body.reason);
+    if (!reason) return res.status(400).json({ error: 'Say why it is being voided' });
+    await q(
+      `UPDATE agreements SET status = 'Void', void_reason = $1, updated_at = now() WHERE id = $2`,
+      [reason, req.params.id]);
+    await audit(req.user.uid, 'agreement', Number(req.params.id), 'update', `voided: ${reason}`);
+    res.json({ ok: true });
+  }));
+
+router.delete('/agreements/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q('SELECT status, title FROM agreements WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Agreement not found' });
+  if (rows[0].status !== 'Draft')
+    return res.status(409).json({
+      error: 'Only a draft can be deleted. An agreement that has been sent out is part of the '
+        + 'record — void it instead.' });
+  await q('DELETE FROM agreements WHERE id = $1', [req.params.id]);
+  await audit(req.user.uid, 'agreement', Number(req.params.id), 'delete', rows[0].title);
+  res.json({ ok: true });
+}));
+
+/**
+ * Sign it.
+ *
+ * The signer types their own name, and it has to match the name on the
+ * agreement — not as a security measure, but because a signature that
+ * reads differently from the party it is under invites an argument later.
+ * The hash of what they were shown is checked against the issued hash,
+ * so a document that changed under them cannot be signed by accident.
+ */
+router.post('/agreements/:id/sign', wrap(async (req, res) => {
+  if (!(await canSeeAgreement(req, req.params.id)))
+    return res.status(404).json({ error: 'Agreement not found' });
+  const a = await loadAgreement(req.params.id);
+  if (a.status !== 'Out for signature')
+    return res.status(409).json({
+      error: a.status === 'Executed'
+        ? 'This agreement is already fully executed'
+        : 'This agreement is not out for signature' });
+
+  const mine = isInvestor(req) ? Number(req.user.iid) : null;
+  const signer = mine
+    ? a.signers.find((s) => s.investor_id === mine)
+    : a.signers.find((s) => s.role === 'Manager');
+  if (!signer)
+    return res.status(403).json({ error: 'You are not a party to this agreement' });
+  if (signer.signed_at)
+    return res.status(409).json({ error: 'You have already signed this agreement' });
+
+  const typed = str(req.body.signed_name);
+  if (!typed) return res.status(400).json({ error: 'Type your name to sign' });
+  const tidy = (v) => String(v).toLowerCase().replace(/[^a-z]/g, '');
+  if (tidy(typed) !== tidy(signer.name))
+    return res.status(400).json({
+      error: `Sign as "${signer.name}" — that is the name this agreement is drawn in.` });
+  if (req.body.agreed !== true)
+    return res.status(400).json({ error: 'Tick the box to confirm you intend to sign' });
+  if (a.body_hash && str(req.body.body_hash) && str(req.body.body_hash) !== a.body_hash)
+    return res.status(409).json({
+      error: 'The agreement changed since this page was opened. Reload it and read it again '
+        + 'before signing.' });
+
+  /* Behind a proxy the socket address is the proxy, so the forwarded
+     header is used when the app is running behind one — and only the
+     first hop of it, which is the only part a client cannot forge past. */
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = (req.app.get('trust proxy') && forwarded) || req.ip || req.socket?.remoteAddress || '';
+
+  await q(
+    `UPDATE agreement_signers
+        SET signed_at = now(), signed_name = $1, signed_ip = $2, signed_agent = $3,
+            signed_hash = $4, declined_at = NULL, decline_note = ''
+      WHERE id = $5`,
+    [typed, ip.slice(0, 64), String(req.headers['user-agent'] || '').slice(0, 300),
+     a.body_hash || a.current_hash, signer.id]);
+
+  // Everyone who had to sign has signed: file it.
+  const after = await loadAgreement(req.params.id);
+  const outstanding = after.signers.filter((s) => !s.signed_at);
+  let documentId = null;
+  if (!outstanding.length) {
+    documentId = await fileExecutedAgreement(after, req.user.uid);
+    await q(
+      `UPDATE agreements SET status = 'Executed', executed_at = now(), document_id = $1,
+                             updated_at = now() WHERE id = $2`, [documentId, req.params.id]);
+  }
+  await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
+    `signed by ${typed}${outstanding.length ? `, ${outstanding.length} to go` : ' — fully executed'}`);
+  res.json({ ok: true, executed: !outstanding.length, outstanding: outstanding.length });
+}));
+
+/** A party can also say no, which is information rather than an error. */
+router.post('/agreements/:id/decline', wrap(async (req, res) => {
+  if (!(await canSeeAgreement(req, req.params.id)))
+    return res.status(404).json({ error: 'Agreement not found' });
+  const a = await loadAgreement(req.params.id);
+  const mine = isInvestor(req) ? Number(req.user.iid) : null;
+  const signer = mine
+    ? a.signers.find((s) => s.investor_id === mine)
+    : a.signers.find((s) => s.role === 'Manager');
+  if (!signer) return res.status(403).json({ error: 'You are not a party to this agreement' });
+  if (signer.signed_at)
+    return res.status(409).json({ error: 'You have already signed this agreement' });
+  await q(
+    `UPDATE agreement_signers SET declined_at = now(), decline_note = $1 WHERE id = $2`,
+    [str(req.body.note).slice(0, 500), signer.id]);
+  await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
+    `declined by ${signer.name}`);
+  res.json({ ok: true });
+}));
+
+/**
+ * The PDF, at any stage.
+ *
+ * A draft prints with empty signature lines and a watermark of sorts in
+ * its filename; an executed one prints with the signatures and the audit
+ * line under each. Same renderer either way, so what a member reads
+ * before signing is what they get afterwards.
+ */
+router.get('/agreements/:id/pdf', wrap(async (req, res) => {
+  if (!(await canSeeAgreement(req, req.params.id)))
+    return res.status(404).json({ error: 'Agreement not found' });
+  const a = await loadAgreement(req.params.id);
+  const pdf = agreementPdf(a.blocks, {
+    title: a.title,
+    hash: a.body_hash || a.current_hash,
+  });
+  const stem = safeName(`${a.terms?.llc_name || a.title || 'agreement'}`)
+    .replace(/\.[^.]*$/, '').slice(0, 60) || 'agreement';
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition',
+    `inline; filename="${stem}-${a.status === 'Executed' ? 'executed' : 'draft'}.pdf"`);
+  res.setHeader('Content-Length', pdf.length);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(pdf);
+}));
+
+/**
+ * File the executed agreement in the cabinet, one copy per member.
+ *
+ * A copy each rather than one shared copy: the documents cabinet shares a
+ * row with exactly one investor, and an agreement every member can see is
+ * an agreement whose Schedule tells each of them what the others put in.
+ * They are entitled to that on their own copy and nowhere else.
+ */
+async function fileExecutedAgreement(a, userId) {
+  const pdf = agreementPdf(a.blocks, { title: a.title, hash: a.body_hash || a.current_hash });
+  const checksum = createHash('sha256').update(pdf).digest('hex');
+  const stem = safeName(`${a.terms?.llc_name || a.title || 'agreement'}`)
+    .replace(/\.[^.]*$/, '').slice(0, 60) || 'agreement';
+  const fileName = `${stem}-executed.pdf`;
+  const year = Number(String(a.terms?.effective_date || '').slice(0, 4)) || null;
+
+  let firstId = null;
+  const members = a.signers.filter((s) => s.role !== 'Manager' && s.investor_id);
+  const targets = members.length ? members : [{ investor_id: null }];
+  for (const m of targets) {
+    const { rows } = await q(
+      `INSERT INTO documents (title, category, doc_year, notes, fund_id, investor_id,
+                              policy_id, shared, file_name, mime_type, byte_size,
+                              checksum, content, uploaded_by)
+       VALUES ($1,'LLC Agreement',$2,$3,$4,$5,$6,TRUE,$7,'application/pdf',$8,$9,$10,$11)
+       RETURNING id`,
+      [a.title || a.terms?.llc_name || 'Operating agreement', year,
+       `Executed ${new Date().toISOString().slice(0, 10)} · document ${
+         (a.body_hash || a.current_hash).slice(0, 16)}`,
+       a.fund_id, m.investor_id, a.policy_id, fileName, pdf.length, checksum, pdf, userId]);
+    firstId = firstId ?? rows[0].id;
+  }
+  return firstId;
 }
 
 /* ------------------------------------------------------------------ *
@@ -2701,4 +3322,4 @@ router.get('/audit', blockScoped, requireRole('admin'), wrap(async (req, res) =>
 }));
 
 export default router;
-export { wrap, num, int, str };
+export { wrap, num, int, str, url };

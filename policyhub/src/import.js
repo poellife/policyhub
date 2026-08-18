@@ -1,6 +1,6 @@
 import { parse } from 'csv-parse/sync';
 import { q, audit } from './db.js';
-import { resolveInsured, resolveFund, date, num, int, str } from './api.js';
+import { resolveInsured, resolveFund, date, num, int, str, url as link } from './api.js';
 import { readWorkbook, sheetToObjects, isXlsx } from './xlsx.js';
 
 /* ------------------------------------------------------------------ *
@@ -64,6 +64,23 @@ const ALIASES = {
   smoker: 'smoker', tobacco: 'smoker',
   leprovider: 'le_provider', ledate: 'le_date', lereportdate: 'le_date',
   displayname: 'display_name',
+
+  // the maturity cheque
+  proceeds: 'proceeds_amount', proceedsamount: 'proceeds_amount',
+  claimamount: 'proceeds_amount', deathbenefitreceived: 'proceeds_amount',
+  proceedsreceivedon: 'proceeds_received_on', proceedsreceived: 'proceeds_received_on',
+  claimpaidon: 'proceeds_received_on', datereceived: 'proceeds_received_on',
+
+  // where the case file actually lives
+  casefiles: 'documents_url', casefileslink: 'documents_url',
+  documentslink: 'documents_url', documentsurl: 'documents_url',
+  dropbox: 'documents_url', dropboxlink: 'documents_url', filelink: 'documents_url',
+
+  // scheduled future premiums
+  duedate: 'due_date', premiumduedate: 'due_date', scheduleddate: 'due_date',
+  estimatedamount: 'est_amount', estimatedpremium: 'est_amount',
+  scheduledamount: 'est_amount', premiumamount: 'est_amount',
+  note: 'note', notes: 'note',
 
   // master file
   recordtype: 'record_type', rowtype: 'record_type', record: 'record_type',
@@ -209,6 +226,13 @@ async function importPolicies(rows, opts, user) {
         grace_period_days: int(row.grace_period_days) ?? 61,
         acquisition_date: date(row.acquisition_date),
         acquisition_cost: num(row.acquisition_cost),
+        /* The maturity cheque. Kept on the policy rather than in the ledger:
+           it is the one inflow that settles the position, and the return
+           calculation reads it from here to know the claim was actually
+           paid rather than merely assumed. */
+        proceeds_amount: num(row.proceeds_amount),
+        proceeds_received_on: date(row.proceeds_received_on),
+        documents_url: link(row.documents_url),
         notes: str(row.notes),
       };
 
@@ -506,11 +530,16 @@ const RECORD_TYPES = {
   value: 'value', values: 'value', valuation: 'value', snapshot: 'value', v: 'value',
   transaction: 'transaction', transactions: 'transaction', txn: 'transaction',
   ledger: 'transaction', payment: 'transaction', t: 'transaction',
+  // A premium that has not been paid yet — an illustration, not a ledger
+  // entry. It lands on the follow-up schedule rather than in the accounts.
+  premium: 'premium', premiums: 'premium', scheduledpremium: 'premium',
+  futurepremium: 'premium', premiumschedule: 'premium',
 };
 
 const VALUE_ONLY_KEYS = ['account_value', 'cash_surrender_value', 'cost_of_insurance',
   'death_benefit', 'premium_paid_to_date', 'monthly_deduction', 'loan_balance'];
-const POLICY_ONLY_KEYS = ['carrier_name', 'face_amount', 'issue_date', 'product_type',
+const POLICY_ONLY_KEYS = ['proceeds_amount', 'proceeds_received_on', 'documents_url',
+  'carrier_name', 'face_amount', 'issue_date', 'product_type',
   'premium_required', 'acquisition_cost', 'plan_name', 'owner_raw', 'fund_code', 'status'];
 const INSURED_ONLY_KEYS = ['dob', 'gender', 'le_months', 'le_provider', 'le_date',
   'smoker', 'date_of_death', 'issue_state'];
@@ -531,15 +560,17 @@ export function classifyRow(row) {
     const t = RECORD_TYPES[norm(declared)];
     return t
       ? { type: t }
-      : { error: `"${declared}" is not a record type. Use Policy, Insured, Life, Value or Transaction.` };
+      : { error: `"${declared}" is not a record type. Use Policy, Insured, Life, Value, Transaction or Premium.` };
   }
 
+  const looksPremium = has(row, ['due_date']) && has(row, ['est_amount']);
   const looksTransaction = has(row, ['txn_type'])
     || (has(row, ['txn_date']) && has(row, ['amount']));
   const looksValue = has(row, VALUE_ONLY_KEYS) || has(row, ['as_of_date']);
   const looksPolicy = has(row, POLICY_ONLY_KEYS);
   const looksLife = has(row, ['role']);
 
+  if (looksPremium && !looksPolicy) return { type: 'premium' };
   if (looksTransaction && !looksPolicy) return { type: 'transaction' };
   if (looksLife && !looksPolicy) return { type: 'life' };
   // A policy row legitimately carries current values, so policy wins over
@@ -549,7 +580,7 @@ export function classifyRow(row) {
   if (has(row, INSURED_ONLY_KEYS) && has(row, ['insured_name', 'insured_last_name', 'last_name']))
     return { type: 'insured' };
 
-  return { error: 'Cannot tell what this row is. Add a "Record Type" column with Policy, Insured, Life, Value or Transaction.' };
+  return { error: 'Cannot tell what this row is. Add a "Record Type" column with Policy, Insured, Life, Value, Transaction or Premium.' };
 }
 
 /** Update a person's own details — life expectancy, date of death, and so on. */
@@ -612,10 +643,10 @@ async function importMaster(entries, opts, user) {
   const allowedFunds = opts.fundScope || null;
   const result = {
     created: 0, updated: 0, values: 0, skipped: 0, errors: [],
-    byType: { policy: 0, insured: 0, life: 0, value: 0, transaction: 0, unclassified: 0 },
+    byType: { policy: 0, insured: 0, life: 0, value: 0, transaction: 0, premium: 0, unclassified: 0 },
   };
 
-  const buckets = { policy: [], insured: [], life: [], value: [], transaction: [] };
+  const buckets = { policy: [], insured: [], life: [], value: [], transaction: [], premium: [] };
   for (const entry of entries) {
     const { type, error } = classifyRow(entry.row);
     if (error) {
@@ -669,9 +700,63 @@ async function importMaster(entries, opts, user) {
     result.errors.push(...relocate(sub.errors, buckets.transaction));
   }
 
+  // 6. Premiums still to come.
+  if (buckets.premium.length) {
+    const sub = await importPremiums(buckets.premium.map((b) => b.row),
+      { ...opts, userId: user?.uid ?? null });
+    result.created += sub.created;
+    result.updated += sub.updated;
+    result.errors.push(...relocate(sub.errors, buckets.premium));
+  }
+
   result.errors.sort((a, b) =>
     String(a.file).localeCompare(String(b.file)) || String(a.sheet).localeCompare(String(b.sheet))
     || (a.line - b.line));
+  return result;
+}
+
+/**
+ * Future premiums, from a carrier illustration.
+ *
+ * These are not ledger entries — nothing has been paid — so they go on the
+ * policy's follow-up schedule, where they drive "next premium due" and show
+ * up for the investors who will be asked to fund them. Re-importing the same
+ * illustration replaces the estimate for that date rather than stacking a
+ * second one beside it, because an illustration is a statement about a day,
+ * not an event that happened on it.
+ */
+async function importPremiums(rows, opts = {}) {
+  const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+  const allowedFunds = opts.fundScope || null;
+  for (const [i, row] of rows.entries()) {
+    const line = i + 2;
+    try {
+      const policyId = await findPolicyId(row, allowedFunds);
+      const due = date(row.due_date) || date(row.txn_date);
+      const amount = num(row.est_amount ?? row.amount);
+      if (!due) throw new Error('A due date is required');
+      if (amount === null || amount < 0)
+        throw new Error('An estimated amount of zero or more is required');
+
+      const existing = await q(
+        `SELECT id FROM policy_reminders
+          WHERE policy_id = $1 AND kind = 'Premium' AND due_date = $2 AND done_at IS NULL`,
+        [policyId, due]);
+      if (existing.rows.length) {
+        await q('UPDATE policy_reminders SET amount = $1, note = $2 WHERE id = $3',
+          [amount, str(row.note), existing.rows[0].id]);
+        result.updated++;
+      } else {
+        await q(
+          `INSERT INTO policy_reminders (policy_id, due_date, kind, amount, note, created_by)
+           VALUES ($1,$2,'Premium',$3,$4,$5)`,
+          [policyId, due, amount, str(row.note), opts.userId || null]);
+        result.created++;
+      }
+    } catch (e) {
+      result.errors.push({ line, message: e.message });
+    }
+  }
   return result;
 }
 
@@ -771,6 +856,66 @@ export async function runImport(files, type, opts, user) {
   return result;
 }
 
+/**
+ * The master template, built from a column list rather than typed out.
+ *
+ * Every row has to line up with the header, and a template where one sample
+ * row is a comma short teaches the reader the wrong shape. Naming the cells
+ * that matter and letting the rest fall out blank makes that impossible.
+ */
+const MASTER_COLUMNS = [
+  'Record Type', 'Policy Number', 'Carrier Name', 'Last Name', 'First Name', 'DOB',
+  'Gender', 'State', 'LE Months', 'Date Of Death', 'Role', 'Product Type', 'Issue Date',
+  'Basic Face', 'Owner', 'Premium Required', 'Premium Mode', 'Next Premium Due',
+  'Acquisition Date', 'Acquisition Cost', 'Status', 'As Of Date', 'AV', 'CSV', 'COI',
+  'Death Benefit', 'Loan Balance', 'Transaction Date', 'Transaction Type', 'Amount',
+  'Remarks', 'Due Date', 'Estimated Amount', 'Note', 'Proceeds Amount',
+  'Proceeds Received On', 'Case Files Link',
+];
+
+const MASTER_ROWS = [
+  { 'Record Type': 'Policy', 'Policy Number': '2975464', 'Carrier Name': 'Genworth Call Pay',
+    'Last Name': 'Setliff', 'First Name': 'Reuben', DOB: '04/22/1937', Gender: 'M', State: 'SD',
+    'LE Months': '84', 'Product Type': 'UL', 'Issue Date': '10/21/2009', 'Basic Face': '1000000',
+    Owner: 'LCG1', 'Premium Required': '10000', 'Premium Mode': 'Annual',
+    'Next Premium Due': '10/21/2026', 'Acquisition Date': '03/19/2021',
+    'Acquisition Cost': '250300', Status: 'Inforce',
+    'Case Files Link': 'https://www.dropbox.com/scl/fo/example-2975464' },
+  { 'Record Type': 'Policy', 'Policy Number': '884120', 'Carrier Name': 'Brighthouse',
+    'Last Name': 'Wolfe', 'First Name': 'Dean', DOB: '06/02/1940', Gender: 'M', State: 'MI',
+    'LE Months': '96', 'Product Type': 'SUL', 'Issue Date': '03/14/2011', 'Basic Face': '5000000',
+    Owner: 'LCG2', 'Premium Required': '96000', 'Premium Mode': 'Annual',
+    'Next Premium Due': '08/25/2026', 'Acquisition Date': '07/02/2019',
+    'Acquisition Cost': '1120000', Status: 'Inforce' },
+  { 'Record Type': 'Life', 'Policy Number': '884120', 'Carrier Name': 'Brighthouse',
+    'Last Name': 'Wolfe', 'First Name': 'Cheryl', DOB: '11/18/1942', Gender: 'F', State: 'MI',
+    'LE Months': '102', Role: 'Survivorship' },
+  { 'Record Type': 'Insured', 'Last Name': 'Setliff', 'First Name': 'Reuben',
+    DOB: '04/22/1937', 'LE Months': '90', Remarks: 'Updated LE report' },
+  { 'Record Type': 'Value', 'Policy Number': '2975464', 'As Of Date': '06/30/2026',
+    AV: '3200.10', CSV: '3200.10', COI: '4050.00', 'Death Benefit': '1000000',
+    'Loan Balance': '0' },
+  { 'Record Type': 'Value', 'Policy Number': '2975464', 'As Of Date': '07/31/2026',
+    AV: '3173.60', CSV: '3173.60', COI: '4068.30', 'Death Benefit': '1000000',
+    'Loan Balance': '0' },
+  { 'Record Type': 'Transaction', 'Policy Number': '2975464',
+    'Transaction Date': '03/27/2023', 'Transaction Type': 'Premium Payment',
+    Amount: '10000', Remarks: 'Annual premium' },
+  { 'Record Type': 'Transaction', 'Policy Number': '884120',
+    'Transaction Date': '08/25/2024', 'Transaction Type': 'Premium Payment', Amount: '96000' },
+  { 'Record Type': 'Premium', 'Policy Number': '2975464', 'Due Date': '10/21/2027',
+    'Estimated Amount': '10400', Note: 'Illustration step-up' },
+];
+
+function buildMaster() {
+  const cell = (v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const line = (vals) => vals.map(cell).join(',');
+  return [
+    line(MASTER_COLUMNS),
+    ...MASTER_ROWS.map((r) => line(MASTER_COLUMNS.map((c) => r[c] ?? ''))),
+  ].join('\n') + '\n';
+}
+
 export const TEMPLATES = {
   policies:
     'Policy Number,Primary Insured,DOB,Carrier Name,Issue Date,Basic Face,Owner,Premium Required,Premium Mode,Next Premium Due,Acquisition Date,Acquisition Cost,Status,Values As Of,AV,CSV,COI,Death Benefit,Date Of Last Withdrawal\n' +
@@ -781,19 +926,5 @@ export const TEMPLATES = {
   transactions:
     'Policy Number,Carrier Name,Transaction Date,Transaction Type,Amount,Remarks\n' +
     '2975464,Genworth Call Pay,03/27/2023,Premium Payment,10000,Annual premium\n',
-  master:
-    'Record Type,Policy Number,Carrier Name,Last Name,First Name,DOB,Gender,State,LE Months,' +
-    'Date Of Death,Role,Product Type,Issue Date,Basic Face,Owner,Premium Required,Premium Mode,' +
-    'Next Premium Due,Acquisition Date,Acquisition Cost,Status,As Of Date,AV,CSV,COI,Death Benefit,' +
-    'Loan Balance,Transaction Date,Transaction Type,Amount,Remarks\n' +
-    'Policy,2975464,Genworth Call Pay,Setliff,Reuben,04/22/1937,M,SD,84,,,UL,10/21/2009,1000000,' +
-    'LCG1,10000,Annual,10/21/2026,03/19/2021,250300,Inforce,,,,,,,,,,\n' +
-    'Policy,884120,Brighthouse,Wolfe,Dean,06/02/1940,M,MI,96,,,SUL,03/14/2011,5000000,' +
-    'LCG2,96000,Annual,08/25/2026,07/02/2019,1120000,Inforce,,,,,,,,,,\n' +
-    'Life,884120,Brighthouse,Wolfe,Cheryl,11/18/1942,F,MI,102,,Survivorship,,,,,,,,,,,,,,,,,,,,\n' +
-    'Insured,,,Setliff,Reuben,04/22/1937,,,90,,,,,,,,,,,,,,,,,,,,,,Updated LE report\n' +
-    'Value,2975464,,,,,,,,,,,,,,,,,,,,06/30/2026,3200.10,3200.10,4050.00,1000000,0,,,,\n' +
-    'Value,2975464,,,,,,,,,,,,,,,,,,,,07/31/2026,3173.60,3173.60,4068.30,1000000,0,,,,\n' +
-    'Transaction,2975464,,,,,,,,,,,,,,,,,,,,,,,,,,03/27/2023,Premium Payment,10000,Annual premium\n' +
-    'Transaction,884120,,,,,,,,,,,,,,,,,,,,,,,,,,08/25/2024,Premium Payment,96000,\n',
+  master: buildMaster(),
 };

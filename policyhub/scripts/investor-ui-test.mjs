@@ -199,8 +199,7 @@ check('it reads like the policy premiums tab',
   /Premiums coming up/i.test(svcPage)
   && /Your share/i.test(svcPage) && /Full policy/i.test(svcPage),
   svcPage.slice(0, 200));
-check('and totals what falls due in the next year',
-  /Due in the next 12 months/i.test(svcPage));
+check('and totals every date it is showing', /Total due/i.test(svcPage));
 check('and every date shown is still ahead', await inv.evaluate(() => {
   const today = new Date().toISOString().slice(0, 10);
   return [...document.querySelectorAll('table.data tbody tr td:first-child')]

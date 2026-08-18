@@ -4,6 +4,9 @@
 
 import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
 import { reportsView, buildOpportunitySheet } from './reports.js';
+// The agreement's clauses live in one file, read by the browser for preview
+// and by the server for the PDF. See public/agreement-template.js.
+import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
 import { analyzeFlows, fmtIrr, today as irrToday } from './irr.js';
 
 /* ------------------------------- api --------------------------------- */
@@ -40,6 +43,7 @@ const state = {
   sort: { key: 'insured_last', dir: 1 },
   funds: [],
   oppCount: 0,        // drives the badge in the menu
+  dashFund: '',       // which owner entity the dashboard is narrowed to
 };
 
 /**
@@ -62,6 +66,21 @@ async function refreshOppCount() {
   } catch { /* a badge is not worth an error */ }
 }
 
+/* An agreement waiting for a signature is the one thing in the portal that
+   is actually blocking somebody, so it gets the same treatment. */
+async function refreshAgreementCount() {
+  if (!isInvestorUser()) return;
+  try {
+    const list = await api('/agreements');
+    const next = list.filter((a) => a.status === 'Out for signature' && !a.my_signed_at).length;
+    const link = document.querySelector('.nav a[href="#/agreements"]');
+    if (!link) return;
+    link.querySelector('.nav-badge')?.remove();
+    link.classList.toggle('has-badge', next > 0);
+    if (next > 0) link.insertAdjacentHTML('beforeend', `<span class="nav-badge">${next}</span>`);
+  } catch { /* same */ }
+}
+
 /* ----------------------------- helpers ------------------------------- */
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -76,6 +95,35 @@ const fmtDate = (d) => {
   const [y, m, day] = s.split('-');
   return `${m}/${day}/${y}`;
 };
+/* A timestamp, in the reader's own zone. Used where the moment matters —
+   when something was shared, when a decision was taken — rather than just
+   the day it happened. */
+const fmtDateTime = (t) => {
+  if (!t) return '<span class="muted">—</span>';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return fmtDate(t);
+  return d.toLocaleString('en-US',
+    { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+};
+/* M / F / Joint, spelled the way a reader expects. A survivorship policy
+   covers two lives, so "Joint" is a real answer rather than missing data. */
+const SEX_WORDS = { M: 'Male', F: 'Female', Joint: 'Joint' };
+const sexLabel = (g) => {
+  const v = String(g || '').trim();
+  if (!v) return '<span class="muted">—</span>';
+  const key = v.length === 1 ? v.toUpperCase() : v;
+  return esc(SEX_WORDS[key] || v);
+};
+/** The compact form, for beside a name: "F · 87". */
+const sexAndAge = (g, dob) => {
+  const parts = [];
+  const v = String(g || '').trim();
+  if (v) parts.push(v.length === 1 ? v.toUpperCase() : v);
+  const age = ageFrom(dob);
+  if (age != null) parts.push(String(age));
+  return parts.join(' · ');
+};
+const dash = '<span class="muted">—</span>';
 const dateInput = (d) => (d ? String(d).slice(0, 10) : '');
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -129,6 +177,10 @@ function formValues(form) {
   // Always send multi-selects as arrays, even with a single selection.
   form.querySelectorAll('select[multiple]').forEach((sel) => {
     out[sel.name] = [...sel.selectedOptions].map((o) => o.value);
+  });
+  // The commas were only ever for the reader.
+  form.querySelectorAll('input[data-money]').forEach((el) => {
+    if (typeof out[el.name] === 'string') out[el.name] = out[el.name].replace(/,/g, '');
   });
   return out;
 }
@@ -215,6 +267,7 @@ const INVESTOR_NAV = [
   ['dashboard', 'Portfolio'],
   ['policies', 'My policies'],
   ['opportunities', 'Opportunities'],
+  ['agreements', 'Agreements'],
   ['servicing', 'Premiums'],
   ['maturities', 'Realized'],
   ['reports', 'Statements'],
@@ -335,7 +388,23 @@ function wireLogin() {
 /* ----------------------------- dashboard ----------------------------- */
 
 async function dashboardView() {
-  const [sum, svc] = await Promise.all([api('/analytics/summary'), api('/servicing')]);
+  /* The dashboard can be narrowed to one owner entity. It is the same
+     filter on both calls, so the headline figures and the alerts below
+     them are always describing the same book — a dashboard where the
+     numbers and the warnings disagree about their scope is worse than
+     one with no filter at all. Investors do not see it: they hold
+     percentages of policies, not entities. */
+  const staff = !isInvestorUser();
+  if (!staff) state.dashFund = '';
+  const dashFund = state.dashFund || '';
+  const suffix = dashFund ? `?fund=${encodeURIComponent(dashFund)}` : '';
+  const [sum, svc, funds] = await Promise.all([
+    api(`/analytics/summary${suffix}`),
+    api(`/servicing${suffix}`),
+    staff ? (state.funds.length ? Promise.resolve(state.funds) : api('/funds').catch(() => []))
+      : Promise.resolve([]),
+  ]);
+  if (staff) state.funds = funds;
   const t = sum.totals;
   const critical = svc.alerts.filter((a) => a.severity === 'critical').length;
   const annualPremium = Number(t.monthly_coi) * 12;
@@ -361,6 +430,12 @@ async function dashboardView() {
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
+      ${staff ? `<select id="dashFund" class="head-select" aria-label="Owner entity">
+        <option value="">All entities</option>
+        ${funds.map((f) => `<option value="${esc(f.code)}" ${
+          dashFund === f.code ? 'selected' : ''}>${esc(f.code)}${
+          f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+      </select>` : ''}
       ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
       <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
     </div>
@@ -436,7 +511,9 @@ async function dashboardView() {
           ? '<tr><td colspan="4"><div class="empty">No premium dates are scheduled on your policies.</div></td></tr>'
           : upcomingMine.slice(0, 8).map((r) => `<tr class="clickable" data-id="${r.id}">
               <td class="strong">${fmtDate(r.next_premium_due)}</td>
-              <td>${esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim())}</td>
+              <td>${esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim())}
+                ${sexAndAge(r.insured_gender, r.insured_dob)
+                  ? `<span class="muted">· ${sexAndAge(r.insured_gender, r.insured_dob)}</span>` : ''}</td>
               <td class="secondary">${esc(r.carrier_name)} ${esc(r.policy_number)}</td>
               <td class="num">${fmtExact(r.premium_required)}</td>
             </tr>`).join('')}</tbody>
@@ -455,6 +532,10 @@ async function dashboardView() {
   return {
     html,
     after: () => {
+      $('#dashFund')?.addEventListener('change', (e) => {
+        state.dashFund = e.target.value;
+        render();
+      });
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       lineChart($('#chartCapital'), {
@@ -511,6 +592,10 @@ const POLICY_COLUMNS = [
   { key: 'insured_first', header: 'First name', cell: (p) => esc(p.insured_first || '—') },
   { key: 'insured_dob', header: 'DOB', cell: (p) => fmtDate(p.insured_dob) },
   { key: 'age', header: 'Age', cls: 'num', value: (p) => ageFrom(p.insured_dob), cell: (p) => ageFrom(p.insured_dob) ?? '—' },
+  /* Sex belongs on the screen for the same reason age does: mortality is
+     the whole asset, and men and women of the same age do not have the
+     same one. */
+  { key: 'insured_gender', header: 'Sex', cell: (p) => sexLabel(p.insured_gender) },
   { key: 'carrier_name', header: 'Carrier', cell: (p) => esc(p.carrier_name) },
   { key: 'product_type', header: 'Type', cell: (p) =>
       p.product_type ? `<span title="${esc(PRODUCT_LABELS[p.product_type] || p.product_type)}">${esc(p.product_type)}</span>` : '<span class="muted">—</span>' },
@@ -626,18 +711,26 @@ async function policiesView() {
                   policyColumns().map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
                 }</tr>`).join('')}
           </tbody>
-          ${rows.length ? `<tfoot><tr>
-            <td colspan="${isInvestorUser() ? 9 : 8}">Totals — ${rows.length} policies</td>
-            <td class="num">${fmtExact(totals.face)}</td>
-            <td class="num">${fmtExact(totals.db)}</td>
-            <td></td>
-            <td class="num">${fmtExact(totals.prem)}</td>
-            ${isInvestorUser() ? '' : `<td class="num">${fmtExact(totals.av)}</td>
-            <td class="num">${fmtExact(totals.csv)}</td>
-            <td class="num">${fmtExact(totals.coi)}</td>`}
-            <td class="num">${fmtExact(totals.inv)}</td>
-            <td colspan="3"></td>
-          </tr></tfoot>` : ''}
+          ${rows.length ? `<tfoot><tr>${(() => {
+            /* The totals row is built from the same column list as the head,
+               so adding or hiding a column can never leave it one cell out of
+               step with the figures above it. */
+            const totalOf = {
+              face_amount: totals.face, death_benefit: totals.db,
+              premium_required: totals.prem, account_value: totals.av,
+              cash_surrender_value: totals.csv, cost_of_insurance: totals.coi,
+              total_invested: totals.inv,
+            };
+            const cols = policyColumns();
+            const first = cols.findIndex((c) => c.key in totalOf);
+            return cols.map((c, i) => {
+              if (i === 0) return `<td colspan="${first}">Totals — ${rows.length} policies</td>`;
+              if (i < first) return '';
+              return c.key in totalOf
+                ? `<td class="num">${fmtExact(totalOf[c.key])}</td>`
+                : '<td></td>';
+            }).join('');
+          })()}</tr></tfoot>` : ''}
         </table>
       </div>
     </div>`;
@@ -673,6 +766,7 @@ async function policiesView() {
           { header: 'Last Name', key: 'insured_last' },
           { header: 'First Name', key: 'insured_first' },
           { header: 'DOB', key: 'insured_dob' },
+          { header: 'Sex', key: 'insured_gender' },
           { header: 'Carrier Name', key: 'carrier_name' },
           { header: 'Product Type', key: 'product_type' },
           { header: 'Issue Date', key: 'issue_date' },
@@ -834,6 +928,7 @@ function overviewTab(p) {
             : `<span class="badge">${esc(i.role || 'Joint')}</span>`}</td>
       <td>${fmtDate(i.dob)}</td>
       <td class="num">${ageFrom(i.dob) ?? '—'}</td>
+      <td>${sexLabel(i.gender)}</td>
       <td class="num">${i.le_months ?? '—'}</td>
       <td>${i.date_of_death ? fmtDate(i.date_of_death) : dash}</td>
       <td>${!canEditData() ? '' : `
@@ -898,14 +993,16 @@ function overviewTab(p) {
       <table class="data">
         <thead><tr>
           <th>Last name</th><th>First name</th><th>Role</th><th>Date of birth</th>
-          <th class="num">Age</th><th class="num">LE (months)</th><th>Date of death</th><th></th>
+          <th class="num">Age</th><th>Sex</th><th class="num">LE (months)</th>
+          <th>Date of death</th><th></th>
         </tr></thead>
         <tbody>
           ${p.insured_id
             ? lifeRow({ id: p.insured_id, last_name: p.insured_last, first_name: p.insured_first,
-                        dob: p.insured_dob, le_months: p.le_months, date_of_death: p.date_of_death },
+                        dob: p.insured_dob, gender: p.insured_gender, le_months: p.le_months,
+                        date_of_death: p.date_of_death },
                       true)
-            : '<tr><td colspan="8"><div class="empty">No insured recorded on this policy.</div></td></tr>'}
+            : '<tr><td colspan="9"><div class="empty">No insured recorded on this policy.</div></td></tr>'}
           ${extras.map((i) => lifeRow(i, false, i.link_id)).join('')}
         </tbody>
       </table>
@@ -949,6 +1046,10 @@ function overviewTab(p) {
           : fmtDate(null))}
         ${row('Grace period', `${p.grace_period_days || 61} days`)}
         ${row('Values as of', fmtDate(p.value_as_of))}
+        ${row('Case files', p.documents_url
+          ? `<a class="ext-link" href="${esc(p.documents_url)}" target="_blank" rel="noopener noreferrer">
+               Open the folder <span aria-hidden="true">&#8599;</span></a>`
+          : dash)}
       </dl>
       ${p.notes ? `<div style="margin-top:16px"><label>Notes</label><div class="secondary">${esc(p.notes)}</div></div>` : ''}
       </div>
@@ -1650,6 +1751,93 @@ const inputField = (label, name, value = '', type = 'text', extra = '') =>
   `<div class="field"><label>${label}</label>
    <input name="${name}" type="${type}" value="${esc(value ?? '')}" ${extra}></div>`;
 
+/* The fifty states, DC and the territories a policy can actually be issued
+   in. A typed state is a typo waiting to happen — and it is the field every
+   carrier and provider matches on. */
+const US_STATES = [
+  ['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'],
+  ['CA', 'California'], ['CO', 'Colorado'], ['CT', 'Connecticut'], ['DE', 'Delaware'],
+  ['DC', 'District of Columbia'], ['FL', 'Florida'], ['GA', 'Georgia'], ['HI', 'Hawaii'],
+  ['ID', 'Idaho'], ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'],
+  ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'],
+  ['MD', 'Maryland'], ['MA', 'Massachusetts'], ['MI', 'Michigan'], ['MN', 'Minnesota'],
+  ['MS', 'Mississippi'], ['MO', 'Missouri'], ['MT', 'Montana'], ['NE', 'Nebraska'],
+  ['NV', 'Nevada'], ['NH', 'New Hampshire'], ['NJ', 'New Jersey'], ['NM', 'New Mexico'],
+  ['NY', 'New York'], ['NC', 'North Carolina'], ['ND', 'North Dakota'], ['OH', 'Ohio'],
+  ['OK', 'Oklahoma'], ['OR', 'Oregon'], ['PA', 'Pennsylvania'], ['RI', 'Rhode Island'],
+  ['SC', 'South Carolina'], ['SD', 'South Dakota'], ['TN', 'Tennessee'], ['TX', 'Texas'],
+  ['UT', 'Utah'], ['VT', 'Vermont'], ['VA', 'Virginia'], ['WA', 'Washington'],
+  ['WV', 'West Virginia'], ['WI', 'Wisconsin'], ['WY', 'Wyoming'],
+  ['PR', 'Puerto Rico'], ['VI', 'U.S. Virgin Islands'], ['GU', 'Guam'],
+];
+
+/**
+ * A state picker that never loses what is already on the record. Older data
+ * may hold a full state name or something a person typed by hand; that value
+ * is kept as its own option rather than silently replaced with a blank the
+ * first time somebody opens the form to change something else.
+ */
+const stateField = (label, name, value) => {
+  const v = String(value ?? '').trim();
+  const known = US_STATES.some(([code]) => code === v);
+  return `<div class="field"><label>${label}</label><select name="${name}">
+    <option value=""${v ? '' : ' selected'}>—</option>
+    ${v && !known ? `<option value="${esc(v)}" selected>${esc(v)}</option>` : ''}
+    ${US_STATES.map(([code, full]) =>
+      `<option value="${code}"${code === v ? ' selected' : ''}>${code} — ${full}</option>`).join('')}
+   </select></div>`;
+};
+
+/**
+ * A money field that puts the commas in as you type.
+ *
+ * It is a text input rather than a number one, because a number input will
+ * not hold a comma — the browser simply discards the value. The grouping is
+ * cosmetic: the commas are stripped again on submit, and the server strips
+ * them a second time, so nothing downstream ever sees them.
+ */
+const moneyField = (label, name, value = '', extra = '') =>
+  `<div class="field"><label>${label}</label>
+   <input name="${name}" type="text" inputmode="decimal" data-money
+          value="${esc(groupDigits(value == null ? '' : String(value)))}"
+          autocomplete="off" ${extra}></div>`;
+
+/** "1250000.5" -> "1,250,000.5". Anything that is not a digit, a dot or a
+    leading minus is dropped; a second dot is dropped too. */
+function groupDigits(raw) {
+  const text = String(raw ?? '');
+  const negative = /^\s*-/.test(text);
+  let body = text.replace(/[^\d.]/g, '');
+  const dot = body.indexOf('.');
+  if (dot !== -1) body = `${body.slice(0, dot + 1)}${body.slice(dot + 1).replace(/\./g, '')}`;
+  let [whole = '', decimals] = body.split('.');
+  whole = whole.replace(/^0+(?=\d)/, '');
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (!grouped && decimals === undefined) return negative && text.trim() === '-' ? '-' : '';
+  return `${negative ? '-' : ''}${grouped}${decimals === undefined ? '' : `.${decimals}`}`;
+}
+
+/* Re-group after every keystroke, then put the caret back where the typist
+   left it — counted in digits rather than characters, since inserting a
+   comma to their left would otherwise shunt it one place. */
+function regroupWhileTyping(el) {
+  const caret = el.selectionStart ?? el.value.length;
+  const significantBefore = (el.value.slice(0, caret).match(/[\d.]/g) || []).length;
+  el.value = groupDigits(el.value);
+  let seen = 0;
+  let position = significantBefore === 0 ? 0 : el.value.length;
+  for (let i = 0; i < el.value.length; i++) {
+    if (/[\d.]/.test(el.value[i])) seen++;
+    if (seen === significantBefore) { position = i + 1; break; }
+  }
+  try { el.setSelectionRange(position, position); } catch { /* not a text input */ }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target instanceof HTMLInputElement && e.target.hasAttribute('data-money'))
+    regroupWhileTyping(e.target);
+});
+
 const selectField = (label, name, value, options) =>
   `<div class="field"><label>${label}</label><select name="${name}">
     ${options.map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}
@@ -1666,6 +1854,7 @@ async function openPolicyDialog(p = null) {
       ${inputField('Insured last name', 'insured_last_name', p?.insured_last)}
       ${inputField('Insured first name', 'insured_first_name', p?.insured_first)}
       ${inputField('Date of birth', 'dob', dateInput(p?.insured_dob), 'date')}
+      ${selectField('Sex', 'gender', p?.insured_gender || '', ['', 'M', 'F', 'Joint'])}
     </div>
     <div class="field" style="margin-top:-4px">
       <span class="muted" style="font-size:12px">
@@ -1675,7 +1864,7 @@ async function openPolicyDialog(p = null) {
     </div>
     <div class="field-row">
       ${selectField('Product type', 'product_type', p?.product_type || '', PRODUCT_TYPES)}
-      ${inputField('Face amount', 'face_amount', p?.face_amount, 'number', 'step=0.01')}
+      ${moneyField('Face amount', 'face_amount', p?.face_amount)}
       <div class="field">
         <label>Owner entity</label>
         <select name="fund_code" id="fundSelect">
@@ -1694,20 +1883,27 @@ async function openPolicyDialog(p = null) {
     </div>
     <div class="field-row">
       ${inputField('Issue date', 'issue_date', dateInput(p?.issue_date), 'date')}
+      ${stateField('Issue state', 'issue_state', p?.issue_state)}
       ${inputField('Owner account', 'owner_account', p?.owner_account)}
     </div>
     <div class="field-row">
-      ${inputField('Premium required', 'premium_required', p?.premium_required, 'number', 'step=0.01')}
+      ${moneyField('Premium required', 'premium_required', p?.premium_required)}
       ${selectField('Premium mode', 'premium_mode', p?.premium_mode || 'Annual',
         ['Monthly', 'Quarterly', 'Semi-Annual', 'Annual'])}
       ${inputField('Next premium due', 'next_premium_due', dateInput(p?.next_premium_due), 'date')}
     </div>
     <div class="field-row">
       ${inputField('Acquisition date', 'acquisition_date', dateInput(p?.acquisition_date), 'date')}
-      ${inputField('Acquisition cost', 'acquisition_cost', p?.acquisition_cost, 'number', 'step=0.01')}
+      ${moneyField('Acquisition cost', 'acquisition_cost', p?.acquisition_cost)}
       ${selectField('Status', 'status', p?.status || 'Inforce',
         ['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending'])}
     </div>
+    ${inputField('Case files link', 'documents_url', p?.documents_url, 'url',
+      'placeholder="Dropbox, SharePoint or any folder link"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      Anyone who can see this policy — including the investors who own a piece of it — gets
+      this link. Who may actually open the folder is decided by the folder's own sharing
+      settings, not here.</span></div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(p?.notes || '')}</textarea></div>`;
 
   const dlg = openDialog(p ? 'Edit policy' : 'New policy', body, async (v) => {
@@ -1806,7 +2002,7 @@ function openInsuredDialog(ins, onSaved) {
     <div class="field-row">
       ${inputField('Date of birth', 'dob', dateInput(ins?.dob ?? ins?.insured_dob), 'date')}
       ${selectField('Gender', 'gender', ins?.gender || '', ['', 'M', 'F', 'Joint'])}
-      ${inputField('State', 'state', ins?.state)}
+      ${stateField('State', 'state', ins?.state)}
     </div>
     <div class="field-row">
       ${selectField('Smoker', 'smoker', ins?.smoker || '', ['', 'Non-Smoker', 'Smoker', 'Unknown'])}
@@ -1847,15 +2043,15 @@ function openValueDialog(p) {
   const body = `
     ${inputField('As of date *', 'as_of_date', today(), 'date', 'required')}
     <div class="field-row">
-      ${inputField('Account value (AV)', 'account_value', '', 'number', 'step=0.01')}
-      ${inputField('Cash surrender value (CSV)', 'cash_surrender_value', '', 'number', 'step=0.01')}
+      ${moneyField('Account value (AV)', 'account_value', '')}
+      ${moneyField('Cash surrender value (CSV)', 'cash_surrender_value', '')}
     </div>
     <div class="field-row">
-      ${inputField('Cost of insurance (COI)', 'cost_of_insurance', '', 'number', 'step=0.01')}
-      ${inputField('Death benefit', 'death_benefit', p.death_benefit ?? p.face_amount, 'number', 'step=0.01')}
+      ${moneyField('Cost of insurance (COI)', 'cost_of_insurance', '')}
+      ${moneyField('Death benefit', 'death_benefit', p.death_benefit ?? p.face_amount)}
     </div>
     <div class="field-row">
-      ${inputField('Loan balance', 'loan_balance', '', 'number', 'step=0.01')}
+      ${moneyField('Loan balance', 'loan_balance', '')}
       ${inputField('Date of last withdrawal', 'date_of_last_withdrawal', '', 'date')}
     </div>
     ${inputField('Notes', 'notes')}`;
@@ -1910,8 +2106,8 @@ function openStepDialog(p, existing = null) {
       ${inputField('Date', 'due_date', suggestedDate, 'date', 'required')}
       <div class="field" id="stepAmountField">
         <label>Estimated amount</label>
-        <input name="amount" type="number" step="0.01" min="0"
-               value="${esc(existing?.amount ?? p.premium_required ?? '')}">
+        <input name="amount" type="text" inputmode="decimal" data-money autocomplete="off"
+               value="${esc(groupDigits(String(existing?.amount ?? p.premium_required ?? '')))}">
       </div>
     </div>
 
@@ -1955,7 +2151,7 @@ function openTxnDialog(p, preset = {}) {
       ${selectField('Type *', 'txn_type', preset.txn_type || 'Premium Payment',
         ['Premium Payment', 'Acquisition Cost', 'Withdrawal', 'Loan', 'Fee', 'Commission', 'Servicing', 'Other'])}
     </div>
-    ${inputField('Amount *', 'amount', preset.amount ?? '', 'number', 'step=0.01 required')}
+    ${moneyField('Amount *', 'amount', preset.amount ?? '', 'required')}
     ${inputField('Remarks', 'remarks')}`;
 
   openDialog('Add transaction', body, async (v) => {
@@ -1989,6 +2185,7 @@ async function servicingView() {
       date: String(r.next_premium_due).slice(0, 10),
       policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
       insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
+      sex: sexAndAge(r.insured_gender, r.insured_dob),
       amount: Number(r.premium_required) || 0,
       amount_full: Number(r.premium_required_full) || 0,
       source: r.premium_mode || 'carrier',
@@ -1999,13 +2196,14 @@ async function servicingView() {
         date: String(r.due_date).slice(0, 10),
         policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
         insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
+        sex: sexAndAge(r.insured_gender, r.insured_dob),
         amount: Number(r.amount) || 0, amount_full: Number(r.amount_full) || 0,
         source: 'scheduled', note: r.note,
       })),
   ].sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
-  const dueIn12 = duesForInvestor
-    .filter((d) => d.date <= addMonthsIso(today(), 12))
-    .reduce((sum, d) => sum + d.amount, 0);
+  /* Every dated row above, added up — the total is of what is on the page
+     rather than of an arbitrary window, so the footer and the list agree. */
+  const dueTotal = duesForInvestor.reduce((sum, d) => sum + d.amount, 0);
   const html = `
     <div class="page-head">
       <div><h1>${investor ? 'Premiums' : 'Servicing calendar'}</h1>
@@ -2041,7 +2239,8 @@ async function servicingView() {
           ? '<tr><td colspan="6"><div class="empty">No premium dates are scheduled on your policies at the moment.</div></td></tr>'
           : duesForInvestor.map((d) => `<tr class="clickable" data-id="${d.policy_id}">
               <td class="strong">${fmtDate(d.date)}</td>
-              <td>${esc(d.insured)}</td>
+              <td>${esc(d.insured)}${d.sex
+                ? ` <span class="muted">· ${esc(d.sex)}</span>` : ''}</td>
               <td class="secondary">${esc(d.carrier_name || '')} ${esc(d.policy_number || '')}</td>
               <td class="num strong">${money(d.amount)}</td>
               <td class="num muted">${money(d.amount_full)}</td>
@@ -2049,8 +2248,8 @@ async function servicingView() {
                 ? `scheduled${d.note ? ` · ${esc(d.note)}` : ''}` : esc(d.source)}</td>
             </tr>`).join('')}</tbody>
         ${duesForInvestor.length ? `<tfoot><tr>
-          <td colspan="3">Due in the next 12 months</td>
-          <td class="num">${fmtExact(dueIn12)}</td><td colspan="2"></td>
+          <td colspan="3">Total due</td>
+          <td class="num">${fmtExact(dueTotal)}</td><td colspan="2"></td>
         </tr></tfoot>` : ''}
       </table></div>
       <div class="card-body" style="border-top:1px solid var(--grid)">
@@ -2428,6 +2627,32 @@ async function opportunityView() {
       </div>
     </div>
 
+    ${staff && (o.account_value != null || o.cash_surrender_value != null) ? `
+    <div class="card">
+      <div class="card-head"><h2>Carrier values</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${o.values_as_of
+          ? `as of ${fmtDate(o.values_as_of)}` : 'date not stated'}</span></div>
+      <div class="card-body"><dl class="kv">
+        <dt>Account value</dt><dd class="num">${o.account_value == null
+          ? '<span class="muted">—</span>' : fmtExact(o.account_value)}</dd>
+        <dt>Cash surrender value</dt><dd class="num">${o.cash_surrender_value == null
+          ? '<span class="muted">—</span>' : fmtExact(o.cash_surrender_value)}</dd>
+        ${o.cash_surrender_value && o.asking_price ? `
+        <dt>Asking price over surrender</dt>
+        <dd class="num">${fmtExact(Number(o.asking_price) - Number(o.cash_surrender_value))}
+          <span class="muted">${(Number(o.asking_price) / Number(o.cash_surrender_value)).toFixed(1)}×</span></dd>` : ''}
+        ${o.account_value && o.annual_premium ? `
+        <dt>Account value covers</dt>
+        <dd class="num">${(Number(o.account_value) / (Number(o.annual_premium) / 12)).toFixed(1)}
+          <span class="muted">months of premium</span></dd>` : ''}
+      </dl></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px">Surrender value is what the seller could
+        take from the carrier today, so a price near it is a price the seller can refuse.
+        Internal — investors do not see this card.</span>
+      </div>
+    </div>` : ''}
+
     <div class="card">
       <div class="card-head"><h2>Premium schedule</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">${o.premiums.length} posted payment${
@@ -2526,11 +2751,29 @@ async function opportunityView() {
         <span class="muted" style="font-size:12px">
           A request holds its percentage from the moment it is made, so the availability
           investors see is always honest. Declining one releases it back.
-          ${(o.shares || []).length
-            ? `Shared with ${o.shares.map((s) => esc(s.name)).join(', ')}.`
-            : 'Not shared with anybody yet — no investor can see this.'}
         </span>
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Shared with</h2><div class="spacer"></div>
+        ${canEditData() ? '<button class="btn-sm" id="shareOppBtn2">Change who can see this</button>' : ''}</div>
+      ${(o.shares || []).length === 0
+        ? '<div class="card-body"><div class="empty">Not shared with anybody yet — no investor can see this.</div></div>'
+        : `<div class="table-wrap"><table class="data">
+            <thead><tr><th>Investor</th><th>Shared on</th><th>Shared by</th><th>Asked for</th></tr></thead>
+            <tbody>${o.shares.map((sh) => {
+              const c = (o.commitments || []).filter((x) => x.investor_id === sh.investor_id
+                && !['Declined', 'Withdrawn'].includes(x.status));
+              const took = c.reduce((sum, x) => sum + Number(x.pct || 0), 0);
+              return `<tr>
+                <td class="strong">${esc(sh.name)}</td>
+                <td>${fmtDateTime(sh.shared_at)}</td>
+                <td class="secondary">${esc(sh.shared_by_name || '—')}</td>
+                <td class="${took ? '' : 'muted'}">${took ? fmtPct(took) : 'nothing yet'}</td>
+              </tr>`;
+            }).join('')}</tbody>
+          </table></div>`}
     </div>` : ''}`;
 
   return {
@@ -2546,6 +2789,7 @@ async function opportunityView() {
         toast('Back on the list'); render();
       });
       $('#shareOppBtn')?.addEventListener('click', () => openShareDialog(o));
+      $('#shareOppBtn2')?.addEventListener('click', () => openShareDialog(o));
       $('#fundOppBtn')?.addEventListener('click', () => {
         openFundDialog(o).catch((e) => alert(e.message));
       });
@@ -2634,20 +2878,20 @@ async function openOpportunityDialog(o) {
     </div>
     <div class="field-row">
       ${selectField('Gender', 'insured_gender', o?.insured_gender || '', ['', 'M', 'F', 'Joint'])}
-      ${inputField('State', 'insured_state', o?.insured_state)}
+      ${stateField('State', 'insured_state', o?.insured_state)}
       ${inputField('Life expectancy (months)', 'le_months', o?.le_months, 'number')}
     </div>
     <div class="field-row">
       ${inputField('LE provider', 'le_provider', o?.le_provider)}
       ${inputField('LE report date', 'le_date', dateInput(o?.le_date), 'date')}
-      ${inputField('Death benefit', 'face_amount', o?.face_amount, 'number', 'step=0.01')}
+      ${moneyField('Death benefit', 'face_amount', o?.face_amount)}
     </div>
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
       Life expectancy is counted from the report date, not from today — an estimate written
       two years ago has already used two years of itself.</span></div>
     <div class="field-row">
-      ${inputField('Asking price', 'asking_price', o?.asking_price, 'number', 'step=0.01')}
-      ${inputField('Annual premium', 'annual_premium', o?.annual_premium, 'number', 'step=0.01')}
+      ${moneyField('Asking price', 'asking_price', o?.asking_price)}
+      ${moneyField('Annual premium', 'annual_premium', o?.annual_premium)}
       <div class="field"><label>Owner entity</label>
         <select name="fund_id">
           <option value="">—</option>
@@ -2655,6 +2899,15 @@ async function openOpportunityDialog(o) {
             Number(o?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
         </select></div>
     </div>
+    <div class="field-row">
+      ${moneyField('Account value', 'account_value', o?.account_value)}
+      ${moneyField('Cash surrender value', 'cash_surrender_value', o?.cash_surrender_value)}
+      ${inputField('Carrier values as of', 'values_as_of', dateInput(o?.values_as_of), 'date')}
+    </div>
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      From the carrier's current statement. Account value is what keeps the policy in force;
+      cash surrender value is what the seller would get for walking away, which is the floor
+      under any price worth discussing.</span></div>
     <div class="field-row">
       ${inputField('Expected close', 'expected_close', dateInput(o?.expected_close), 'date')}
       ${inputField('Offer closes on', 'offer_closes_on', dateInput(o?.offer_closes_on), 'date')}
@@ -2736,9 +2989,9 @@ function openScheduleDialog(o) {
     <tr class="prem-row">
       <td class="prem-year"></td>
       <td><input type="date" class="prem-due" value="${esc(r.due || '')}" required></td>
-      <td><input type="number" step="0.01" min="0" class="prem-amt num"
-                 value="${r.amount === '' || r.amount == null ? '' : esc(r.amount)}"
-                 placeholder="0.00"></td>
+      <td><input type="text" inputmode="decimal" data-money class="prem-amt num"
+                 value="${r.amount === '' || r.amount == null ? '' : esc(groupDigits(String(r.amount)))}"
+                 placeholder="0.00" autocomplete="off"></td>
       <td><input type="text" class="prem-note" value="${esc(r.notes || '')}" placeholder="optional"></td>
       <td><button type="button" class="btn-sm btn-danger prem-del" title="Remove this year">✕</button></td>
     </tr>`;
@@ -2770,7 +3023,7 @@ function openScheduleDialog(o) {
   `, async () => {
     const rows = [...dlg.querySelectorAll('.prem-row')].map((tr) => ({
       due_date: tr.querySelector('.prem-due').value,
-      amount: tr.querySelector('.prem-amt').value,
+      amount: tr.querySelector('.prem-amt').value.replace(/,/g, ''),
       notes: tr.querySelector('.prem-note').value,
     })).filter((r) => r.due_date || r.amount !== '');
     if (!rows.length) throw new Error('Enter at least one payment, or remove the schedule instead.');
@@ -2787,7 +3040,7 @@ function openScheduleDialog(o) {
       tr.querySelector('.prem-year').textContent = i + 1;
     });
     const total = [...body.querySelectorAll('.prem-amt')]
-      .reduce((s, el) => s + (Number(el.value) || 0), 0);
+      .reduce((s, el) => s + (Number(el.value.replace(/,/g, '')) || 0), 0);
     $('#premTotal', dlg).textContent = total ? fmtExact(total) : '—';
   };
   const wire = (tr) => {
@@ -2810,12 +3063,12 @@ function openScheduleDialog(o) {
 
   $('#premFill', dlg).addEventListener('click', () => {
     const amts = [...body.querySelectorAll('.prem-amt')];
-    const base = Number(amts[0]?.value);
+    const base = Number((amts[0]?.value || '').replace(/,/g, ''));
     if (!base) { amts[0]?.focus(); return; }
     const growth = Number($('#premGrowth', dlg).value) || 0;
     amts.forEach((el, i) => {
       if (i === 0 || el.value !== '') return;
-      el.value = (Math.round(base * (1 + growth / 100) ** i * 100) / 100).toFixed(2);
+      el.value = groupDigits((Math.round(base * (1 + growth / 100) ** i * 100) / 100).toFixed(2));
     });
     renumber();
   });
@@ -2829,7 +3082,7 @@ function openPremiumDialog(o, p) {
   openDialog('Edit payment', `
     <div class="field-row">
       ${inputField('Due', 'due_date', dateInput(p.due_date), 'date', 'required')}
-      ${inputField('Amount', 'amount', p.amount, 'number', 'step=0.01 min=0 required')}
+      ${moneyField('Amount', 'amount', p.amount, 'required')}
     </div>
     ${inputField('Notes', 'notes', p.notes || '')}
     <span class="muted" style="font-size:12px">
@@ -3224,7 +3477,7 @@ function openProceedsDialog(r) {
       ${esc(r.carrier_name)} · matured ${fmtDate(r.matured_on)} ·
       death benefit ${fmtExact(r.death_benefit)}</span></div>
     <div class="field-row">
-      ${inputField('Gross proceeds received', 'proceeds_amount', r.proceeds_amount, 'number', 'step=0.01 min=0')}
+      ${moneyField('Gross proceeds received', 'proceeds_amount', r.proceeds_amount)}
       ${inputField('Date received', 'proceeds_received_on', dateInput(r.proceeds_received_on), 'date')}
     </div>
     <span class="muted" style="font-size:12px">
@@ -3653,7 +3906,8 @@ async function handleFiles(files) {
                 : '— worked out from the shape of each row'}</span></div>
             <div class="kpi-row" style="margin:0">
               ${[['policy', 'Policies'], ['insured', 'Insured updates'], ['life', 'Additional lives'],
-                 ['value', 'Value snapshots'], ['transaction', 'Transactions']].map(([k, l]) => `
+                 ['value', 'Value snapshots'], ['transaction', 'Transactions'],
+                 ['premium', 'Future premiums']].map(([k, l]) => `
                 <div class="stat"><div class="label">${l}</div>
                   <div class="value">${preview.byType[k]}</div></div>`).join('')}
               ${preview.byType.unclassified ? `<div class="stat">
@@ -4024,6 +4278,17 @@ async function settingsView() {
       </table></div>
     </div>`}
 
+    ${accountOnly && isInvestorUser() ? '' : `
+    <div class="card">
+      <div class="card-head"><h2>Operating agreements</h2><div class="spacer"></div>
+        <a class="btn btn-sm" href="#/agreements">Open agreements</a></div>
+      <div class="card-body">
+        <span class="muted" style="font-size:13px">Draft a new LLC operating agreement from the
+        standard form, send it to the members, and collect their signatures. Executed copies are
+        filed below, one per member.</span>
+      </div>
+    </div>`}
+
     <div class="card">
       <div class="card-head"><h2>Documents</h2><div class="spacer"></div>
         ${docs.length ? `<span class="muted" style="font-size:12px">${docs.length} on file</span>` : ''}
@@ -4352,6 +4617,488 @@ async function openUserDialog(u, funds, onSaved) {
   sync();
 }
 
+/* --------------------------- agreements ---------------------------- */
+
+/* The operating agreement, on screen.
+ *
+ * The document is rendered from the same template the server renders to
+ * PDF, so what a member reads here is what they sign and what they get
+ * back afterwards — down to the words. Nothing is summarised for them. */
+
+const AGREEMENT_BADGES = {
+  Draft: 'badge',
+  'Out for signature': 'badge grace',
+  Executed: 'badge inforce',
+  Void: 'badge lapsed',
+};
+const agreementBadge = (s) =>
+  `<span class="${AGREEMENT_BADGES[s] || 'badge'}"><span class="dot"></span>${esc(s)}</span>`;
+
+/** The blocks, as a page you can read. */
+function agreementSheet(blocks) {
+  return `<div class="doc-sheet">${blocks.map((b) => {
+    switch (b.type) {
+      case 'title': return `<h1 class="doc-title">${esc(b.text)}</h1>`;
+      case 'subtitle': return `<div class="doc-subtitle${
+        b.align === 'left' ? ' left' : ''}">${esc(b.text)}</div>`;
+      case 'heading': return `<h2 class="doc-h">${esc(b.text)}</h2>`;
+      case 'subhead': return `<h3 class="doc-sub">${esc(b.text)}</h3>`;
+      case 'para': return `<p class="doc-p">${esc(b.text)}</p>`;
+      case 'bullet': return `<p class="doc-bullet">${esc(b.text)}</p>`;
+      case 'numbered': return `<p class="doc-num"><span>${b.n}.</span>${esc(b.text)}</p>`;
+      case 'table': return `<table class="doc-table">
+        ${(b.columns || []).some(Boolean)
+          ? `<thead><tr>${b.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>` : ''}
+        <tbody>${(b.rows || []).map((r, i) => `<tr class="${
+          b.footerRow && i === b.rows.length - 1 ? 'doc-total' : ''}">${
+          r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+      case 'signature': return `<div class="doc-sig">
+        <div class="doc-sig-mark">${b.signed
+          ? esc(b.signed.signed_name || b.caption) : ''}</div>
+        <div class="doc-sig-rule"></div>
+        <div class="doc-sig-name">${esc(b.caption)}</div>
+        <div class="doc-sig-note">${b.signed
+          ? `Signed electronically ${fmtDateTime(b.signed.signed_at)} · IP ${
+              esc(b.signed.signed_ip || 'not recorded')}`
+          : 'Date: ____________________'}</div></div>`;
+      case 'pagebreak': return '<div class="doc-break"></div>';
+      case 'spacer': return `<div style="height:${Number(b.size) || 8}px"></div>`;
+      default: return '';
+    }
+  }).join('')}</div>`;
+}
+
+async function agreementsView() {
+  const investor = isInvestorUser();
+  const list = await api('/agreements');
+  const waiting = list.filter((a) => a.status === 'Out for signature' && !a.my_signed_at);
+
+  const row = (a) => `<tr class="clickable" data-id="${a.id}">
+    <td class="strong">${esc(a.llc_name || a.title || '—')}</td>
+    <td>${fmtDate(a.effective_date)}</td>
+    ${investor ? '' : `<td>${esc(a.fund_code || '—')}</td>`}
+    <td class="num">${a.member_count}</td>
+    <td class="num">${a.signed_count}</td>
+    <td>${agreementBadge(a.status)}</td>
+    <td class="muted">${a.executed_at ? `executed ${fmtDate(a.executed_at)}`
+      : a.issued_at ? `sent ${fmtDate(a.issued_at)}` : `drafted ${fmtDate(a.created_at)}`}</td>
+  </tr>`;
+
+  const html = `
+    <div class="page-head">
+      <div><h1>${investor ? 'Agreements' : 'Operating agreements'}</h1>
+        <div class="sub">${investor
+          ? 'The LLC agreements you are a party to. Read one in full before you sign it.'
+          : 'Draft from the standard form, send it to the members, and collect signatures here.'}</div></div>
+      <div class="spacer"></div>
+      ${!investor && canEditData()
+        ? '<button class="btn-primary" id="newAgreementBtn">New agreement</button>' : ''}
+    </div>
+
+    ${waiting.length && investor ? `<div class="alert-row severity-warning" style="margin-bottom:18px">
+      <div><div class="title">${waiting.length} agreement${waiting.length === 1 ? '' : 's'
+        } waiting for your signature</div>
+        <div class="meta">Open one to read it and sign.</div></div></div>` : ''}
+
+    <div class="card">
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Agreement</th><th>Effective</th>${investor ? '' : '<th>Entity</th>'}
+          <th class="num">Members</th><th class="num">Signed</th><th>Status</th><th></th></tr></thead>
+        <tbody>${list.length === 0
+          ? `<tr><td colspan="7"><div class="empty">${investor
+              ? 'Nothing here yet. An agreement appears once it is sent to you.'
+              : 'No agreements yet. Start one from the standard form.'}</div></td></tr>`
+          : list.map(row).join('')}</tbody>
+      </table></div>
+    </div>`;
+
+  return {
+    html,
+    after: () => {
+      $('#newAgreementBtn')?.addEventListener('click', () => openAgreementDialog(null));
+      document.querySelectorAll('tr[data-id]').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/agreement/${tr.dataset.id}`)));
+    },
+  };
+}
+
+async function agreementView() {
+  const a = await api(`/agreements/${state.params.id}`);
+  const investor = isInvestorUser();
+  const staff = !investor;
+  const me = a.me || null;
+  const canSign = a.status === 'Out for signature'
+    && (investor ? me && !me.signed_at
+      : canEditData() && a.signers.some((s) => s.role === 'Manager' && !s.signed_at));
+  const outstanding = a.signers.filter((s) => !s.signed_at);
+
+  const partyRow = (s) => `<tr class="${s.signed_at ? '' : 'row-muted'}">
+    <td class="strong">${esc(s.name || '—')}${s.is_me ? ' <span class="muted">· you</span>' : ''}</td>
+    <td>${s.role === 'Manager' ? '<span class="badge">Manager</span>' : 'Member'}</td>
+    <td class="num">${s.contribution == null ? dash : fmtExact(s.contribution)}</td>
+    <td class="num">${s.pct == null ? dash : fmtPct(s.pct)}</td>
+    <td>${s.signed_at
+      ? `<span class="badge inforce"><span class="dot"></span>Signed</span>`
+      : s.declined_at ? '<span class="badge lapsed"><span class="dot"></span>Declined</span>'
+        : '<span class="badge grace"><span class="dot"></span>Waiting</span>'}</td>
+    <td class="muted">${s.signed_at ? fmtDateTime(s.signed_at)
+      : s.declined_at ? `${fmtDateTime(s.declined_at)}${
+          s.decline_note ? ` · ${esc(s.decline_note)}` : ''}` : ''}</td>
+    ${staff ? `<td class="muted" style="font-size:12px">${s.signed_ip ? esc(s.signed_ip) : ''}</td>` : ''}
+  </tr>`;
+
+  const html = `
+    <div class="page-head">
+      <div><a class="back" href="#/agreements">← All agreements</a>
+        <h1>${esc(a.terms?.llc_name || a.title || 'Operating agreement')}</h1>
+        <div class="sub">${agreementBadge(a.status)}
+          ${a.fund_code ? ` · ${esc(a.fund_code)}` : ''}
+          ${a.terms?.effective_date ? ` · effective ${fmtDate(a.terms.effective_date)}` : ''}
+          · ${a.signed_count} of ${a.signers.length} signed</div></div>
+      <div class="spacer"></div>
+      <a class="btn" href="/api/agreements/${a.id}/pdf" target="_blank" rel="noopener">Download PDF</a>
+      ${staff && canEditData() ? `
+        ${a.status === 'Draft' ? `
+          <button id="editAgreementBtn">Edit details</button>
+          <button id="partiesBtn">Members</button>
+          <button class="primary" id="issueBtn">Send for signature</button>` : ''}
+        ${a.status === 'Out for signature' ? '<button id="recallBtn">Recall to draft</button>' : ''}
+        ${a.status !== 'Void' && a.status !== 'Draft' ? '<button class="btn-danger" id="voidBtn">Void</button>' : ''}
+        ${a.status === 'Draft' && state.user.role === 'admin'
+          ? '<button class="btn-danger" id="deleteAgreementBtn">Delete draft</button>' : ''}` : ''}
+    </div>
+
+    ${a.status === 'Void' ? `<div class="error-box" style="margin-bottom:18px">
+      This agreement was voided. ${esc(a.void_reason)}</div>` : ''}
+
+    ${canSign ? `
+    <div class="card" style="margin-bottom:18px;border-color:var(--warning)">
+      <div class="card-head"><h2>Sign this agreement</h2></div>
+      <div class="card-body">
+        <p class="secondary" style="margin-top:0">
+          Read the whole document below first. Typing your name and pressing the button is your
+          signature: it has the same effect as signing on paper, and PolicyHub records the time,
+          your address and a fingerprint of the exact text you are signing.</p>
+        <div id="signMsg"></div>
+        <button class="primary" id="signBtn">Read and sign</button>
+        ${investor ? '<button id="declineBtn" style="margin-left:8px">I am not signing</button>' : ''}
+      </div>
+    </div>` : ''}
+
+    ${a.status === 'Out for signature' && outstanding.length && !canSign ? `
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-body"><span class="muted">Waiting on ${
+        outstanding.map((s) => esc(s.name)).join(', ')}.</span></div>
+    </div>` : ''}
+
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-head"><h2>Parties</h2><div class="spacer"></div>
+        ${a.body_hash ? `<span class="muted" style="font-size:12px">document ${
+          esc(a.body_hash.slice(0, 16))}</span>` : ''}</div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Party</th><th>Role</th><th class="num">Contribution</th>
+          <th class="num">Interest</th><th>Signature</th><th>When</th>
+          ${staff ? '<th>From</th>' : ''}</tr></thead>
+        <tbody>${a.signers.length === 0
+          ? '<tr><td colspan="7"><div class="empty">Nobody has been added yet.</div></td></tr>'
+          : a.signers.map(partyRow).join('')}</tbody>
+      </table></div>
+      ${staff && a.status === 'Draft' ? `<div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px">The Manager is taken from the details;
+        members are added under <strong>Members</strong>. Once this goes out for signature the
+        text is frozen and neither can change without recalling it.</span></div>` : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>The agreement</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">as it will be executed</span></div>
+      <div class="card-body">${agreementSheet(a.blocks)}</div>
+    </div>`;
+
+  return {
+    html,
+    after: () => {
+      $('#editAgreementBtn')?.addEventListener('click', () => openAgreementDialog(a));
+      $('#partiesBtn')?.addEventListener('click', () => openPartiesDialog(a));
+      $('#issueBtn')?.addEventListener('click', () => openIssueDialog(a));
+      $('#signBtn')?.addEventListener('click', () => openSignDialog(a));
+      $('#declineBtn')?.addEventListener('click', () => openDeclineDialog(a));
+      $('#recallBtn')?.addEventListener('click', () => openRecallDialog(a));
+      $('#voidBtn')?.addEventListener('click', () => openVoidDialog(a));
+      $('#deleteAgreementBtn')?.addEventListener('click', async () => {
+        if (!confirm('Delete this draft? Nothing has been sent, so nothing is lost but the typing.'))
+          return;
+        await api(`/agreements/${a.id}`, { method: 'DELETE' });
+        toast('Draft deleted');
+        go('#/agreements');
+      });
+    },
+  };
+}
+
+/** The blanks. Grouped the way the document reads rather than alphabetically. */
+async function openAgreementDialog(a) {
+  const isNew = !a?.id;
+  if (!state.funds.length) state.funds = await api('/funds').catch(() => []);
+  const policies = await api('/policies').catch(() => []);
+  const terms = a?.terms || {};
+
+  const field = (f) => {
+    const value = terms[f.key] ?? (isNew ? f.default ?? '' : '');
+    const label = `${f.label}${f.required ? ' *' : ''}`;
+    if (f.type === 'state') return stateField(label, `t_${f.key}`, value);
+    if (f.type === 'date') return inputField(label, `t_${f.key}`, dateInput(value), 'date',
+      f.required ? 'required' : '');
+    if (f.type === 'pct' || f.type === 'int')
+      return inputField(label, `t_${f.key}`, value, 'number', 'step=0.01');
+    return inputField(label, `t_${f.key}`, value, 'text',
+      f.placeholder ? `placeholder="${esc(f.placeholder)}"` : '');
+  };
+
+  const body = `
+    <div class="field-row">
+      <div class="field"><label>Owner entity</label>
+        <select name="fund_id">
+          <option value="">— None —</option>
+          ${state.funds.map((f) => `<option value="${f.id}" ${
+            Number(a?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}${
+            f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+        </select></div>
+      <div class="field"><label>Policy it holds</label>
+        <select name="policy_id" id="agrPolicy">
+          <option value="">— Not in the portfolio yet —</option>
+          ${policies.map((p) => `<option value="${p.id}" ${
+            Number(a?.policy_id) === Number(p.id) ? 'selected' : ''}
+            data-insured="${esc(`${p.insured_first || ''} ${p.insured_last || ''}`.trim())}"
+            data-product="${esc(PRODUCT_LABELS[p.product_type] || p.product_type || '')}"
+            data-number="${esc(p.policy_number || '')}"
+            >${esc(p.policy_number)} — ${esc(p.carrier_name || '')}</option>`).join('')}
+        </select></div>
+    </div>
+    ${FIELD_SECTIONS.map(([key, heading]) => `
+      <div class="dlg-section">${heading}</div>
+      <div class="field-row" style="flex-wrap:wrap">
+        ${AGREEMENT_FIELDS.filter((f) => (f.section || '') === key).map(field).join('')}
+      </div>`).join('')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      The clauses themselves are fixed — these are the only things that change between one
+      agreement and the next. Naming the insured is optional: leave it blank and the purpose
+      clause identifies the policy by number alone.</span></div>`;
+
+  const dlg = openDialog(isNew ? 'New operating agreement' : 'Agreement details', body, async (v) => {
+    const out = {};
+    for (const f of AGREEMENT_FIELDS) out[f.key] = v[`t_${f.key}`] ?? '';
+    const payload = {
+      title: out.llc_name || 'Operating agreement',
+      fund_id: v.fund_id || null, policy_id: v.policy_id || null, terms: out,
+    };
+    if (!String(out.llc_name || '').trim()) throw new Error('Give the LLC its full name');
+    if (isNew) {
+      const made = await api('/agreements', { method: 'POST', body: payload });
+      toast('Draft created');
+      go(`#/agreement/${made.id}`);
+    } else {
+      await api(`/agreements/${a.id}`, { method: 'PUT', body: payload });
+      toast('Agreement updated');
+    }
+  }, isNew ? 'Create draft' : 'Save');
+
+  dlg.classList.add('wide');
+  // Picking a policy fills in what the purpose clause needs, once.
+  $('#agrPolicy', dlg).addEventListener('change', (e) => {
+    const opt = e.target.selectedOptions[0];
+    if (!opt || !opt.value) return;
+    const set = (name, value) => {
+      const el = $(`input[name="${name}"]`, dlg);
+      if (el && !el.value) el.value = value;
+    };
+    set('t_insured_name', opt.dataset.insured || '');
+    set('t_policy_product', opt.dataset.product || '');
+    set('t_policy_number', opt.dataset.number || '');
+  });
+  return dlg;
+}
+
+/** Who is on it, what they are putting in, and what they get. */
+async function openPartiesDialog(a) {
+  const investors = await api('/investors');
+  const members = (a.signers || []).filter((s) => s.role !== 'Manager');
+  const seed = members.length ? members : [{}];
+
+  const rowHtml = (m = {}) => `
+    <tr class="party-row">
+      <td><select class="party-investor">
+        <option value="">— Not an investor on file —</option>
+        ${investors.map((i) => `<option value="${i.id}" ${
+          Number(m.investor_id) === Number(i.id) ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}
+      </select></td>
+      <td><input type="text" class="party-name" value="${esc(m.name || '')}"
+                 placeholder="As it should appear"></td>
+      <td><input type="text" class="party-email" value="${esc(m.email || '')}" placeholder="email"></td>
+      <td><input type="text" class="party-address" value="${esc(m.address || '')}"
+                 placeholder="Notice address"></td>
+      <td><input type="text" inputmode="decimal" data-money class="party-contribution num"
+                 value="${esc(groupDigits(String(m.contribution ?? '')))}" placeholder="0.00"></td>
+      <td><input type="number" step="0.0001" class="party-pct num"
+                 value="${m.pct ?? ''}" placeholder="%"></td>
+      <td><button type="button" class="btn-sm btn-danger party-del" title="Remove">✕</button></td>
+    </tr>`;
+
+  const dlg = openDialog('Members of the LLC', `
+    <div class="prem-grid">
+      <table class="data">
+        <thead><tr><th style="width:180px">Investor</th><th>Name on the agreement</th>
+          <th style="width:150px">Email</th><th>Notice address</th>
+          <th class="num" style="width:120px">Contribution</th>
+          <th class="num" style="width:90px">Interest %</th><th style="width:44px"></th></tr></thead>
+        <tbody id="partyRows">${seed.map(rowHtml).join('')}</tbody>
+        <tfoot><tr><td colspan="4" class="strong">Total</td>
+          <td class="num strong" id="partyCapital">—</td>
+          <td class="num strong" id="partyPct">—</td><td></td></tr></tfoot>
+      </table>
+    </div>
+    <div class="prem-tools">
+      <button type="button" class="btn-sm" id="partyAdd">Add a member</button>
+      <div class="spacer"></div>
+      <span class="muted" style="font-size:12px" id="partyWarn"></span>
+    </div>
+    <span class="muted" style="font-size:12px">
+      Membership interests should total 100%. Nothing here is enforced against the portfolio —
+      the agreement is the agreement, and the cap table on the policy is set separately.
+    </span>
+  `, async () => {
+    const rows = [...dlg.querySelectorAll('.party-row')].map((tr) => ({
+      investor_id: tr.querySelector('.party-investor').value || null,
+      role: 'Member',
+      name: tr.querySelector('.party-name').value.trim()
+        || tr.querySelector('.party-investor').selectedOptions[0]?.textContent.trim() || '',
+      email: tr.querySelector('.party-email').value.trim(),
+      address: tr.querySelector('.party-address').value.trim(),
+      contribution: tr.querySelector('.party-contribution').value.replace(/,/g, ''),
+      pct: tr.querySelector('.party-pct').value,
+    })).filter((r) => r.name || r.investor_id);
+    if (!rows.length) throw new Error('Add at least one member');
+
+    // The Manager signs too, and their name comes from the agreement itself.
+    const manager = String(a.terms?.manager_name || '').trim();
+    const signers = manager ? [{ role: 'Manager', name: manager }, ...rows] : rows;
+    await api(`/agreements/${a.id}/signers`, { method: 'PUT', body: { signers } });
+    toast(`${rows.length} member${rows.length === 1 ? '' : 's'} saved`);
+  }, 'Save members');
+
+  dlg.classList.add('wide');
+  const body = $('#partyRows', dlg);
+  const recalc = () => {
+    const rows = [...body.querySelectorAll('.party-row')];
+    const capital = rows.reduce((s, tr) =>
+      s + (Number(tr.querySelector('.party-contribution').value.replace(/,/g, '')) || 0), 0);
+    const pct = rows.reduce((s, tr) => s + (Number(tr.querySelector('.party-pct').value) || 0), 0);
+    $('#partyCapital', dlg).textContent = capital ? fmtExact(capital) : '—';
+    $('#partyPct', dlg).textContent = pct ? `${Number(pct.toFixed(4))}%` : '—';
+    $('#partyWarn', dlg).textContent = pct && Math.abs(pct - 100) > 0.0001
+      ? `Interests total ${Number(pct.toFixed(4))}%, not 100%.` : '';
+  };
+  const wire = (tr) => {
+    tr.querySelector('.party-del').addEventListener('click', () => { tr.remove(); recalc(); });
+    tr.querySelector('.party-contribution').addEventListener('input', recalc);
+    tr.querySelector('.party-pct').addEventListener('input', recalc);
+    tr.querySelector('.party-investor').addEventListener('change', (e) => {
+      const nameEl = tr.querySelector('.party-name');
+      if (!nameEl.value) nameEl.value = e.target.selectedOptions[0]?.value
+        ? e.target.selectedOptions[0].textContent.trim() : '';
+      recalc();
+    });
+  };
+  [...body.querySelectorAll('.party-row')].forEach(wire);
+  $('#partyAdd', dlg).addEventListener('click', () => {
+    body.insertAdjacentHTML('beforeend', rowHtml());
+    wire(body.lastElementChild);
+    recalc();
+  });
+  recalc();
+  return dlg;
+}
+
+function openIssueDialog(a) {
+  const members = a.signers.filter((s) => s.role !== 'Manager');
+  openDialog('Send for signature', `
+    <p style="margin-top:0">This freezes the text. ${members.length
+      ? `${members.length} member${members.length === 1 ? '' : 's'} will find it in their portal:`
+      : 'No members have been added yet.'}</p>
+    ${members.length ? `<ul class="dlg-list">${members.map((s) =>
+      `<li>${esc(s.name)}${s.investor_id ? '' : ' <span class="muted">— no portal account, '
+        + 'so they will need a copy sent to them</span>'}</li>`).join('')}</ul>` : ''}
+    <span class="muted" style="font-size:12.5px">
+      From this point the wording cannot be edited. If something needs to change you can recall
+      it, which clears any signatures already given — a member should never be bound to words
+      that moved after they read them.</span>
+  `, async () => {
+    const res = await api(`/agreements/${a.id}/issue`, { method: 'POST' });
+    toast(`Sent to ${res.sent_to} member${res.sent_to === 1 ? '' : 's'}`);
+  }, 'Send it');
+}
+
+function openSignDialog(a) {
+  const me = a.me || a.signers.find((s) => s.role === 'Manager');
+  openDialog('Sign this agreement', `
+    <p style="margin-top:0">You are signing as <strong>${esc(me?.name || '')}</strong>${
+      me?.pct != null ? `, holding ${fmtPct(me.pct)}` : ''}${
+      me?.contribution != null ? ` for a contribution of ${fmtExact(me.contribution)}` : ''}.</p>
+    ${inputField('Type your full name', 'signed_name', '', 'text',
+      `required autocomplete=off placeholder="${esc(me?.name || '')}"`)}
+    <label class="dlg-check">
+      <input type="checkbox" name="agreed" value="yes" required>
+      <span>I have read this operating agreement in full and I intend this to be my signature.
+        I agree to sign electronically.</span>
+    </label>
+    <span class="muted" style="font-size:12px">
+      PolicyHub will record the moment you sign, the address you signed from, and a fingerprint
+      of the exact text — ${esc(String(a.body_hash || '').slice(0, 16))} — so the document you
+      signed can be told apart from any other version later.</span>
+  `, async (v) => {
+    await api(`/agreements/${a.id}/sign`, { method: 'POST', body: {
+      signed_name: v.signed_name, agreed: v.agreed === 'yes', body_hash: a.body_hash } });
+    toast('Signed');
+  }, 'Sign');
+}
+
+function openDeclineDialog(a) {
+  openDialog('Not signing', `
+    <p style="margin-top:0">This tells the manager you are not signing. It does not delete
+      anything, and you can still sign later if the position changes.</p>
+    <div class="field"><label>Anything you want them to know</label>
+      <textarea name="note" rows="3" placeholder="Optional"></textarea></div>
+  `, async (v) => {
+    await api(`/agreements/${a.id}/decline`, { method: 'POST', body: { note: v.note } });
+    toast('The manager has been told');
+  }, 'Send');
+}
+
+function openRecallDialog(a) {
+  const signed = a.signers.filter((s) => s.signed_at).length;
+  openDialog('Recall to draft', `
+    <p style="margin-top:0">This puts the agreement back into draft so the details can change.</p>
+    ${signed ? `<div class="error-box">${signed} signature${signed === 1 ? '' : 's'} will be
+      cleared. Anyone who has already signed will have to read it again and sign the new
+      version.</div>` : ''}
+  `, async () => {
+    const res = await api(`/agreements/${a.id}/recall`, { method: 'POST' });
+    toast(res.cleared ? `Back to draft · ${res.cleared} signature(s) cleared` : 'Back to draft');
+  }, 'Recall it');
+}
+
+function openVoidDialog(a) {
+  openDialog('Void this agreement', `
+    <p style="margin-top:0">A voided agreement stays on the record with its signatures intact —
+      it is simply marked as no longer in force. Use this rather than deleting when something
+      has actually been signed.</p>
+    ${inputField('Why', 'reason', '', 'text', 'required placeholder="Superseded by the 2027 restatement"')}
+  `, async (v) => {
+    await api(`/agreements/${a.id}/void`, { method: 'POST', body: { reason: v.reason } });
+    toast('Voided');
+  }, 'Void it');
+}
+
 /* ------------------------------ render ------------------------------- */
 
 const VIEWS = {
@@ -4368,6 +5115,8 @@ const VIEWS = {
   investor: investorView,
   reports: () => reportsView(api, state),
   import: importView,
+  agreements: agreementsView,
+  agreement: agreementView,
   settings: settingsView,
 };
 
@@ -4384,6 +5133,7 @@ async function render() {
   app.innerHTML = shell('<div class="empty"><span class="spin"></span></div>');
   wireShell();
   refreshOppCount();
+  refreshAgreementCount();
 
   try {
     const out = await view();

@@ -953,3 +953,99 @@ dialog.wide { width: 760px; }
   .prem-tools { align-items: stretch; }
   .prem-fill { flex-wrap: wrap; }
 }
+
+/* A link that leaves the application. Underlined and coloured, because the
+   one thing a reader needs to know before clicking is that it goes somewhere
+   else — every other link here navigates within the page. */
+.ext-link {
+  color: var(--focus);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 500;
+}
+.ext-link:hover { text-decoration-thickness: 2px; }
+:root[data-theme="dark"] .ext-link { color: #7fa9f0; }
+
+/* ---------------------------------------------------------------------
+   An agreement, on screen.
+
+   Set to look like the document it is rather than like the rest of the
+   application: a serif face, a measure of about 90 characters, and real
+   space between the clauses. Somebody is about to sign this, so it has
+   to invite reading rather than skimming.
+   ------------------------------------------------------------------- */
+.doc-sheet {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 14.5px;
+  line-height: 1.62;
+  color: var(--text-primary);
+  max-width: 46em;
+  margin: 0 auto;
+  padding: 8px 4px 24px;
+}
+.doc-title {
+  font-family: var(--font);
+  font-size: 19px; font-weight: 650; letter-spacing: 0.01em;
+  text-align: center; margin: 4px 0 2px;
+}
+.doc-subtitle { text-align: center; font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
+.doc-subtitle.left { text-align: left; }
+.doc-h {
+  font-family: var(--font);
+  font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 26px 0 8px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--grid);
+}
+.doc-sub { font-family: var(--font); font-size: 14px; font-weight: 620; margin: 18px 0 5px; }
+.doc-p { margin: 0 0 11px; }
+.doc-bullet { margin: 0 0 8px 26px; position: relative; }
+.doc-bullet::before { content: '•'; position: absolute; left: -16px; }
+.doc-num { margin: 0 0 9px 34px; position: relative; }
+.doc-num > span { position: absolute; left: -22px; }
+.doc-table {
+  width: 100%; border-collapse: collapse; margin: 10px 0 16px;
+  font-family: var(--font); font-size: 13px;
+}
+.doc-table th {
+  text-align: left; font-weight: 620; padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--text-primary);
+}
+.doc-table td { padding: 5px 10px 5px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
+.doc-table tr.doc-total td { font-weight: 650; border-bottom: none; border-top: 1px solid var(--text-primary); }
+
+.doc-sig { margin: 26px 0 18px; max-width: 24em; }
+/* The typed name sits above the rule, where a pen would put it. */
+.doc-sig-mark {
+  font-family: 'Segoe Script', 'Snell Roundhand', cursive, Georgia, serif;
+  font-size: 20px; min-height: 26px; padding-left: 6px; color: var(--text-primary);
+}
+.doc-sig-rule { border-bottom: 1px solid var(--text-primary); }
+.doc-sig-name { font-family: var(--font); font-size: 12.5px; margin-top: 5px; }
+.doc-sig-note { font-family: var(--font); font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.doc-break { border-top: 1px dashed var(--grid); margin: 30px 0 22px; }
+
+.dlg-list { margin: 6px 0 14px 20px; font-size: 13.5px; line-height: 1.7; }
+.dlg-check { display: flex; gap: 9px; align-items: flex-start; margin: 12px 0 14px; font-size: 13px; }
+.dlg-check input { margin-top: 3px; }
+
+.party-row input, .party-row select { width: 100%; }
+
+@media print {
+  .doc-sheet { max-width: none; font-size: 11pt; }
+  .doc-break { page-break-after: always; border: none; margin: 0; }
+}
+
+/* A control that lives in a page heading rather than in a toolbar — the
+   entity picker on the dashboard. Sized to sit level with the buttons
+   beside it, and quiet enough not to compete with the heading. */
+.head-select {
+  height: 32px;
+  padding: 0 26px 0 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  max-width: 260px;
+}
+.head-select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
