@@ -835,7 +835,11 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
    never by decoration.
    -------------------------------------------------------------------- */
 
+/* A badged tab is emphasised — but only when you are not standing on it.
+   The active tab is already an inverted pill, and colouring its label
+   "text primary" paints black on black. */
 .nav a.has-badge { color: var(--text-primary); font-weight: 600; }
+.nav a.active.has-badge { color: var(--accent-ink); }
 .nav-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 17px; height: 17px; margin-left: 6px; padding: 0 5px;
@@ -1049,3 +1053,47 @@ dialog.wide { width: 760px; }
   max-width: 260px;
 }
 .head-select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* -------------------------- registration ----------------------------- */
+/* The register form is longer than anything else a signed-out visitor
+   sees, so it gets a page of its own rather than the login card's narrow
+   column — a Social Security number and a home address asked for in a
+   400px box read as a pop-up, and a pop-up asking for those is exactly
+   what people are told to distrust. */
+.login-alt {
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: baseline; font-size: 13px;
+  color: var(--text-secondary);
+}
+.login-alt a { font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+
+.reg-wrap { max-width: 620px; margin: 0 auto; padding: 44px 20px 60px; }
+.reg-head { margin-bottom: 24px; }
+.reg-head h1 {
+  font-size: 30px; font-weight: 700; letter-spacing: -0.03em; margin: 20px 0 8px;
+}
+.reg-head p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+.reg-wrap .card-body { padding: 26px 28px 24px; }
+.reg-wrap .dlg-section:first-child { margin-top: 0; }
+.reg-foot {
+  margin-top: 20px; text-align: center; font-size: 11.5px; line-height: 1.6;
+  color: var(--text-muted);
+}
+
+/* An application waiting on somebody. Given the same emphasis as an
+   overdue premium, because a person who has registered and heard nothing
+   is a worse problem than a tidy queue. */
+.app-row { display: flex; gap: 14px; align-items: flex-start; padding: 13px 18px;
+           border-bottom: 1px solid var(--grid); }
+.app-row:last-child { border-bottom: 0; }
+.app-row .who { min-width: 0; flex: 1; }
+.app-row .who .name { font-weight: 600; font-size: 13.5px; }
+.app-row .who .meta { color: var(--text-secondary); font-size: 12.5px; margin-top: 3px;
+                      line-height: 1.55; }
+.app-row .acts { display: flex; gap: 7px; white-space: nowrap; align-items: center; }
+.app-tax { font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em; }
+
+/* A card whose contents are somebody waiting on us. One quiet edge, the
+   same language the critical servicing alerts use, so it reads as work
+   rather than as decoration. */
+.card-attention { border-left: 3px solid var(--warning); }

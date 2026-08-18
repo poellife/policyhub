@@ -36,6 +36,7 @@ around $5–10/month. Pro is $20/month if you later want team seats.
    | Name | Value |
    |---|---|
    | `SESSION_SECRET` | a long random string — see "Generating a secret" below |
+   | `TAXID_KEY` | a second, different random string — encrypts investors' tax numbers |
    | `ADMIN_EMAIL` | `JP@poelcapital.com` |
    | `ADMIN_PASSWORD` | a strong password, at least 10 characters |
    | `ADMIN_NAME` | `Jonathan Polter` |
@@ -77,6 +78,13 @@ will read most of this configuration automatically.
 ---
 
 ## Generating a secret
+
+`TAXID_KEY` encrypts the Social Security and tax ID numbers investors type into the
+registration form. Generate it the same way as `SESSION_SECRET` but make it a *different*
+value: keeping the two apart means you can rotate the cookie key — after a laptop is lost,
+say — without making every stored tax number unreadable. If you leave it unset the app
+derives a key from `SESSION_SECRET` and keeps working, but the two are then joined at the
+hip. Whichever key encrypted a number is recorded next to it, so nothing is guessed later.
 
 `SESSION_SECRET` signs the login cookie. It should be long and random — if someone
 learns it they can forge a session. Any of these produce a good one:

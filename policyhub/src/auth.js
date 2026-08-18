@@ -340,6 +340,16 @@ export async function changePassword(req, res) {
   res.json({ ok: true });
 }
 
+/**
+ * The one place a password becomes a hash.
+ *
+ * Exported so that registration — which creates no account and so cannot
+ * go through createUser — still hashes at exactly the same cost. A second
+ * call site with its own cost factor is how one half of a system quietly
+ * ends up weaker than the other.
+ */
+export const hashPassword = (plain) => bcrypt.hash(String(plain), 12);
+
 export async function createUser(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');

@@ -715,3 +715,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agreement_signer_once
   ON agreement_signers (agreement_id, investor_id) WHERE investor_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_agreement_signers_investor
   ON agreement_signers (investor_id);
+
+-- ---------------------------------------------------------------------
+--  Investor registration
+--
+--  An investor fills in their own details and chooses their own password;
+--  nobody here ever sees that password, because it is hashed in the same
+--  request that receives it and only the hash is stored. The application
+--  sits here until somebody approves it, at which point the investor
+--  record and the login are created from it in one transaction.
+--
+--  The tax number is encrypted (see src/secret-field.js). Only the last
+--  four digits are held in the clear, which is what every screen shows
+--  and what a person actually uses to tell two records apart.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investor_applications (
+  id             SERIAL PRIMARY KEY,
+  status         TEXT NOT NULL DEFAULT 'Pending',   -- Pending | Approved | Declined
+  full_name      TEXT NOT NULL,
+  entity_name    TEXT NOT NULL DEFAULT '',
+  investor_type  TEXT NOT NULL DEFAULT 'Individual',
+  email          TEXT NOT NULL,
+  phone          TEXT NOT NULL DEFAULT '',
+  address_line1  TEXT NOT NULL DEFAULT '',
+  address_line2  TEXT NOT NULL DEFAULT '',
+  city           TEXT NOT NULL DEFAULT '',
+  state          TEXT NOT NULL DEFAULT '',
+  postal_code    TEXT NOT NULL DEFAULT '',
+  country        TEXT NOT NULL DEFAULT 'United States',
+  tax_id_enc     TEXT,
+  tax_id_last4   TEXT NOT NULL DEFAULT '',
+  tax_id_key     TEXT NOT NULL DEFAULT '',
+  password_hash  TEXT NOT NULL,
+  note           TEXT NOT NULL DEFAULT '',          -- what the applicant told us
+  submitted_ip   TEXT NOT NULL DEFAULT '',
+  submitted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at     TIMESTAMPTZ,
+  decided_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decision_note  TEXT NOT NULL DEFAULT '',
+  investor_id    INTEGER REFERENCES investors(id) ON DELETE SET NULL,
+  user_id        INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+-- One live application per mailbox. A declined one does not block a fresh
+-- attempt, because circumstances change and re-applying is the normal path.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_application_pending_email
+  ON investor_applications (lower(email)) WHERE status = 'Pending';
+CREATE INDEX IF NOT EXISTS idx_applications_status
+  ON investor_applications (status, submitted_at DESC);
+
+-- The same details, on the investor record they become.
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS address_line1 TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS address_line2 TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS city          TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS state         TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS postal_code   TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS country       TEXT NOT NULL DEFAULT '';
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS tax_id_enc    TEXT;
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS tax_id_key    TEXT NOT NULL DEFAULT '';

@@ -14,6 +14,11 @@ services:
       # in production without it, because anyone holding it could mint an admin.
       - key: SESSION_SECRET
         generateValue: true
+      # Encrypts the tax numbers investors give when they register. Kept
+      # separate from SESSION_SECRET so the cookie key can be rotated
+      # without making every stored tax number unreadable.
+      - key: TAXID_KEY
+        generateValue: true
       - key: NODE_ENV
         value: production
       # Seeds the very first admin on an empty database, then ignored.

@@ -44,6 +44,7 @@ const state = {
   funds: [],
   oppCount: 0,        // drives the badge in the menu
   dashFund: '',       // which owner entity the dashboard is narrowed to
+  showDecided: false, // whether the registration queue shows decided ones too
 };
 
 /**
@@ -78,6 +79,22 @@ async function refreshAgreementCount() {
     link.querySelector('.nav-badge')?.remove();
     link.classList.toggle('has-badge', next > 0);
     if (next > 0) link.insertAdjacentHTML('beforeend', `<span class="nav-badge">${next}</span>`);
+  } catch { /* same */ }
+}
+
+/* And on the other side of the same idea: somebody who has registered and
+   is waiting to hear back. The badge sits on Investors, which is where the
+   decision gets made. */
+async function refreshApplicationCount() {
+  if (isInvestorUser()) return;
+  try {
+    const { pending } = await api('/applications/summary');
+    const link = document.querySelector('.nav a[href="#/investors"]');
+    if (!link) return;
+    link.querySelector('.nav-badge')?.remove();
+    link.classList.toggle('has-badge', pending > 0);
+    if (pending > 0)
+      link.insertAdjacentHTML('beforeend', `<span class="nav-badge">${pending}</span>`);
   } catch { /* same */ }
 }
 
@@ -356,6 +373,10 @@ function loginView() {
           </div>
           <button class="primary" type="submit" style="width:100%;margin-top:6px">Sign in</button>
         </form>
+        <div class="login-alt">
+          <span>New investor?</span>
+          <a href="#/register" id="registerLink">Register for access</a>
+        </div>
         <div class="login-meta">
           <span>Index — 001</span><span>Southfield, MI</span>
         </div>
@@ -384,6 +405,161 @@ function wireLogin() {
     }
   });
 }
+
+/* --------------------------- registration ---------------------------- */
+
+/**
+ * The form a prospective investor fills in themselves.
+ *
+ * It asks for everything the firm needs to open a relationship and issue
+ * a K-1, and nothing else. Two things are said plainly on the page rather
+ * than buried: that the account does not work until somebody here approves
+ * it, and what happens to the tax number — because a stranger being asked
+ * for a Social Security number over the internet is entitled to know.
+ */
+const REGISTER_TYPES = ['Individual', 'Joint', 'Entity', 'Trust', 'IRA', 'Other'];
+
+function registerView() {
+  return `
+  <div class="reg-wrap">
+    <div class="reg-head">
+      <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
+      <h1>Register for access</h1>
+      <p>Tell us who you are and choose a password. We will review your details and open your
+        account &mdash; you will not be able to sign in until we have.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div id="regError"></div>
+        <form id="regForm" autocomplete="on">
+
+          <div class="dlg-section">About you</div>
+          <div class="field-row">
+            <div class="field"><label for="rf_name">Full legal name *</label>
+              <input id="rf_name" name="full_name" required autocomplete="name"></div>
+            <div class="field"><label for="rf_type">Investing as</label>
+              <select id="rf_type" name="investor_type">
+                ${REGISTER_TYPES.map((t) => `<option>${t}</option>`).join('')}
+              </select></div>
+          </div>
+          <div class="field"><label for="rf_entity">Entity, trust or IRA name</label>
+            <input id="rf_entity" name="entity_name"
+                   placeholder="Leave blank if you are investing in your own name">
+            <span class="muted" style="font-size:12px">This is the name the position will be
+              held in, and the name on your statements.</span></div>
+
+          <div class="field-row">
+            <div class="field"><label for="rf_email">Email *</label>
+              <input id="rf_email" name="email" type="email" required autocomplete="email"></div>
+            <div class="field"><label for="rf_phone">Phone *</label>
+              <input id="rf_phone" name="phone" required autocomplete="tel"></div>
+          </div>
+
+          <div class="dlg-section">Where you live</div>
+          <div class="field"><label for="rf_a1">Street address *</label>
+            <input id="rf_a1" name="address_line1" required autocomplete="address-line1"></div>
+          <div class="field"><label for="rf_a2">Apartment, suite or unit</label>
+            <input id="rf_a2" name="address_line2" autocomplete="address-line2"></div>
+          <div class="field-row">
+            <div class="field"><label for="rf_city">City *</label>
+              <input id="rf_city" name="city" required autocomplete="address-level2"></div>
+            ${stateField('State *', 'state', '')}
+            <div class="field"><label for="rf_zip">ZIP *</label>
+              <input id="rf_zip" name="postal_code" required autocomplete="postal-code"></div>
+          </div>
+          <div class="field"><label for="rf_country">Country</label>
+            <input id="rf_country" name="country" value="United States" autocomplete="country-name"></div>
+
+          <div class="dlg-section">For tax reporting</div>
+          <div class="field"><label for="rf_tax">Social Security number or Tax ID (EIN) *</label>
+            <input id="rf_tax" name="tax_id" inputmode="numeric" required autocomplete="off"
+                   placeholder="123-45-6789" maxlength="14">
+            <span class="muted" style="font-size:12px">Needed to issue your K&#8209;1. It is
+              encrypted the moment it reaches us, only the last four digits are ever displayed,
+              and every time anyone here looks at the full number it is written to the audit
+              log.</span></div>
+
+          <div class="dlg-section">Your password</div>
+          <div class="field-row">
+            <div class="field"><label for="rf_pw">Choose a password *</label>
+              <input id="rf_pw" name="password" type="password" required minlength="10"
+                     autocomplete="new-password"></div>
+            <div class="field"><label for="rf_pw2">Type it again *</label>
+              <input id="rf_pw2" name="password2" type="password" required minlength="10"
+                     autocomplete="new-password"></div>
+          </div>
+          <span class="muted" style="font-size:12px">At least 10 characters. We never see it
+            &mdash; it is hashed before it is stored, so nobody here can read it or tell it to
+            you if you forget it.</span>
+
+          <div class="field" style="margin-top:16px">
+            <label for="rf_note">Anything you would like us to know</label>
+            <textarea id="rf_note" name="note" rows="3"
+              placeholder="How you heard about us, who introduced you, what you are looking for"></textarea>
+          </div>
+
+          <button class="primary" type="submit" style="width:100%;margin-top:8px">
+            Send for approval</button>
+        </form>
+
+        <div class="login-alt">
+          <span>Already have an account?</span>
+          <a href="#/login" id="backToLogin">Sign in</a>
+        </div>
+      </div>
+    </div>
+
+    <p class="reg-foot">For accredited investors only. Sending this form is not an application
+      to purchase a security and does not create any obligation on either side.</p>
+  </div>`;
+}
+
+function wireRegister() {
+  const form = $('#regForm');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#regForm button[type=submit]');
+    const v = formValues(form);
+    const fail = (msg) => {
+      $('#regError').innerHTML = `<div class="error-box">${esc(msg)}</div>`;
+      $('#regError').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+    // Checked here as well as on the server, because being told the two
+    // passwords differ *after* a round trip is a poor way to find out.
+    if (v.password !== v.password2) return fail('The two passwords do not match.');
+    delete v.password2;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Sending…';
+    try {
+      await api('/register', { method: 'POST', body: v });
+      $('#app').innerHTML = registerDoneView(v.email);
+      $('#regDoneBack')?.addEventListener('click', () => { location.hash = '#/login'; });
+    } catch (err) {
+      fail(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Send for approval';
+    }
+  });
+}
+
+/* The same answer whether or not that mailbox is already known here — the
+   form must not become a way of finding out who our investors are. */
+const registerDoneView = (email) => `
+  <div class="reg-wrap">
+    <div class="card" style="margin-top:60px">
+      <div class="card-body" style="text-align:center;padding:44px 34px">
+        <div class="login-brand" style="justify-content:center"><span class="brand-mark"></span>Poel Capital</div>
+        <h1 style="font-size:26px;margin:18px 0 10px">Thank you.</h1>
+        <p style="color:var(--text-secondary);font-size:14px;line-height:1.65;max-width:430px;margin:0 auto">
+          Your details are with us. Somebody will review them and open your account, and we will
+          be in touch at <strong>${esc(email)}</strong>. Until then your password will not work,
+          which is expected rather than a fault.</p>
+        <button class="primary" id="regDoneBack" style="margin-top:24px">Back to sign in</button>
+      </div>
+    </div>
+  </div>`;
 
 /* ----------------------------- dashboard ----------------------------- */
 
@@ -3573,10 +3749,104 @@ async function insuredsView() {
 
 const INVESTOR_TYPES = ['Individual', 'Entity', 'Trust', 'IRA', 'Other'];
 
+/* ------------------------ registration queue ------------------------- */
+
+const APPLICATION_BADGES = {
+  Pending: 'badge grace', Approved: 'badge inforce', Declined: 'badge lapsed',
+};
+
+/** One registration, with everything needed to decide on it in one line. */
+function applicationRow(a) {
+  const decided = a.status !== 'Pending';
+  const canDecide = ['admin', 'manager'].includes(state.user.role);
+  const isAdmin = state.user.role === 'admin';
+  const address = [a.address_line1, a.address_line2, a.city,
+    [a.state, a.postal_code].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return `
+  <div class="app-row ${decided ? 'row-muted' : ''}">
+    <div class="who">
+      <div class="name">${esc(a.full_name)}
+        ${a.entity_name ? `<span class="muted" style="font-weight:400"> · ${esc(a.entity_name)}</span>` : ''}
+        <span style="margin-left:8px">${
+          `<span class="${APPLICATION_BADGES[a.status] || 'badge'}"><span class="dot"></span>${esc(a.status)}</span>`}</span>
+      </div>
+      <div class="meta">
+        ${esc(a.investor_type)} · ${esc(a.email)} · ${esc(a.phone || 'no phone')}<br>
+        ${esc(address) || '<span class="muted">no address given</span>'}<br>
+        <span class="app-tax" id="tax-${a.id}">${esc(a.tax_id_masked || '—')}</span>
+        ${isAdmin && !decided && a.tax_id_masked
+          ? `<button class="btn-sm" data-reveal-tax="${a.id}" style="margin-left:8px">Show in full</button>` : ''}
+        · registered ${fmtDateTime(a.submitted_at)}
+        ${a.note ? `<br><span style="font-style:italic">&ldquo;${esc(a.note)}&rdquo;</span>` : ''}
+        ${decided ? `<br><span class="muted">${esc(a.status)} ${fmtDateTime(a.decided_at)}${
+          a.decided_by_name ? ` by ${esc(a.decided_by_name)}` : ''}${
+          a.decision_note ? ` · ${esc(a.decision_note)}` : ''}</span>` : ''}
+      </div>
+    </div>
+    <div class="acts">
+      ${!decided && canDecide ? `
+        <button class="btn-sm primary" data-approve-app="${a.id}">Approve</button>
+        <button class="btn-sm" data-decline-app="${a.id}">Decline</button>` : ''}
+      ${a.investor_id ? `<a class="btn-sm" href="#/investor/${a.investor_id}">Open</a>` : ''}
+    </div>
+  </div>`;
+}
+
+function openApproveDialog(a) {
+  if (!a) return;
+  const name = a.entity_name || a.full_name;
+  openDialog(`Approve ${a.full_name}`, `
+    <p style="margin-top:0">This creates an investor record called
+      <strong>${esc(name)}</strong> and a login for <strong>${esc(a.email)}</strong>, using the
+      password they chose. They will be able to sign in immediately.</p>
+    <div class="dlg-section">What gets created</div>
+    <dl class="kv">
+      <dt>Investor</dt><dd>${esc(name)} <span class="muted">${esc(a.investor_type)}</span></dd>
+      <dt>Contact</dt><dd>${esc(a.full_name)} · ${esc(a.phone || '—')}</dd>
+      <dt>Address</dt><dd>${esc([a.address_line1, a.address_line2, a.city,
+        [a.state, a.postal_code].filter(Boolean).join(' '), a.country]
+        .filter(Boolean).join(', '))}</dd>
+      <dt>Tax ID</dt><dd class="app-tax">${esc(a.tax_id_masked || '—')}</dd>
+    </dl>
+    ${inputField('Note (optional)', 'note', '', 'text',
+      'placeholder="Anything worth recording about the decision"')}
+    <span class="muted" style="font-size:12px">They hold nothing yet. Allocate them to policies
+      from the policy itself, or share an opportunity with them.</span>
+  `, async (v) => {
+    const r = await api(`/applications/${a.id}/approve`, { method: 'POST', body: v });
+    toast(`${r.name} can now sign in`);
+    refreshApplicationCount();
+  }, 'Approve and create the account');
+}
+
+function openDeclineApplicationDialog(a) {
+  if (!a) return;
+  openDialog(`Decline ${a.full_name}`, `
+    <p style="margin-top:0">No account is created and they cannot sign in. The registration
+      stays on the record, so there is an answer to "did anyone ever get back to them".</p>
+    ${inputField('Why', 'note', '', 'text',
+      'placeholder="Not accredited · duplicate of an existing account · no longer interested"')}
+    <span class="muted" style="font-size:12px">The password they chose is discarded. If they
+      register again later it is a fresh application.</span>
+  `, async (v) => {
+    await api(`/applications/${a.id}/decline`, { method: 'POST', body: v });
+    toast('Declined');
+    refreshApplicationCount();
+  }, 'Decline');
+}
+
 async function investorsView() {
-  const rows = await api(`/investors?search=${encodeURIComponent(state.investorSearch)}`);
+  const [rows, applications] = await Promise.all([
+    api(`/investors?search=${encodeURIComponent(state.investorSearch)}`),
+    // A registration nobody has looked at is somebody sitting on the other
+    // end waiting, so it is fetched with the list rather than hidden behind
+    // a tab. Viewers cannot see the queue and the call simply returns none.
+    api(`/applications${state.showDecided ? '' : '?status=Pending'}`).catch(() => []),
+  ]);
   state.investors = rows;
   const canEditNow = canEditData();
+  const canDecide = ['admin', 'manager'].includes(state.user.role);
+  const pending = applications.filter((a) => a.status === 'Pending');
 
   const totals = rows.reduce((a, r) => ({
     db: a.db + Number(r.death_benefit || 0),
@@ -3591,6 +3861,26 @@ async function investorsView() {
       <div class="spacer"></div>
       ${canEditNow ? '<button class="primary" id="newInvestorBtn">New investor</button>' : ''}
     </div>
+
+    ${applications.length ? `
+    <div class="card ${pending.length ? 'card-attention' : ''}">
+      <div class="card-head"><h2>Waiting for approval</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${pending.length
+          ? `${pending.length} ${pending.length === 1 ? 'person has' : 'people have'} registered`
+          : 'nothing outstanding'}</span>
+        <button class="btn-sm" id="appShowAll" style="margin-left:12px">${
+          state.showDecided ? 'Hide decided' : 'Show decided'}</button></div>
+      <div class="card-body flush">
+        ${applications.length === 0
+          ? '<div class="empty">No registrations waiting.</div>'
+          : applications.map(applicationRow).join('')}
+      </div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px">Approving creates the investor record and
+          the login from what they typed, with the password they chose — there is nothing to
+          send them. Nobody can sign in until somebody here approves them.</span>
+      </div>
+    </div>` : ''}
 
     <div class="toolbar">
       <input class="grow" id="investorSearch" placeholder="Search by name or email…" value="${esc(state.investorSearch)}">
@@ -3636,6 +3926,25 @@ async function investorsView() {
         timer = setTimeout(() => { state.investorSearch = e.target.value; render(); }, 250);
       });
       $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
+      $('#appShowAll')?.addEventListener('click', () => {
+        state.showDecided = !state.showDecided; render();
+      });
+      document.querySelectorAll('[data-approve-app]').forEach((b) =>
+        b.addEventListener('click', () => openApproveDialog(
+          applications.find((a) => a.id === Number(b.dataset.approveApp)))));
+      document.querySelectorAll('[data-decline-app]').forEach((b) =>
+        b.addEventListener('click', () => openDeclineApplicationDialog(
+          applications.find((a) => a.id === Number(b.dataset.declineApp)))));
+      document.querySelectorAll('[data-reveal-tax]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const cell = $(`#tax-${b.dataset.revealTax}`);
+          b.disabled = true;
+          try {
+            const r = await api(`/applications/${b.dataset.revealTax}/tax-id`);
+            cell.textContent = r.tax_id.replace(/^(\d{3})(\d{2})(\d{4})$/, '$1-$2-$3');
+            b.remove();
+          } catch (err) { alert(err.message); b.disabled = false; }
+        }));
       document.querySelectorAll('[data-edit-investor]').forEach((b) =>
         b.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -5124,6 +5433,16 @@ async function render() {
   const app = $('#app');
 
   if (!state.user) {
+    /* Signed out, there are exactly two things a person can be doing:
+       signing in, or asking for an account. The register form is a
+       separate screen rather than a panel on the login card, because it
+       is long and because somebody filling it in is not half-way through
+       signing in. */
+    if (state.route === 'register') {
+      app.innerHTML = registerView();
+      wireRegister();
+      return;
+    }
     app.innerHTML = loginView();
     wireLogin();
     return;
@@ -5134,6 +5453,7 @@ async function render() {
   wireShell();
   refreshOppCount();
   refreshAgreementCount();
+  refreshApplicationCount();
 
   try {
     const out = await view();

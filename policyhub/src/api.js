@@ -12,7 +12,11 @@ import { renderAgreement, canonicalText, AGREEMENT_FIELDS } from '../public/agre
 import { agreementPdf } from './agreement-pdf.js';
 import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
-         createUser, updateUser, deleteUser, resetPassword, clearToken } from './auth.js';
+         createUser, updateUser, deleteUser, resetPassword, clearToken,
+         hashPassword } from './auth.js';
+// A tax number is the one field here that is encrypted rather than merely
+// scoped: see the file for why, and for how the key is chosen.
+import { sealField, openField, digitsOf, maskTaxId } from './secret-field.js';
 
 const router = express.Router();
 const canEdit = requireRole('admin', 'editor', 'manager');
@@ -221,6 +225,131 @@ const TXN_FIELDS = { txn_date: date, txn_type: str, amount: num, remarks: str };
 /* ------------------------------------------------------------------ *
  * auth
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * investor registration
+ *
+ * The one route in this API that anybody on the internet can reach, so
+ * it is written as if that is the case:
+ *
+ *   - it is throttled per address, on the same counter the sign-in form
+ *     uses, so it cannot be used to grind or to flood the queue;
+ *   - it answers the same way whether or not the mailbox is already
+ *     known, because "that email already has an account" tells a
+ *     stranger who our investors are;
+ *   - it stores a hash of the chosen password and never the password;
+ *   - the tax number is encrypted on the way in, and only its last four
+ *     digits are readable afterwards without a deliberate, audited
+ *     request by an administrator;
+ *   - it creates nothing. No investor, no login, no access. All it does
+ *     is put a form in front of somebody here.
+ * ------------------------------------------------------------------ */
+
+const INVESTOR_TYPES = ['Individual', 'Joint', 'Entity', 'Trust', 'IRA', 'Other'];
+const APPLICATION_STATUSES = ['Pending', 'Approved', 'Declined'];
+
+/** A tax number is nine digits, whether it is an SSN or an EIN. */
+const looksLikeTaxId = (digits) => digits.length === 9;
+
+router.post('/register', wrap(async (req, res) => {
+  const ip = req.ip || 'unknown';
+  if (await tooManyRegistrations(ip))
+    return res.status(429).json({
+      error: 'Too many registrations from this connection. Try again in a little while.' });
+
+  const b = req.body || {};
+  const email = str(b.email).toLowerCase();
+  const password = String(b.password || '');
+  const fullName = str(b.full_name);
+  const problems = [];
+
+  if (!fullName) problems.push('your name');
+  if (!/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(email)) problems.push('a valid email address');
+  if (password.length < 10) problems.push('a password of at least 10 characters');
+  if (!str(b.phone)) problems.push('a phone number');
+  if (!str(b.address_line1) || !str(b.city) || !str(b.state) || !str(b.postal_code))
+    problems.push('your full home address');
+
+  const taxDigits = digitsOf(b.tax_id);
+  if (!taxDigits) problems.push('your Social Security number or tax ID');
+  else if (!looksLikeTaxId(taxDigits))
+    problems.push('a nine-digit Social Security number or tax ID');
+
+  if (problems.length)
+    return res.status(400).json({ error: `Please give ${problems.join(', ')}.` });
+
+  let sealed;
+  try {
+    sealed = sealField(taxDigits);
+  } catch (e) {
+    /* The key is missing or malformed. Storing the number in the clear
+       instead would be the worst possible response, so the form fails and
+       says so plainly rather than quietly downgrading. */
+    console.error('[register] tax id could not be encrypted:', e.message);
+    return res.status(503).json({
+      error: 'Registrations are temporarily unavailable. Please call the office.' });
+  }
+
+  const hash = await hashPassword(password);
+  const type = INVESTOR_TYPES.includes(str(b.investor_type)) ? str(b.investor_type) : 'Individual';
+
+  /* An address that already has a login here is dropped on the floor. The
+     sender is told nothing — the answer below is the same one everybody
+     gets — because "that email already has an account" is precisely the
+     fact a stranger would be fishing for. It also keeps the queue clean:
+     an application nobody could ever approve is not work, it is noise. */
+  const { rows: existing } = await q(
+    'SELECT 1 FROM users WHERE lower(email) = lower($1)', [email]);
+  if (existing.length) {
+    await noteRegistration(ip);
+    return res.status(202).json({ ok: true });
+  }
+
+  try {
+    const { rows } = await q(
+      `INSERT INTO investor_applications
+         (full_name, entity_name, investor_type, email, phone,
+          address_line1, address_line2, city, state, postal_code, country,
+          tax_id_enc, tax_id_last4, tax_id_key, password_hash, note, submitted_ip)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       RETURNING id`,
+      [fullName, str(b.entity_name), type, email, str(b.phone),
+       str(b.address_line1), str(b.address_line2), str(b.city), str(b.state),
+       str(b.postal_code), str(b.country) || 'United States',
+       sealed.ciphertext, taxDigits.slice(-4), sealed.keyId, hash,
+       str(b.note).slice(0, 1000), String(ip).slice(0, 64)]
+    );
+    await audit(null, 'application', rows[0].id, 'create', `${fullName} · ${email}`);
+  } catch (e) {
+    /* A second application from the same mailbox, or an account that
+       already exists. Neither is told to the sender: an error that
+       distinguishes "already registered" from "not registered" turns this
+       form into a way of testing whether somebody is a client of ours. */
+    if (e.code !== '23505') throw e;
+  }
+
+  await noteRegistration(ip);
+  res.status(202).json({ ok: true });
+}));
+
+/* The same per-address counter the sign-in throttle uses, under its own
+   label so a burst of registrations cannot lock anybody out of signing in.
+   The cap is set to stop an automated firehose rather than to ration
+   honest use: an adviser registering half a dozen clients from one office
+   in an afternoon, or a couple filing separately from the same house,
+   must not be turned away. */
+const REGISTRATION_WINDOW = '1 hour';
+const REGISTRATIONS_PER_IP = 20;
+
+async function tooManyRegistrations(ip) {
+  const { rows } = await q(
+    `SELECT COUNT(*)::int AS n FROM login_attempts
+      WHERE ident = $1 AND created_at > now() - INTERVAL '${REGISTRATION_WINDOW}'`,
+    [`register:${ip}`]);
+  return (rows[0]?.n || 0) >= REGISTRATIONS_PER_IP;
+}
+const noteRegistration = (ip) =>
+  q('INSERT INTO login_attempts (ident) VALUES ($1)', [`register:${ip}`]);
 
 router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
@@ -3308,6 +3437,193 @@ async function fileExecutedAgreement(a, userId) {
   }
   return firstId;
 }
+
+/* ---------------------- the queue, for the firm --------------------- */
+
+const applicationRow = (a) => ({
+  ...a,
+  tax_id_enc: undefined,
+  tax_id_key: undefined,
+  password_hash: undefined,
+  tax_id_masked: maskTaxId(a.tax_id_last4, a.investor_type),
+});
+
+router.get('/applications', blockInvestors, requireRole('admin', 'manager', 'editor'),
+  wrap(async (req, res) => {
+    const status = APPLICATION_STATUSES.includes(str(req.query.status))
+      ? str(req.query.status) : '';
+    const { rows } = await q(
+      `SELECT a.*, u.full_name AS decided_by_name, i.name AS investor_name
+         FROM investor_applications a
+         LEFT JOIN users u     ON u.id = a.decided_by
+         LEFT JOIN investors i ON i.id = a.investor_id
+        WHERE ($1 = '' OR a.status = $1)
+        ORDER BY (a.status = 'Pending') DESC, a.submitted_at DESC`, [status]);
+    res.json(rows.map(applicationRow));
+  }));
+
+/**
+ * Lift the registration cap for an address that has hit it.
+ *
+ * The cap is deliberately blunt, so somebody legitimate will occasionally
+ * run into it — an adviser onboarding a group, a family filing separately
+ * from one house. When they telephone, this is the answer, rather than
+ * telling them to wait an hour. Administrators only, and on the record.
+ */
+router.delete('/register-throttle', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const ip = str(req.body?.ip);
+    const { rowCount } = await q(
+      `DELETE FROM login_attempts
+        WHERE ident LIKE 'register:%' AND ($1 = '' OR ident = 'register:' || $1)`, [ip]);
+    await audit(req.user.uid, 'user', null, 'update',
+      `cleared the registration limit${ip ? ` for ${ip}` : ' for every address'} · ${rowCount} row(s)`);
+    res.json({ ok: true, cleared: rowCount });
+  }));
+
+/** How many are waiting — for the badge, so the menu can say so. */
+router.get('/applications/summary', blockInvestors, wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT COUNT(*)::int AS pending FROM investor_applications WHERE status = 'Pending'`);
+  res.json({ pending: rows[0].pending });
+}));
+
+/**
+ * The full tax number, once, deliberately, and on the record.
+ *
+ * Administrators only, and every read is written to the audit log with the
+ * name of the person who asked. If somebody ever needs to answer "who has
+ * looked at this investor's Social Security number", the answer is here.
+ */
+router.get('/applications/:id/tax-id', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      'SELECT full_name, email, tax_id_enc FROM investor_applications WHERE id = $1',
+      [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Application not found' });
+    const value = openField(rows[0].tax_id_enc);
+    await audit(req.user.uid, 'application', Number(req.params.id), 'read',
+      `revealed tax id for ${rows[0].full_name}`);
+    if (!value)
+      return res.status(409).json({
+        error: 'That number cannot be decrypted with the current key. It was stored under a '
+          + 'different one — ask the applicant to supply it again.' });
+    res.json({ tax_id: value });
+  }));
+
+/**
+ * Approve.
+ *
+ * Creates the investor record and the login from what the applicant typed,
+ * with the password they chose — they never have to be sent one, and
+ * nobody here ever knows it. All of it in one transaction: an investor
+ * with no login, or a login pointing at no investor, are both worse than
+ * a failure that can be retried.
+ */
+router.post('/applications/:id/approve', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const { rows: found } = await q(
+      'SELECT * FROM investor_applications WHERE id = $1', [req.params.id]);
+    const a = found[0];
+    if (!a) return res.status(404).json({ error: 'Application not found' });
+    if (a.status !== 'Pending')
+      return res.status(409).json({ error: `This application was already ${a.status.toLowerCase()}` });
+
+    const { rows: clash } = await q('SELECT id FROM users WHERE lower(email) = lower($1)', [a.email]);
+    if (clash.length)
+      return res.status(409).json({
+        error: `${a.email} already has a login. Decline this application and use the existing `
+          + 'account, or change the address on the account first.' });
+
+    // The name the money is held in, if they gave one; otherwise their own.
+    const investorName = str(a.entity_name) || str(a.full_name);
+    const client = await pool.connect();
+    let investorId; let userId;
+    try {
+      await client.query('BEGIN');
+      const { rows: inv } = await client.query(
+        `INSERT INTO investors (name, legal_name, investor_type, email, phone,
+                                address_line1, address_line2, city, state, postal_code,
+                                country, tax_id_last4, tax_id_enc, tax_id_key, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+        [investorName, str(a.full_name), a.investor_type, a.email, a.phone,
+         a.address_line1, a.address_line2, a.city, a.state, a.postal_code,
+         a.country, a.tax_id_last4, a.tax_id_enc, a.tax_id_key,
+         `Registered ${String(a.submitted_at).slice(0, 10)}${a.note ? ` · ${a.note}` : ''}`]);
+      investorId = inv[0].id;
+
+      const { rows: usr } = await client.query(
+        `INSERT INTO users (email, password_hash, full_name, role, investor_id)
+         VALUES ($1,$2,$3,'investor',$4) RETURNING id`,
+        [a.email, a.password_hash, a.full_name, investorId]);
+      userId = usr[0].id;
+
+      await client.query(
+        `UPDATE investor_applications
+            SET status = 'Approved', decided_at = now(), decided_by = $1,
+                decision_note = $2, investor_id = $3, user_id = $4,
+                password_hash = 'moved-to-account'
+          WHERE id = $5`,
+        [req.user.uid, str(req.body.note), investorId, userId, req.params.id]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      if (e.code === '23505')
+        return res.status(409).json({
+          error: 'Somebody else approved this application, or that email was taken while this '
+            + 'one was open. Reload the list.' });
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await audit(req.user.uid, 'application', Number(req.params.id), 'update',
+      `approved ${a.full_name} · investor ${investorId} · user ${userId}`);
+    res.json({ ok: true, investor_id: investorId, user_id: userId, name: investorName });
+  }));
+
+/**
+ * Decline. The application is kept — a record of who asked and what was
+ * decided is worth more than a tidy table — but the password hash is
+ * thrown away, because there is no longer any account for it to become.
+ */
+router.post('/applications/:id/decline', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `UPDATE investor_applications
+          SET status = 'Declined', decided_at = now(), decided_by = $1, decision_note = $2,
+              password_hash = 'declined'
+        WHERE id = $3 AND status = 'Pending'
+        RETURNING full_name, email`,
+      [req.user.uid, str(req.body.note), req.params.id]);
+    if (!rows[0])
+      return res.status(409).json({ error: 'That application is no longer pending' });
+    await audit(req.user.uid, 'application', Number(req.params.id), 'update',
+      `declined ${rows[0].full_name}${str(req.body.note) ? ` · ${str(req.body.note)}` : ''}`);
+    res.json({ ok: true });
+  }));
+
+/**
+ * Delete. Administrators only, and the reason to keep it is stated in the
+ * refusal: an approved application is the provenance of a live account.
+ */
+router.delete('/applications/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q(
+    'SELECT status, full_name, investor_id, user_id FROM investor_applications WHERE id = $1',
+    [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Application not found' });
+  /* An approved application is the provenance of a live account, so it
+     stays. Once that account and that investor have both been deleted
+     there is nothing left for it to be the provenance of, and keeping it
+     is not record-keeping — it is litter. */
+  if (rows[0].status === 'Approved' && (rows[0].investor_id || rows[0].user_id))
+    return res.status(409).json({
+      error: 'This application is where a live investor account came from. It stays on the '
+        + 'record; disable the account instead if the relationship has ended.' });
+  await q('DELETE FROM investor_applications WHERE id = $1', [req.params.id]);
+  await audit(req.user.uid, 'application', Number(req.params.id), 'delete', rows[0].full_name);
+  res.json({ ok: true });
+}));
 
 /* ------------------------------------------------------------------ *
  * audit trail
