@@ -504,16 +504,49 @@ router.param('linkId', serialParam);
 router.get('/funds', blockInvestors, wrap(async (req, res) => {
   const funds = fundScope(req);
   const { rows } = await q(
+    /* Average insured age, per owner entity.
+       Counted over distinct lives rather than over policies: an entity
+       holding two contracts on the same person has one life in its book,
+       not two, and averaging per policy would quietly double-weight them.
+       Every life the entity is exposed to is included — the second life on
+       a survivorship contract as much as the primary — because that is
+       what the entity's mortality actually depends on. Lives with no date
+       of birth are left out of the mean rather than counted as zero, and
+       the count of lives is returned beside it so the reader can see how
+       much the figure is standing on. */
     `SELECT f.*,
             COUNT(p.id)::int AS policy_count,
             COALESCE(SUM(COALESCE(pl.death_benefit, p.face_amount)), 0) AS total_death_benefit,
-            COALESCE(SUM(pl.total_invested), 0) AS total_invested
+            COALESCE(SUM(pl.total_invested), 0) AS total_invested,
+            lives.n            AS lives_count,
+            lives.dated        AS lives_with_dob,
+            lives.avg_age      AS avg_insured_age
        FROM funds f
        LEFT JOIN policies p ON p.fund_id = f.id
                            AND p.status NOT IN ('Lapsed','Sold','Matured')
        LEFT JOIN policy_latest pl ON pl.id = p.id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int                                            AS n,
+                COUNT(i.dob)::int                                        AS dated,
+                ROUND(AVG(EXTRACT(YEAR FROM age(CURRENT_DATE, i.dob)))::numeric, 1)
+                                                                         AS avg_age
+           FROM insureds i
+          WHERE i.id IN (
+            SELECT pol.insured_id
+              FROM policies pol
+             WHERE pol.fund_id = f.id
+               AND pol.status NOT IN ('Lapsed','Sold','Matured')
+               AND pol.insured_id IS NOT NULL
+            UNION
+            SELECT pi.insured_id
+              FROM policy_insureds pi
+              JOIN policies pol2 ON pol2.id = pi.policy_id
+             WHERE pol2.fund_id = f.id
+               AND pol2.status NOT IN ('Lapsed','Sold','Matured'))
+            AND i.date_of_death IS NULL
+       ) lives ON TRUE
       WHERE ($1::int[] IS NULL OR f.id = ANY($1))
-      GROUP BY f.id
+      GROUP BY f.id, lives.n, lives.dated, lives.avg_age
       ORDER BY f.code`,
     [funds]
   );
@@ -577,14 +610,20 @@ router.get('/insureds', wrap(async (req, res) => {
   const search = str(req.query.search);
   const scope = scopeId(req);
   const funds = fundScope(req);
+  // Narrow to one owner entity, the same way the dashboard does. It joins
+  // through the policies the person is insured under, so a life covered by
+  // two entities appears under either — which is the truth about them.
+  const fund = str(req.query.fund);
   const { rows } = await q(
     `SELECT i.*, COUNT(p.id)::int AS policy_count
        FROM insureds i
        JOIN policies p ON p.insured_id = i.id AND ${visibleTo('p.id', 'p.fund_id', 2, 3)}
+       LEFT JOIN funds f ON f.id = p.fund_id
       WHERE ($1 = '' OR i.first_name ILIKE '%'||$1||'%' OR i.last_name ILIKE '%'||$1||'%'
              OR i.display_name ILIKE '%'||$1||'%')
+        AND ($4 = '' OR f.code = $4)
       GROUP BY i.id ORDER BY i.last_name, i.first_name`,
-    [search, scope, funds]
+    [search, scope, funds, fund]
   );
   res.json(rows);
 }));
@@ -2106,8 +2145,12 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
 router.get('/maturities', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
+  // Same entity filter as the dashboard, applied to the rows, the totals
+  // and the realized return together — a return computed over one book and
+  // shown above totals for another would be worse than no filter at all.
+  const fund = str(req.query.fund);
   const w = `(${shareOf('pl.id', 1)} / 100.0)`;
-  const vis = visibleTo('pl.id', 'pl.fund_id', 1, 2);
+  const vis = `${visibleTo('pl.id', 'pl.fund_id', 1, 2)} AND ($3 = '' OR pl.fund_code = $3)`;
 
   // Death benefit at maturity is the carrier's last reported figure, falling
   // back to the face amount when no snapshot was ever taken.
@@ -2126,7 +2169,7 @@ router.get('/maturities', wrap(async (req, res) => {
          FROM policy_latest pl
         WHERE pl.status = 'Matured' AND ${vis}
         ORDER BY pl.matured_on DESC NULLS LAST, pl.policy_number`,
-      [scope, funds]),
+      [scope, funds, fund]),
     q(`SELECT COUNT(*)::int                                     AS policy_count,
               COUNT(pl.proceeds_amount)::int                    AS paid_count,
               COALESCE(SUM(${benefit} * ${w}), 0)               AS total_death_benefit,
@@ -2136,11 +2179,11 @@ router.get('/maturities', wrap(async (req, res) => {
               COALESCE(SUM(CASE WHEN pl.proceeds_amount IS NULL THEN ${benefit} * ${w} END), 0)
                                                                 AS outstanding_benefit
          FROM policy_latest pl
-        WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds]),
+        WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds, fund]),
   ]);
 
   // Return on each matured policy, and one IRR across all of them together.
-  const { byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true });
+  const { byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true, fund });
   const withReturn = rows.rows.map((r) => {
     const a = analyzeFlows(byPolicy.get(r.id) || []);
     return { ...r, irr: a.irr, irr_days: a.days, irr_short: a.short_period,
@@ -2279,9 +2322,10 @@ router.get('/servicing', wrap(async (req, res) => {
       WHERE r.done_at IS NULL
         AND ($1::int IS NULL OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
         AND ($1::int IS NOT NULL OR r.due_date <= CURRENT_DATE + 45)
+        AND ($3 = '' OR pl.fund_code = $3)
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY r.due_date`,
-    [scope, funds]);
+    [scope, funds, fund]);
   if (!isInvestor(req)) {
     for (const r of steps.rows) {
       const name = r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();

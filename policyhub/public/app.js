@@ -43,7 +43,6 @@ const state = {
   sort: { key: 'insured_last', dir: 1 },
   funds: [],
   oppCount: 0,        // drives the badge in the menu
-  dashFund: '',       // which owner entity the dashboard is narrowed to
   showDecided: false, // whether the registration queue shows decided ones too
 };
 
@@ -97,6 +96,65 @@ async function refreshApplicationCount() {
       link.insertAdjacentHTML('beforeend', `<span class="nav-badge">${pending}</span>`);
   } catch { /* same */ }
 }
+
+/**
+ * The average age of the lives an entity is exposed to.
+ *
+ * Averaged over distinct people rather than over policies, and only over
+ * the ones whose date of birth is on file — an unknown birthday counted
+ * as zero would drag the mean somewhere impossible. When some are
+ * missing the cell says so, because "87.9" over four of nine lives is a
+ * different claim from "87.9" over all nine.
+ */
+function avgAgeCell(f) {
+  const lives = Number(f.lives_count) || 0;
+  const dated = Number(f.lives_with_dob) || 0;
+  if (!f.avg_insured_age)
+    return `<td class="num muted">${lives ? 'no dates of birth' : '—'}</td>`;
+  const partial = dated < lives;
+  return `<td class="num"${partial
+    ? ` title="Averaged over the ${dated} of ${lives} lives with a date of birth on file"` : ''}
+    >${Number(f.avg_insured_age).toFixed(1)}${
+    partial ? ` <span class="muted">(${dated} of ${lives} dated)</span>` : ''}</td>`;
+}
+
+/* ------------------------- the entity filter -------------------------
+ * One selection, shared by every staff screen that offers it: the
+ * dashboard, policies, insureds, servicing and maturities. Choosing LCG1
+ * on the dashboard and then opening Servicing shows LCG1's servicing —
+ * a per-page filter that silently resets is how somebody ends up reading
+ * one entity's totals beside another's alerts.
+ *
+ * Investors never see it. They hold percentages of policies, not
+ * entities, and the entity is not theirs to know about.
+ * ------------------------------------------------------------------- */
+
+const entityFilter = () => (isInvestorUser() ? '' : state.filters.fund || '');
+const entityQuery = () => (entityFilter() ? `fund=${encodeURIComponent(entityFilter())}` : '');
+
+/** The picker itself, for a page heading. Empty for anyone who may not use it. */
+const entityPicker = (funds) => (isInvestorUser() ? '' : `
+  <select id="entityFilter" class="head-select" aria-label="Owner entity">
+    <option value="">All entities</option>
+    ${(funds || []).map((f) => `<option value="${esc(f.code)}" ${
+      entityFilter() === f.code ? 'selected' : ''}>${esc(f.code)}${
+      f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+  </select>`);
+
+/** Wire it up. Call from a view's `after`. */
+const wireEntityPicker = () => {
+  $('#entityFilter')?.addEventListener('change', (e) => {
+    state.filters.fund = e.target.value;
+    render();
+  });
+};
+
+/** Entities, fetched once per session and kept on state. */
+const loadFunds = async () => {
+  if (isInvestorUser()) return [];
+  if (!state.funds.length) state.funds = await api('/funds').catch(() => []);
+  return state.funds;
+};
 
 /* ----------------------------- helpers ------------------------------- */
 
@@ -571,16 +629,12 @@ async function dashboardView() {
      one with no filter at all. Investors do not see it: they hold
      percentages of policies, not entities. */
   const staff = !isInvestorUser();
-  if (!staff) state.dashFund = '';
-  const dashFund = state.dashFund || '';
-  const suffix = dashFund ? `?fund=${encodeURIComponent(dashFund)}` : '';
+  const suffix = entityQuery() ? `?${entityQuery()}` : '';
   const [sum, svc, funds] = await Promise.all([
     api(`/analytics/summary${suffix}`),
     api(`/servicing${suffix}`),
-    staff ? (state.funds.length ? Promise.resolve(state.funds) : api('/funds').catch(() => []))
-      : Promise.resolve([]),
+    loadFunds(),
   ]);
-  if (staff) state.funds = funds;
   const t = sum.totals;
   const critical = svc.alerts.filter((a) => a.severity === 'critical').length;
   const annualPremium = Number(t.monthly_coi) * 12;
@@ -606,12 +660,7 @@ async function dashboardView() {
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
-      ${staff ? `<select id="dashFund" class="head-select" aria-label="Owner entity">
-        <option value="">All entities</option>
-        ${funds.map((f) => `<option value="${esc(f.code)}" ${
-          dashFund === f.code ? 'selected' : ''}>${esc(f.code)}${
-          f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
-      </select>` : ''}
+      ${entityPicker(funds)}
       ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
       <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
     </div>
@@ -708,10 +757,7 @@ async function dashboardView() {
   return {
     html,
     after: () => {
-      $('#dashFund')?.addEventListener('change', (e) => {
-        state.dashFund = e.target.value;
-        render();
-      });
+      wireEntityPicker();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       lineChart($('#chartCapital'), {
@@ -2339,7 +2385,10 @@ function openTxnDialog(p, preset = {}) {
 /* ----------------------------- servicing ----------------------------- */
 
 async function servicingView() {
-  const svc = await api('/servicing');
+  const [svc, funds] = await Promise.all([
+    api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
+    loadFunds(),
+  ]);
   const investor = isInvestorUser();
   // An investor is shown what is still to come. A date that has already
   // passed is a servicing matter — somebody is chasing it — and putting it
@@ -2389,8 +2438,10 @@ async function servicingView() {
           : `${svc.alerts.length} open ${svc.alerts.length === 1 ? 'alert' : 'alerts'} ·
              ${upcoming.length} scheduled premium ${upcoming.length === 1 ? 'payment' : 'payments'}${
              (svc.scheduled || []).length ? ` · ${svc.scheduled.length} follow-up${
-               svc.scheduled.length === 1 ? '' : 's'} outstanding` : ''}`}</div></div>
+               svc.scheduled.length === 1 ? '' : 's'} outstanding` : ''}`}${
+             !investor && entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
       <div class="spacer"></div>
+      ${entityPicker(funds)}
       ${shareToggle()}
     </div>
 
@@ -2459,8 +2510,11 @@ async function servicingView() {
 
   return {
     html,
-    after: () => document.querySelectorAll('tr.clickable').forEach((tr) =>
-      tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`))),
+    after: () => {
+      wireEntityPicker();
+      document.querySelectorAll('tr.clickable').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
+    },
   };
 }
 
@@ -2657,6 +2711,17 @@ async function opportunityView() {
   const canTake = isInvestorUser() && o.status === 'Open'
     && (daysUntil(o.offer_closes_on) === null || daysUntil(o.offer_closes_on) >= 0);
 
+  /* An investor working out whether to take a slice needs the figures at
+     that slice, not at 100% — the whole point of typing 25 is to find out
+     what 25 costs. Money cells carry their full-policy value in
+     `data-full` and are restated the moment the percentage changes, so
+     the schedule, the scenarios and the outlay all move together and
+     none of them can be left describing a different share from the
+     others. Dates, years, multiples and the IRR are not scaled: they do
+     not depend on how much of the policy you own. */
+  const shareCell = (full, cls = '') => `<td class="num ${cls}" data-full="${Number(full) || 0}"
+    >${fmtExact(full)}</td>`;
+
   const scenarioTable = () => {
     if (!a.priced) return `<div class="empty">
       An asking price and death benefit are needed before a return can be worked out.</div>`;
@@ -2675,11 +2740,14 @@ async function opportunityView() {
           <tr><td class="strong">Years held</td>
             ${a.scenarios.map((s) => cell(s, (x) => x.years.toFixed(1))).join('')}</tr>
           <tr><td class="strong">Premiums paid</td>
-            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.premiums_paid))).join('')}</tr>
+            ${a.scenarios.map((s) => shareCell(s.premiums_paid,
+              s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
           <tr><td class="strong">Total invested</td>
-            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.invested))).join('')}</tr>
+            ${a.scenarios.map((s) => shareCell(s.invested,
+              s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
           <tr><td class="strong">Profit</td>
-            ${a.scenarios.map((s) => cell(s, (x) => fmtExact(x.profit))).join('')}</tr>
+            ${a.scenarios.map((s) => shareCell(s.profit,
+              s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
           <tr><td class="strong">Multiple</td>
             ${a.scenarios.map((s) => cell(s, (x) => `${x.multiple.toFixed(2)}×`)).join('')}</tr>
           <tr><td class="strong">IRR</td>
@@ -2741,30 +2809,34 @@ async function opportunityView() {
       ${canTake && myMax > 0 ? `
       <div class="opp-take">
         <div class="field-row">
-          <div class="field" style="margin:0">
+          <div class="field" style="margin:0;max-width:230px">
             <label>Percentage you want</label>
             <input type="number" id="takePct" step="0.01" min="0.01" max="${myMax}"
               value="${mine ? Number(mine.pct) : ''}" placeholder="up to ${fmtPct(myMax)}">
             ${myHeld ? `<span class="muted" style="font-size:12px">
               You hold ${fmtPct(myHeld)}; changing this replaces it.</span>` : ''}
           </div>
-          <div class="field" style="margin:0">
-            <label>Your cost at that share</label>
-            <div id="takeCost" style="font-size:19px;font-weight:600;padding:7px 0">—</div>
-          </div>
-          <div class="field" style="margin:0">
-            <label>Your profit at LE</label>
-            <div id="takeProfit" style="font-size:19px;font-weight:600;padding:7px 0">—</div>
-          </div>
-          <div class="field" style="margin:0">
-            <button class="primary" id="takeBtn" style="width:100%">${
-              mine && mine.status === 'Requested' ? 'Update your request' : 'Request this share'}</button>
+          <div class="take-figures">
+            <div><div class="label">Purchase price</div>
+              <div class="value" id="takeCost">—</div></div>
+            <div><div class="label">Premiums to life expectancy</div>
+              <div class="value" id="takePremiums">—</div></div>
+            <div><div class="label">Total outlay</div>
+              <div class="value strong" id="takeOutlay">—</div></div>
+            <div><div class="label">Profit at life expectancy</div>
+              <div class="value" id="takeProfit">—</div></div>
           </div>
         </div>
-        <div class="muted" style="font-size:12px">
-          A request holds the percentage straight away, so what other investors see as
-          available drops immediately. It becomes an allocation once Poel Capital confirms it.
-          The IRR is not affected by how much you take — a rate has no size.
+        <div class="take-go">
+          <button class="primary" id="takeBtn">${
+            mine && mine.status === 'Requested' ? 'Update your request' : 'Request this share'}</button>
+          <span class="muted" style="font-size:12px">
+            Every figure on this page — the premium schedule, the scenarios and the outlay above
+            — restates at the percentage you type, before you request anything.
+            A request then holds that percentage straight away, so what other investors see as
+            available drops immediately. It becomes an allocation once Poel Capital confirms it.
+            The IRR is not affected by how much you take — a rate has no size.
+          </span>
         </div>
         <div id="takeMsg" style="margin-top:10px"></div>
       </div>` : ''}
@@ -2784,6 +2856,10 @@ async function opportunityView() {
           ? '<button class="btn-sm btn-danger" id="withdrawBtn" style="margin-top:10px">Withdraw my request</button>' : ''}
       </div>` : ''}
     </div>
+
+    ${isInvestorUser() ? `
+    <div class="share-banner" id="shareBanner">
+      Figures below are for the <strong>whole policy</strong>.</div>` : ''}
 
     <div class="card">
       <div class="card-head"><h2>Return if the insured lives to…</h2><div class="spacer"></div>
@@ -2843,8 +2919,8 @@ async function opportunityView() {
           : o.premiums.map((p) => `<tr>
               <td class="strong">${fmtDate(p.due_date)}</td>
               <td class="num">${fmtExact(p.amount)}</td>
-              ${isInvestorUser() ? `<td class="num">${mine
-                ? fmtExact(Number(p.amount) * Number(mine.pct) / 100) : '—'}</td>` : ''}
+              ${isInvestorUser()
+                ? shareCell(p.amount).replace('<td class="num "', '<td class="num strong"') : ''}
               <td class="secondary">${esc(p.notes || '')}</td>
               ${staff && canEditData()
                 ? `<td style="white-space:nowrap">
@@ -2853,7 +2929,9 @@ async function opportunityView() {
             </tr>`).join('')}</tbody>
         ${o.premiums.length ? `<tfoot><tr><td>Total posted</td>
           <td class="num">${fmtExact(o.premiums.reduce((s, p) => s + Number(p.amount), 0))}</td>
-          ${isInvestorUser() ? '<td></td>' : ''}<td></td>${staff && canEditData() ? '<td></td>' : ''}
+          ${isInvestorUser()
+            ? shareCell(o.premiums.reduce((s, p) => s + Number(p.amount), 0)) : ''}
+          <td></td>${staff && canEditData() ? '<td></td>' : ''}
         </tr></tfoot>` : ''}
       </table></div>
     </div>
@@ -2992,6 +3070,29 @@ async function opportunityView() {
           } catch (err) { alert(err.message); }
         }));
 
+      /* Restate the page at whatever percentage is in the box.
+         Every money figure that depends on the size of the position is
+         marked with its full-policy value, so one function moves the
+         schedule, the scenarios and the outlay together — there is no
+         way for one of them to be left showing a different share. */
+      const scaled = document.querySelectorAll('[data-full]');
+      const banner = $('#shareBanner');
+      const applyShare = (pct) => {
+        const factor = pct > 0 ? pct / 100 : 1;
+        scaled.forEach((td) => {
+          td.textContent = fmtExact(Number(td.dataset.full) * factor);
+          td.classList.toggle('at-my-share', pct > 0);
+        });
+        if (banner) {
+          banner.innerHTML = pct > 0
+            ? `Every figure below is <strong>your ${fmtPct(pct)}</strong> of this policy${
+                myHeld && Math.abs(pct - myHeld) < 1e-9 ? ', the share you hold' : ''}.`
+            : 'Figures below are for the <strong>whole policy</strong>. '
+              + 'Enter the percentage you want above and they restate as your share.';
+          banner.classList.toggle('at-share', pct > 0);
+        }
+      };
+
       // Live cost as the investor types a percentage.
       const pctEl = $('#takePct');
       if (pctEl) {
@@ -2999,15 +3100,24 @@ async function opportunityView() {
         const recalc = () => {
           const pct = Number(pctEl.value);
           const ok = pct > 0 && pct <= myMax + 1e-9;
-          $('#takeCost').textContent = ok
-            ? fmtExact(Number(o.asking_price || 0) * pct / 100) : '—';
-          $('#takeProfit').textContent = ok && base ? fmtExact(base.profit * pct / 100) : '—';
+          const at = (v) => (ok ? fmtExact(Number(v || 0) * pct / 100) : '—');
+          $('#takeCost').textContent = at(o.asking_price);
+          $('#takePremiums').textContent = base ? at(base.premiums_paid) : '—';
+          $('#takeOutlay').textContent = base ? at(base.invested) : '—';
+          $('#takeProfit').textContent = base ? at(base.profit) : '—';
+          applyShare(ok ? pct : 0);
           $('#takeMsg').innerHTML = pct > myMax + 1e-9
             ? `<div class="error-box">Only ${fmtPct(myMax)} is available to you${
                 myHeld ? `, including the ${fmtPct(myHeld)} you already hold` : ''}.</div>` : '';
         };
         pctEl.addEventListener('input', recalc);
         recalc();
+      } else if (isInvestorUser()) {
+        // No box to type in — they already hold a confirmed slice, or the
+        // offer has closed. Show the page at whatever they actually have.
+        applyShare(myHeld);
+      }
+      if (pctEl) {
 
         $('#takeBtn').addEventListener('click', async () => {
           const pct = Number(pctEl.value);
@@ -3476,7 +3586,10 @@ async function openFundDialog(o) {
  * *second* death, since a second-to-die contract pays nothing on the first.
  */
 async function maturitiesView() {
-  const m = await api('/maturities');
+  const [m, funds] = await Promise.all([
+    api(`/maturities${entityQuery() ? `?${entityQuery()}` : ''}`),
+    loadFunds(),
+  ]);
   const t = m.totals;
   const rows = m.rows;
   const investorView = isInvestorUser();
@@ -3496,8 +3609,10 @@ async function maturitiesView() {
     <div class="page-head">
       <div><h1>${investorView ? 'Realized' : 'Maturities'}</h1>
         <div class="sub">${rows.length} matured ${rows.length === 1 ? 'policy' : 'policies'} ·
-          ${t.paid_count} paid · ${rows.length - t.paid_count} awaiting payment</div></div>
+          ${t.paid_count} paid · ${rows.length - t.paid_count} awaiting payment${
+          !investorView && entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
       <div class="spacer"></div>
+      ${entityPicker(funds)}
       ${shareToggle()}
       ${rows.length ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
     </div>
@@ -3619,6 +3734,7 @@ async function maturitiesView() {
     html,
     after: () => {
       wireShareToggle();
+      wireEntityPicker();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
@@ -3672,12 +3788,21 @@ function openProceedsDialog(r) {
 /* ----------------------------- insureds ------------------------------ */
 
 async function insuredsView() {
-  const rows = await api(`/insureds?search=${encodeURIComponent(state.insuredSearch)}`);
+  const [rows, funds] = await Promise.all([
+    api(`/insureds?search=${encodeURIComponent(state.insuredSearch)}&${entityQuery()}`),
+    loadFunds(),
+  ]);
+  const dated = rows.filter((i) => i.dob && !i.date_of_death).map((i) => ageFrom(i.dob));
+  const avgAge = dated.length
+    ? Math.round((dated.reduce((a, b) => a + b, 0) / dated.length) * 10) / 10 : null;
   const html = `
     <div class="page-head">
       <div><h1>Insureds</h1>
-        <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div>
+        <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}${
+          entityFilter() ? ` in ${esc(entityFilter())}` : ''}${
+          avgAge ? ` · average age ${avgAge}` : ''}</div></div>
       <div class="spacer"></div>
+      ${entityPicker(funds)}
       <button id="exportInsuredsBtn">Export CSV</button>
       ${canEditData() ? '<button class="primary" id="newInsuredBtn">New insured</button>' : ''}
     </div>
@@ -3717,6 +3842,7 @@ async function insuredsView() {
     html,
     after: () => {
       let timer;
+      wireEntityPicker();
       $('#insuredSearch').addEventListener('input', (e) => {
         clearTimeout(timer);
         timer = setTimeout(() => { state.insuredSearch = e.target.value; render(); }, 250);
@@ -4569,13 +4695,16 @@ async function settingsView() {
         ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>Code</th><th>Full legal name</th><th class="num">Policies</th>
+          <th class="num">Lives</th><th class="num">Avg age</th>
           <th class="num">Death benefit</th><th class="num">Invested</th><th>Notes</th><th></th></tr></thead>
         <tbody>${funds.length === 0
-          ? '<tr><td colspan="7"><div class="empty">No entities yet.</div></td></tr>'
+          ? '<tr><td colspan="9"><div class="empty">No entities yet.</div></td></tr>'
           : funds.map((f) => `<tr>
               <td class="strong">${esc(f.code)}</td>
               <td>${esc(f.name && f.name !== f.code ? f.name : '')}</td>
               <td class="num">${f.policy_count}</td>
+              <td class="num">${f.lives_count || 0}</td>
+              ${avgAgeCell(f)}
               <td class="num">${fmtExact(f.total_death_benefit)}</td>
               <td class="num">${fmtExact(f.total_invested)}</td>
               <td class="secondary">${esc(f.notes || '')}</td>

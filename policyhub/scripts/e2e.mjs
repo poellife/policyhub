@@ -57,7 +57,7 @@ await page.mouse.move(5, 5);
    is not that the figure changes — it is that the parts add back up to the
    whole, and that the alerts below move with the headline rather than
    staying on the full book. */
-const fundPicker = page.locator('#dashFund');
+const fundPicker = page.locator('#entityFilter');
 check('the dashboard offers an entity filter', (await fundPicker.count()) === 1);
 check('starting on all entities', (await fundPicker.inputValue()) === '');
 const entities = (await fundPicker.locator('option').allTextContents()).map((x) => x.trim());

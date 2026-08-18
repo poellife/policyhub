@@ -1097,3 +1097,28 @@ dialog.wide { width: 760px; }
    same language the critical servicing alerts use, so it reads as work
    rather than as decoration. */
 .card-attention { border-left: 3px solid var(--warning); }
+
+/* ------------------- pricing your own slice -------------------------- */
+/* An investor deciding how much to take needs the numbers at that size
+   while they are still deciding. The figures sit beside the box they are
+   typing in, and every scaled cell on the page is marked so it is obvious
+   which numbers moved and which — dates, multiples, the rate itself —
+   never do. */
+.take-figures {
+  display: flex; flex-wrap: wrap; gap: 22px 34px; align-items: flex-start;
+  padding-top: 2px;
+}
+.take-figures .label {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 5px;
+}
+.take-figures .value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.take-figures .value.strong { font-size: 21px; }
+.take-go {
+  display: flex; gap: 18px; align-items: flex-start; margin-top: 16px;
+  padding-top: 14px; border-top: 1px solid var(--grid);
+}
+.take-go button { white-space: nowrap; }
+/* A cell currently showing a share rather than the whole policy. */
+td.at-my-share { font-weight: 600; }
+.share-banner.at-share { border-left-color: var(--success-text); }
