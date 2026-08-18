@@ -192,6 +192,25 @@ check('and the average age of the people in it',
   /average age/i.test(await p.locator('.page-head .sub').first().textContent()));
 await p.screenshot({ path: `${S}/ev1-insureds.png`, fullPage: true });
 
+/* The dashboard states it as a figure of its own, and agrees with the
+   entity table about the same book — the two are computed the same way
+   on purpose, so a difference between them would be a real disagreement
+   rather than a rounding one. */
+await p.goto(`${BASE}/#/dashboard`); await p.waitForTimeout(1600);
+const ageTile = p.locator('.stat', { hasText: 'Average insured age' });
+check('the dashboard lists the average insured age as a figure of its own',
+  (await ageTile.count()) === 1);
+const ageShown = Number((await ageTile.locator('.value').textContent()).trim());
+check('with a number in it', ageShown > 0, String(ageShown));
+check('and how many lives it is averaged over',
+  /across \d+ (life|lives)/.test(await ageTile.locator('.note').textContent()),
+  (await ageTile.locator('.note').textContent()).trim());
+const lcg1Entity = ((await json(await api('/funds'))) || []).find((f) => f.code === 'LCG1');
+check('and it agrees with the entity table to the tenth',
+  near(ageShown, lcg1Entity.avg_insured_age, 0.06),
+  `dashboard ${ageShown} against entity table ${lcg1Entity.avg_insured_age}`);
+await p.screenshot({ path: `${S}/ev5-dashboard-age.png`, fullPage: true });
+
 await p.goto(`${BASE}/#/servicing`); await p.waitForTimeout(1400);
 check('the choice is still LCG1 on the next screen',
   (await p.locator('#entityFilter').inputValue()) === 'LCG1');

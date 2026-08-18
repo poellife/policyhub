@@ -655,8 +655,8 @@ async function dashboardView() {
     <div class="page-head">
       <div>
         <h1>${isInvestorUser() ? 'Your portfolio' : 'Portfolio dashboard'}</h1>
-        <div class="sub">${t.policy_count} ${t.policy_count === 1 ? 'position' : isInvestorUser() ? 'positions' : 'active policies'}
-          · average insured age ${sum.avgInsuredAge ? Math.round(sum.avgInsuredAge) : '—'}${
+        <div class="sub">${t.policy_count} ${t.policy_count === 1 ? 'position' : isInvestorUser() ? 'positions' : 'active policies'}${
+          !isInvestorUser() && entityFilter() ? ` in ${esc(entityFilter())}` : ''}${
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
@@ -675,6 +675,17 @@ async function dashboardView() {
         <div class="label">Capital invested</div>
         <div class="value">${fmtExact(t.total_invested)}</div>
         <div class="note">${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premiums</div>
+      </div>
+      <div class="stat">
+        <div class="label">Average insured age</div>
+        <div class="value">${sum.avgInsuredAge
+          ? Number(sum.avgInsuredAge).toFixed(1)
+          : '<span class="muted">—</span>'}</div>
+        <div class="note">${sum.lives
+          ? `across ${sum.lives} ${sum.lives === 1 ? 'life' : 'lives'}${
+              sum.livesWithDob < sum.lives
+                ? ` · ${sum.lives - sum.livesWithDob} with no date of birth` : ''}`
+          : 'no lives on the book'}</div>
       </div>
       ${isInvestorUser() ? `
       <div class="stat">

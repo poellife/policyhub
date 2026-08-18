@@ -306,17 +306,25 @@ label {
 
 /* ----------------------------- stat tiles ---------------------------- */
 
+/* The dividing lines are the grid gap with the border colour showing
+   through, rather than a border on each tile. That way a row of tiles
+   that wraps onto a second line is separated correctly in both
+   directions — a per-tile right border leaves a stray line hanging at
+   the end of the first row the moment the count stops dividing evenly. */
+/* Flex rather than grid, so a row that wraps has no dead cells in it:
+   the tiles on the last line stretch to fill the width instead of
+   leaving a hole where the grid expected more of them. The dividing
+   lines are the 1px gap with the border colour behind. */
 .kpi-row {
-  display: grid; gap: 0; margin-bottom: 22px;
-  grid-template-columns: repeat(auto-fit, minmax(min(238px, 100%), 1fr));
+  display: flex; flex-wrap: wrap; gap: 1px; margin-bottom: 22px;
   border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--border);
   overflow: hidden;
 }
 .stat {
+  flex: 1 1 238px; min-width: 0;
   background: var(--surface-1); padding: 18px 20px 20px;
-  border-right: 1px solid var(--border);
 }
-.stat:last-child { border-right: none; }
 .stat .label { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 10px; }
 .stat .value {
   font-size: 23px; font-weight: 600; letter-spacing: -0.035em; line-height: 1.05;
@@ -560,8 +568,7 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
   .main { padding: 18px 14px 56px; }
   .table-wrap.sticky-head { max-height: none; }
   .page-head h1 { font-size: 26px; }
-  .stat { border-right: none; border-bottom: 1px solid var(--border); }
-  .stat:last-child { border-bottom: none; }
+  /* Single column on a phone; the 1px grid gap already draws the rules. */
   .stat .value.hero { font-size: 32px; }
   dialog { width: 96vw; }
   .field-row { grid-template-columns: 1fr; }

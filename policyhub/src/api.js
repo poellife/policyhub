@@ -1277,11 +1277,31 @@ router.get('/analytics/summary', wrap(async (req, res) => {
           AND ($3 = '' OR (SELECT f.code FROM funds f
                  WHERE f.id = (SELECT fund_id FROM policies WHERE id = t.policy_id)) = $3)
         GROUP BY 1 ORDER BY 1`, [scope, funds, fund]),
+    /* Average age of the lives the book is exposed to.
+       Counted over distinct people, not over policies, and every life on
+       a contract rather than only the primary — two policies on the same
+       person is one life, and a survivorship contract is two. The same
+       rule the per-entity figure uses, so the dashboard and the entity
+       table can never disagree about the same book. */
     q(`SELECT
-         COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
-         COUNT(*) FILTER (WHERE pl.insured_dob IS NOT NULL)::int AS with_dob
-       FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis} AND ($3 = '' OR pl.fund_code = $3)`, [scope, funds, fund]),
+         COUNT(*)::int                                                    AS lives,
+         COUNT(i.dob)::int                                                AS with_dob,
+         COALESCE(AVG(EXTRACT(YEAR FROM age(CURRENT_DATE, i.dob))), 0)    AS avg_age
+       FROM insureds i
+      WHERE i.date_of_death IS NULL
+        AND i.id IN (
+          SELECT pl.insured_id
+            FROM policy_latest pl
+           WHERE pl.insured_id IS NOT NULL
+             AND pl.status NOT IN ('Lapsed','Sold','Matured')
+             AND ${vis} AND ($3 = '' OR pl.fund_code = $3)
+          UNION
+          SELECT pi.insured_id
+            FROM policy_insureds pi
+            JOIN policy_latest pl2 ON pl2.id = pi.policy_id
+           WHERE pl2.status NOT IN ('Lapsed','Sold','Matured')
+             AND ${visibleTo('pl2.id', 'pl2.fund_id', 1, 2)}
+             AND ($3 = '' OR pl2.fund_code = $3))`, [scope, funds, fund]),
   ]);
 
   // Running total of capital deployed. Months with no activity are filled in
@@ -1317,6 +1337,8 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
+    lives: Number(ages.rows[0].lives) || 0,
+    livesWithDob: Number(ages.rows[0].with_dob) || 0,
     irr,
     scopedToInvestor: scope !== null,
   });
