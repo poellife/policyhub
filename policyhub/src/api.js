@@ -2263,7 +2263,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
       irr: a.irr, invested: a.invested, returned: a.returned, profit: a.profit,
       multiple: a.multiple, days: a.days, years: a.years,
       first_flow: a.first_flow, last_flow: a.last_flow,
-      short_period: a.short_period, ambiguous: a.ambiguous,
+      short_period: a.short_period, extreme: a.extreme, ambiguous: a.ambiguous,
     };
   }).sort((x, y) => {
     // Highest return first; anything without a computable rate sinks to the
@@ -2450,7 +2450,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         settled: p.proceeds_amount != null,
         invested: a.invested, returned: a.returned, profit: a.profit,
         multiple: a.multiple, irr: a.irr, days: a.days,
-        short_period: a.short_period, ambiguous: a.ambiguous,
+        short_period: a.short_period, extreme: a.extreme, ambiguous: a.ambiguous,
       };
     });
 
@@ -2474,7 +2474,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         irr: overall.irr,
         multiple: overall.multiple,
         profit: overall.profit,
-        short_period: overall.short_period,
+        short_period: overall.short_period, extreme: overall.extreme,
         ambiguous: overall.ambiguous,
       },
       paid: Object.entries(paid).map(([kind, amount]) => ({ kind, amount }))

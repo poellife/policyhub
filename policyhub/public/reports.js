@@ -423,6 +423,7 @@ function buildReturn(d, o, { realized }) {
     const why = [];
     if (realized && !r.settled) why.push('claim outstanding, assumed collected today');
     if (r.short_period) why.push('held under 90 days');
+    if (r.extreme && !r.short_period) why.push('rate annualised from a short holding period');
     if (r.ambiguous) why.push('flows change direction more than once');
     return why.length ? ' *' : '';
   };

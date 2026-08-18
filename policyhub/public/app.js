@@ -1302,6 +1302,11 @@ function returnTab(p, d) {
     'This position is under three months old. The rate is still shown, but annualising ' +
     'a few weeks stretches them over a whole year and produces an extreme number — the ' +
     'profit and the multiple beside it are the figures to quote.');
+  if (r.extreme && !r.short_period) caveats.push(
+    `The rate is very large because it is annualised: ${r.multiple ? `${r.multiple.toFixed(2)}×` : 'this return'} `
+    + `over ${r.days.toLocaleString('en-US')} days works out at that pace if it were repeated `
+    + 'for a whole year, which is a long way from here. Nothing is wrong with the arithmetic — '
+    + 'but over a period this short the multiple and the profit are the figures to quote.');
   if (r.ambiguous) caveats.push(
     'Cash flows change direction more than once (a withdrawal between premiums, ' +
     'for example), so more than one rate can satisfy the equation. The one shown ' +
@@ -1327,7 +1332,8 @@ function returnTab(p, d) {
       <div class="stat">
         <div class="label">${settled ? 'Realized IRR' : d.status === 'Matured' ? 'IRR if collected today' : 'IRR if matured today'}</div>
         <div class="value hero">${fmtIrr(r.irr)}</div>
-        <div class="note">${r.days} days · ${r.years.toFixed(2)} years held</div>
+        <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
+          r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
       </div>
       <div class="stat">
         <div class="label">Capital invested</div>
@@ -1962,23 +1968,50 @@ function openTxnDialog(p, preset = {}) {
 
 async function servicingView() {
   const svc = await api('/servicing');
+  const investor = isInvestorUser();
   // An investor is shown what is still to come. A date that has already
   // passed is a servicing matter — somebody is chasing it — and putting it
   // on an investor's screen reads as a bill they have missed.
   const upcoming = svc.upcoming.filter((r) => r.next_premium_due
-    && (!isInvestorUser() || String(r.next_premium_due).slice(0, 10) >= today()));
+    && (!investor || String(r.next_premium_due).slice(0, 10) >= today()));
   const grouped = {};
   for (const r of upcoming) {
     const key = String(r.next_premium_due).slice(0, 7);
     (grouped[key] ||= []).push(r);
   }
 
-  const investor = isInvestorUser();
+  /* One list, the same as the policy's own Premiums tab.
+     A carrier's next-due date and a premium put on the schedule by hand are
+     the same thing to whoever has to fund it, so they belong in one column
+     of dates rather than in two places the reader has to reconcile. */
+  const duesForInvestor = investor ? [
+    ...upcoming.map((r) => ({
+      date: String(r.next_premium_due).slice(0, 10),
+      policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+      insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
+      amount: Number(r.premium_required) || 0,
+      amount_full: Number(r.premium_required_full) || 0,
+      source: r.premium_mode || 'carrier',
+    })),
+    ...(svc.scheduled || [])
+      .filter((r) => r.kind === 'Premium')
+      .map((r) => ({
+        date: String(r.due_date).slice(0, 10),
+        policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+        insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
+        amount: Number(r.amount) || 0, amount_full: Number(r.amount_full) || 0,
+        source: 'scheduled', note: r.note,
+      })),
+  ].sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
+  const dueIn12 = duesForInvestor
+    .filter((d) => d.date <= addMonthsIso(today(), 12))
+    .reduce((sum, d) => sum + d.amount, 0);
   const html = `
     <div class="page-head">
       <div><h1>${investor ? 'Premiums' : 'Servicing calendar'}</h1>
         <div class="sub">${investor
-          ? `${upcoming.length} upcoming premium ${upcoming.length === 1 ? 'date' : 'dates'} · amounts are your share`
+          ? `${duesForInvestor.length} upcoming premium ${
+              duesForInvestor.length === 1 ? 'date' : 'dates'} · amounts are your share`
           : `${svc.alerts.length} open ${svc.alerts.length === 1 ? 'alert' : 'alerts'} ·
              ${upcoming.length} scheduled premium ${upcoming.length === 1 ? 'payment' : 'payments'}${
              (svc.scheduled || []).length ? ` · ${svc.scheduled.length} follow-up${
@@ -1997,14 +2030,40 @@ async function servicingView() {
       </div>
     </div>`}
 
+    ${investor ? `
     <div class="card">
-      <div class="card-head"><h2>Upcoming premiums</h2>${investor ? `<div class="spacer"></div>
-        <span class="muted" style="font-size:12px">amounts shown are your share</span>` : ''}</div>
+      <div class="card-head"><h2>Premiums coming up</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">your share</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Due</th><th>Insured</th><th>Policy</th>
+          <th class="num">Your share</th><th class="num">Full policy</th><th></th></tr></thead>
+        <tbody>${duesForInvestor.length === 0
+          ? '<tr><td colspan="6"><div class="empty">No premium dates are scheduled on your policies at the moment.</div></td></tr>'
+          : duesForInvestor.map((d) => `<tr class="clickable" data-id="${d.policy_id}">
+              <td class="strong">${fmtDate(d.date)}</td>
+              <td>${esc(d.insured)}</td>
+              <td class="secondary">${esc(d.carrier_name || '')} ${esc(d.policy_number || '')}</td>
+              <td class="num strong">${money(d.amount)}</td>
+              <td class="num muted">${money(d.amount_full)}</td>
+              <td class="muted">${d.source === 'scheduled'
+                ? `scheduled${d.note ? ` · ${esc(d.note)}` : ''}` : esc(d.source)}</td>
+            </tr>`).join('')}</tbody>
+        ${duesForInvestor.length ? `<tfoot><tr>
+          <td colspan="3">Due in the next 12 months</td>
+          <td class="num">${fmtExact(dueIn12)}</td><td colspan="2"></td>
+        </tr></tfoot>` : ''}
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px;line-height:1.6">
+          Amounts beyond the next carrier date are estimates from the policy illustration and
+          will move. Your column is your percentage of the full policy premium beside it.</span>
+      </div>
+    </div>` : `
+    <div class="card">
+      <div class="card-head"><h2>Upcoming premiums</h2></div>
       <div class="card-body flush">
         ${Object.keys(grouped).length === 0
-          ? `<div class="empty">${investor
-              ? 'No premium dates are scheduled on your policies at the moment.'
-              : 'No premium due dates recorded. Add them on each policy.'}</div>`
+          ? '<div class="empty">No premium due dates recorded. Add them on each policy.</div>'
           : Object.entries(grouped).sort().map(([month, rows]) => `
             <div style="padding:11px 16px;border-bottom:1px solid var(--grid);background:var(--page)">
               <strong>${new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong>
@@ -2021,7 +2080,7 @@ async function servicingView() {
               </tr>`).join('')}
             </tbody></table></div>`).join('')}
       </div>
-    </div>`;
+    </div>`}`;
 
   return {
     html,

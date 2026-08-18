@@ -193,6 +193,14 @@ const svcPage = (await inv.locator('.main').textContent()).replace(/\s+/g, ' ');
 check('it is called Premiums', /Premiums/.test(await inv.locator('h1').textContent()));
 check('there is no alerts card', !/Alerts/i.test(svcPage), svcPage.slice(0, 160));
 check('it says the amounts are their share', /amounts are your share/i.test(svcPage));
+// The same shape as the policy's own Premiums tab: one dated list with their
+// share beside the full policy figure, not a month-by-month roll-up.
+check('it reads like the policy premiums tab',
+  /Premiums coming up/i.test(svcPage)
+  && /Your share/i.test(svcPage) && /Full policy/i.test(svcPage),
+  svcPage.slice(0, 200));
+check('and totals what falls due in the next year',
+  /Due in the next 12 months/i.test(svcPage));
 check('and every date shown is still ahead', await inv.evaluate(() => {
   const today = new Date().toISOString().slice(0, 10);
   return [...document.querySelectorAll('table.data tbody tr td:first-child')]

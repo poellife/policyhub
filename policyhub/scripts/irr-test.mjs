@@ -400,5 +400,53 @@ check('its assumed claim is dated today, since nothing is outstanding',
 await api(admin, `/policies/${shortPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-SHORT` } });
 await api(admin, `/policies/${longPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-LONG` } });
 
+/* ------------------------------------------------------------------ *
+ * An extreme rate is explained, not just printed
+ *
+ * Four times your money in three months annualises to about 24,000% a
+ * year. That is the arithmetic working, not failing — but a bare
+ * ">9,999%" on the screen reads as a bug, and the old ninety-day cliff
+ * meant a position held ninety-two days got no explanation at all.
+ * ------------------------------------------------------------------ */
+console.log('\nA VERY LARGE RATE EXPLAINS ITSELF');
+const fastPolicy = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-FAST`, carrier_name: 'Ratecheck Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 2000000,
+  insured_last_name: 'Quickturn', insured_first_name: 'Quinn', dob: '1946-12-05' } }));
+const at2 = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+// Exactly the shape from the report: bought 92 days ago, worth 4x today.
+await api(admin, `/policies/${fastPolicy.id}/transactions`, { method: 'POST', body: {
+  txn_date: at2(-92), txn_type: 'Acquisition Cost', amount: 500000 } });
+
+const fast = await json(await api(admin, `/policies/${fastPolicy.id}/irr`));
+const fr = fast.result;
+check('the rate is solved rather than suppressed', fr.irr !== null, String(fr.irr));
+check('92 days is past the short-period cliff, so that flag is off',
+  fr.short_period === false, `${fr.days} days`);
+check('but it is flagged as extreme, so the screen can explain it',
+  fr.extreme === true, String(fr.irr));
+// 4 ** (365/92) - 1
+check('and the rate is the honest annualisation, not a rounding',
+  Math.abs(fr.irr - (4 ** (365 / fr.days) - 1)) < 1, `${(fr.irr * 100).toFixed(0)}%`);
+check('the multiple over the actual period is there to quote instead',
+  near(fr.multiple, 4), String(fr.multiple));
+check('as is the profit', near(fr.profit, 1500000), String(fr.profit));
+
+// A believable rate must not be flagged; the point is to explain the odd
+// ones, not to apologise for every number in the book.
+const calmPolicy = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: `${PREFIX}-CALM`, carrier_name: 'Ratecheck Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 2000000,
+  insured_last_name: 'Steady', insured_first_name: 'Stan', dob: '1944-01-01' } }));
+await api(admin, `/policies/${calmPolicy.id}/transactions`, { method: 'POST', body: {
+  txn_date: at2(-1825), txn_type: 'Acquisition Cost', amount: 700000 } });
+const calm = (await json(await api(admin, `/policies/${calmPolicy.id}/irr`))).result;
+check('an ordinary five-year hold is not flagged',
+  calm.extreme === false && calm.short_period === false,
+  `${(calm.irr * 100).toFixed(2)}% over ${calm.days} days`);
+
+await api(admin, `/policies/${fastPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-FAST` } });
+await api(admin, `/policies/${calmPolicy.id}`, { method: 'DELETE', body: { confirm: `${PREFIX}-CALM` } });
+
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL IRR CHECKS PASSED');
 process.exit(fails.length ? 1 : 0);

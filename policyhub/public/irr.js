@@ -143,6 +143,14 @@ export function analyzeFlows(rawFlows) {
     // Under a quarter of a year, annualising magnifies rounding and timing
     // into a headline number nobody should quote.
     short_period: days > 0 && days < 90,
+    /* Separately from how long it has been held: a rate this large is the
+       arithmetic working correctly on a short horizon, not a mistake, and it
+       needs saying. Four times your money in three months really does
+       annualise to about 24,000% — the year is simply a long way off.
+       Flagged on the rate rather than on the calendar, because a
+       ninety-day cliff means two days either side decides whether anybody
+       gets an explanation. */
+    extreme: rate !== null && Math.abs(rate) > 2,
     ambiguous: signChanges(flows) > 1,
   };
 }
