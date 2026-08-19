@@ -3948,6 +3948,16 @@ function openApproveDialog(a) {
         .filter(Boolean).join(', '))}</dd>
       <dt>Tax ID</dt><dd class="app-tax">${esc(a.tax_id_masked || '—')}</dd>
     </dl>
+    <div class="dlg-section">Who looks after them</div>
+    <div class="field"><label>Owner entity</label>
+      <select name="fund_id">
+        <option value="">— decide later —</option>
+        ${(state.funds || []).map((f) => `<option value="${f.id}">${esc(f.code)}${
+          f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">The manager of that entity will see them in
+        their investor list straight away, before they hold anything. It can be changed later
+        from the investor's own record.</span></div>
     ${inputField('Note (optional)', 'note', '', 'text',
       'placeholder="Anything worth recording about the decision"')}
     <span class="muted" style="font-size:12px">They hold nothing yet. Allocate them to policies
@@ -3976,12 +3986,13 @@ function openDeclineApplicationDialog(a) {
 }
 
 async function investorsView() {
-  const [rows, applications] = await Promise.all([
-    api(`/investors?search=${encodeURIComponent(state.investorSearch)}`),
+  const [rows, applications, funds] = await Promise.all([
+    api(`/investors?search=${encodeURIComponent(state.investorSearch)}&${entityQuery()}`),
     // A registration nobody has looked at is somebody sitting on the other
     // end waiting, so it is fetched with the list rather than hidden behind
     // a tab. Viewers cannot see the queue and the call simply returns none.
     api(`/applications${state.showDecided ? '' : '?status=Pending'}`).catch(() => []),
+    loadFunds(),
   ]);
   state.investors = rows;
   const canEditNow = canEditData();
@@ -3997,8 +4008,12 @@ async function investorsView() {
   const html = `
     <div class="page-head">
       <div><h1>Investors</h1>
-        <div class="sub">${rows.length} ${rows.length === 1 ? 'investor' : 'investors'} · ${totals.pos} positions</div></div>
+        <div class="sub">${rows.length} ${rows.length === 1 ? 'investor' : 'investors'} · ${
+          totals.pos} positions${entityFilter() ? ` · ${esc(entityFilter())} only` : ''}${
+          rows.filter((r) => !r.fund_code).length
+            ? ` · ${rows.filter((r) => !r.fund_code).length} not assigned to an entity` : ''}</div></div>
       <div class="spacer"></div>
+      ${entityPicker(funds)}
       ${canEditNow ? '<button class="primary" id="newInvestorBtn">New investor</button>' : ''}
     </div>
 
@@ -4029,15 +4044,18 @@ async function investorsView() {
     <div class="card"><div class="table-wrap">
       <table class="data">
         <thead><tr>
-          <th>Name</th><th>Type</th><th>Legal name</th><th>Email</th>
+          <th>Name</th><th>Type</th><th>Entity</th><th>Legal name</th><th>Email</th>
           <th class="num">Positions</th><th class="num">Death benefit</th>
           <th class="num">Invested</th><th class="num">Cash value</th><th></th>
         </tr></thead>
         <tbody>${rows.length === 0
-          ? '<tr><td colspan="9"><div class="empty">No investors yet.</div></td></tr>'
+          ? '<tr><td colspan="10"><div class="empty">No investors yet.</div></td></tr>'
           : rows.map((r) => `<tr class="clickable" data-investor="${r.id}">
               <td class="strong">${esc(r.name)}</td>
               <td>${esc(r.investor_type || '')}</td>
+              <td>${r.fund_code
+                ? esc(r.fund_code)
+                : '<span class="muted">unassigned</span>'}</td>
               <td class="secondary">${esc(r.legal_name || '')}</td>
               <td class="secondary">${esc(r.email || '')}</td>
               <td class="num">${r.position_count}</td>
@@ -4048,7 +4066,7 @@ async function investorsView() {
             </tr>`).join('')}
         </tbody>
         ${rows.length ? `<tfoot><tr>
-          <td colspan="4">Totals</td>
+          <td colspan="5">Totals</td>
           <td class="num">${totals.pos}</td>
           <td class="num">${fmtExact(totals.db)}</td>
           <td class="num">${fmtExact(totals.inv)}</td>
@@ -4065,6 +4083,7 @@ async function investorsView() {
         clearTimeout(timer);
         timer = setTimeout(() => { state.investorSearch = e.target.value; render(); }, 250);
       });
+      wireEntityPicker();
       $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
       $('#appShowAll')?.addEventListener('click', () => {
         state.showDecided = !state.showDecided; render();
@@ -4183,8 +4202,20 @@ async function investorView() {
   };
 }
 
+/**
+ * Everything on an investor's record, including what they typed into the
+ * registration form themselves — people move house and change their
+ * telephone number, and a record nobody can correct stops being a record.
+ *
+ * Two fields are an administrator's alone. The entity decides which
+ * manager sees this client, and the tax number is the one field here that
+ * is encrypted; letting anybody else set either would quietly undo the
+ * reason they are treated differently in the first place.
+ */
 function openInvestorDialog(inv) {
   const isNew = !inv?.id;
+  const isAdmin = state.user.role === 'admin';
+  const funds = state.funds || [];
   const body = `
     <div class="field-row">
       ${inputField('Name *', 'name', inv?.name, 'text', 'required')}
@@ -4192,20 +4223,82 @@ function openInvestorDialog(inv) {
     </div>
     ${inputField('Full legal name', 'legal_name', inv?.legal_name, 'text',
       'placeholder="As it appears on the purchase agreement"')}
+
+    <div class="dlg-section">How to reach them</div>
     <div class="field-row">
       ${inputField('Email', 'email', inv?.email, 'email')}
       ${inputField('Phone', 'phone', inv?.phone)}
-      ${inputField('Tax ID (last 4)', 'tax_id_last4', inv?.tax_id_last4, 'text', 'maxlength=4')}
     </div>
+    ${inputField('Street address', 'address_line1', inv?.address_line1)}
+    ${inputField('Apartment, suite or unit', 'address_line2', inv?.address_line2)}
+    <div class="field-row">
+      ${inputField('City', 'city', inv?.city)}
+      ${stateField('State', 'state', inv?.state)}
+      ${inputField('ZIP', 'postal_code', inv?.postal_code)}
+    </div>
+    ${inputField('Country', 'country', inv?.country || 'United States')}
+
+    <div class="dlg-section">${isAdmin ? 'Administrator only' : 'On file'}</div>
+    ${isAdmin ? `
+    <div class="field-row">
+      <div class="field">
+        <label>Owner entity</label>
+        <select name="fund_id">
+          <option value="">— not assigned —</option>
+          ${funds.map((f) => `<option value="${f.id}" ${
+            Number(inv?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}${
+            f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
+        </select>
+        <span class="muted" style="font-size:12px">Whose client they are. The manager of that
+          entity sees them in their investor list straight away, before they hold anything.</span>
+      </div>
+      <div class="field">
+        <label>Tax ID</label>
+        <input name="tax_id" inputmode="numeric" autocomplete="off" maxlength="14"
+               placeholder="${inv?.tax_id_last4
+                 ? `on file, ending ${esc(inv.tax_id_last4)}` : 'not on file'}">
+        <span class="muted" style="font-size:12px">${inv?.id && inv?.tax_id_last4
+          ? '<a href="#" id="revealInvTax">Show the number in full</a> · '
+          : ''}Typing a new one replaces it. It is encrypted; only the last four digits are
+          shown afterwards.</span>
+      </div>
+    </div>` : `
+    <div class="field-row">
+      <div class="field"><label>Owner entity</label>
+        <div class="strong" style="padding:7px 0">${esc(inv?.fund_code || '—')}</div>
+        <span class="muted" style="font-size:12px">Set by an administrator.</span></div>
+      <div class="field"><label>Tax ID</label>
+        <div class="strong app-tax" style="padding:7px 0">${
+          inv?.tax_id_last4 ? esc(maskTaxIdClient(inv.tax_id_last4, inv.investor_type)) : '—'}</div>
+        <span class="muted" style="font-size:12px">Only an administrator can change it.</span></div>
+    </div>`}
+
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(inv?.notes || '')}</textarea></div>`;
 
-  openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
+  const dlg = openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
+    // An untouched tax box must not be read as "clear it".
+    if (!String(v.tax_id || '').trim()) delete v.tax_id;
     if (isNew) await api('/investors', { method: 'POST', body: v });
     else await api(`/investors/${inv.id}`, { method: 'PUT', body: v });
     state.investors = await api('/investors');
     toast(isNew ? 'Investor created' : 'Investor updated');
   }, isNew ? 'Create investor' : 'Save');
+
+  $('#revealInvTax', dlg)?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api(`/investors/${inv.id}/tax-id`);
+      const box = $('input[name=tax_id]', dlg);
+      box.value = r.tax_id.replace(/^(\d{3})(\d{2})(\d{4})$/, '$1-$2-$3');
+      e.target.replaceWith(document.createTextNode('Shown above. '));
+    } catch (err) { alert(err.message); }
+  });
+  return dlg;
 }
+
+/** "•••-••-6789", the same shape the server prints on an application. */
+const maskTaxIdClient = (last4, kind = '') => (last4
+  ? (/ein|entity|trust/i.test(kind) ? `••-•••${last4}` : `•••-••-${last4}`) : '');
 
 /* ------------------------------ import ------------------------------- */
 

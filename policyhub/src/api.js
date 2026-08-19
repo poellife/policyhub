@@ -2379,36 +2379,51 @@ router.get('/servicing', wrap(async (req, res) => {
 const INVESTOR_FIELDS = {
   name: str, legal_name: str, investor_type: str, email: str,
   phone: str, tax_id_last4: str, notes: str,
+  address_line1: str, address_line2: str, city: str, state: str,
+  postal_code: str, country: str,
+  // Whose client they are. Only an administrator may set it.
+  fund_id: int,
 };
 
 router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
   const search = str(req.query.search);
   const funds = fundScope(req);
-  // A manager sees investors who hold a position inside their entities, plus
-  // any an administrator has granted them by name — that second list is what
-  // lets a manager take a new deal to an existing client without keying in a
-  // duplicate record. The figures shown still cover only their own entities,
-  // so a granted investor with holdings elsewhere reads as zero here rather
-  // than exposing a book that is not theirs to see.
+  /* A manager sees three kinds of investor:
+       - the ones assigned to one of their entities, which is the
+         relationship an administrator set when the account was opened;
+       - the ones holding a position inside one of their entities, which
+         is where the money actually is;
+       - any an administrator has granted them by name, so a new deal can
+         be taken to an existing client without keying in a duplicate.
+     The figures shown still cover only their own entities, so somebody
+     visible for one of the other two reasons reads as zero here rather
+     than exposing a book that is not theirs to see. */
   const granted = grantedInvestors(req);
   const { rows } = await q(
-    `SELECT inv.*,
-            COUNT(pi.id)::int AS position_count,
+    `SELECT inv.*, f.code AS fund_code, f.name AS fund_name,
+            /* pl.id, not pi.id: the scope and status filters live on the
+               join to policy_latest, so counting the link row would count
+               a position held in somebody else's entity even while its
+               money reads as zero. */
+            COUNT(pl.id)::int AS position_count,
             COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * pi.pct / 100.0), 0) AS death_benefit,
             COALESCE(SUM(pl.total_invested * pi.pct / 100.0), 0) AS invested,
             COALESCE(SUM(pl.cash_surrender_value * pi.pct / 100.0), 0) AS csv
        FROM investors inv
+       LEFT JOIN funds f ON f.id = inv.fund_id
        LEFT JOIN policy_investors pi ON pi.investor_id = inv.id
        LEFT JOIN policy_latest pl ON pl.id = pi.policy_id
                                  AND pl.status NOT IN ('Lapsed','Sold','Matured')
                                  AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
              OR inv.email ILIKE '%'||$1||'%')
-        AND ($2::int[] IS NULL OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
+        AND ($4 = '' OR f.code = $4)
+        AND ($2::int[] IS NULL OR inv.fund_id = ANY($2)
+             OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
-      GROUP BY inv.id ORDER BY inv.name`,
-    [search, funds, granted]
+      GROUP BY inv.id, f.code, f.name ORDER BY inv.name`,
+    [search, funds, granted, str(req.query.fund)]
   );
   res.json(rows);
 }));
@@ -2417,9 +2432,12 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
   const funds = fundScope(req);
   const granted = grantedInvestors(req);
   const { rows } = await q(
-    `SELECT inv.* FROM investors inv
+    `SELECT inv.*, f.code AS fund_code, f.name AS fund_name
+       FROM investors inv
+       LEFT JOIN funds f ON f.id = inv.fund_id
       WHERE inv.id = $1
-        AND ($2::int[] IS NULL OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
+        AND ($2::int[] IS NULL OR inv.fund_id = ANY($2)
+             OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))`,
     [req.params.id, funds, granted]
@@ -2445,24 +2463,92 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
   res.json({ ...rows[0], positions: positions.rows, logins: logins.rows });
 }));
 
+/**
+ * Which entity an investor belongs to is an administrator's decision.
+ *
+ * A manager assigning one to their own entity would be handing themselves
+ * a client they were not given — a small escalation, but the kind that is
+ * only obvious in hindsight. The field is dropped from anybody else's
+ * request rather than refused, so a manager editing a phone number does
+ * not get an error about a field they never touched.
+ */
+const adminOnlyInvestorFields = (req) => {
+  if (req.user.role === 'admin') return req.body;
+  const { fund_id: _drop, ...rest } = req.body || {};
+  return rest;
+};
+
+/**
+ * A replacement tax number, sealed on the way in. Only an administrator
+ * can set one, and only the last four digits are readable afterwards —
+ * the same rule the registration form follows, because it is the same
+ * number.
+ */
+async function applyTaxId(req, investorId) {
+  if (req.user.role !== 'admin') return null;
+  const raw = str(req.body?.tax_id);
+  if (!raw) return null;
+  const digits = digitsOf(raw);
+  if (digits.length !== 9)
+    return { error: 'A tax number is nine digits — a Social Security number or an EIN.' };
+  const sealed = sealField(digits);
+  await q(
+    `UPDATE investors SET tax_id_enc = $1, tax_id_key = $2, tax_id_last4 = $3,
+                          updated_at = now() WHERE id = $4`,
+    [sealed.ciphertext, sealed.keyId, digits.slice(-4), investorId]);
+  await audit(req.user.uid, 'investor', Number(investorId), 'update',
+    `tax number replaced · ending ${digits.slice(-4)}`);
+  return null;
+}
+
+/** The whole number, for an administrator, on the record. */
+router.get('/investors/:id/tax-id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q(
+    'SELECT name, tax_id_enc FROM investors WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+  const value = openField(rows[0].tax_id_enc);
+  await audit(req.user.uid, 'investor', Number(req.params.id), 'read',
+    `revealed tax id for ${rows[0].name}`);
+  if (!value)
+    return res.status(409).json({
+      error: 'There is no readable tax number on this record. Enter it again to store one.' });
+  res.json({ tax_id: value });
+}));
+
 router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   if (!str(req.body.name)) return res.status(400).json({ error: 'A name is required' });
-  const { cols, vals } = buildSet(INVESTOR_FIELDS, req.body);
+  const { cols, vals } = buildSet(INVESTOR_FIELDS, adminOnlyInvestorFields(req));
   const ph = cols.map((_, i) => `$${i + 1}`).join(',');
   const { rows } = await q(
     `INSERT INTO investors (${cols.join(',')}) VALUES (${ph}) RETURNING *`, vals
   );
+  const bad = await applyTaxId(req, rows[0].id);
+  if (bad) return res.status(400).json(bad);
   await audit(req.user.uid, 'investor', rows[0].id, 'create', rows[0].name);
-  res.status(201).json(rows[0]);
+  // Read it back rather than returning the row as it was inserted: the tax
+  // number is sealed in a second statement, and a response that omitted it
+  // would say the record has no number on it when it does.
+  const { rows: fresh } = await q(
+    `SELECT inv.*, f.code AS fund_code FROM investors inv
+       LEFT JOIN funds f ON f.id = inv.fund_id WHERE inv.id = $1`, [rows[0].id]);
+  res.status(201).json(fresh[0]);
 }));
 
 router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
-  const { sets, vals, next } = buildSet(INVESTOR_FIELDS, req.body);
-  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+  const { sets, vals, next } = buildSet(INVESTOR_FIELDS, adminOnlyInvestorFields(req));
+  if (!sets.length && !str(req.body?.tax_id))
+    return res.status(400).json({ error: 'No fields supplied' });
+  if (sets.length) {
+    const { rowCount } = await q(
+      `UPDATE investors SET ${sets.join(',')}, updated_at = now() WHERE id = $${next}`,
+      [...vals, req.params.id]);
+    if (!rowCount) return res.status(404).json({ error: 'Investor not found' });
+  }
+  const bad = await applyTaxId(req, req.params.id);
+  if (bad) return res.status(400).json(bad);
   const { rows } = await q(
-    `UPDATE investors SET ${sets.join(',')}, updated_at = now() WHERE id = $${next} RETURNING *`,
-    [...vals, req.params.id]
-  );
+    `SELECT inv.*, f.code AS fund_code FROM investors inv
+       LEFT JOIN funds f ON f.id = inv.fund_id WHERE inv.id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
   await audit(req.user.uid, 'investor', rows[0].id, 'update', rows[0].name);
   res.json(rows[0]);
@@ -3608,6 +3694,16 @@ router.post('/applications/:id/approve', blockInvestors, requireRole('admin', 'm
 
     // The name the money is held in, if they gave one; otherwise their own.
     const investorName = str(a.entity_name) || str(a.full_name);
+
+    /* Which of our entities this relationship belongs to. Optional — an
+       investor can be opened before it is settled which LLC they will
+       come in through — but naming it here is what puts them in front of
+       that entity's manager straight away, rather than only once they
+       hold something. A manager approving may only assign their own. */
+    const fundId = int(req.body.fund_id);
+    const scoped = fundScope(req);
+    if (fundId && scoped && !scoped.includes(fundId))
+      return res.status(403).json({ error: 'That owner entity is not one of yours' });
     const client = await pool.connect();
     let investorId; let userId;
     try {
@@ -3615,11 +3711,11 @@ router.post('/applications/:id/approve', blockInvestors, requireRole('admin', 'm
       const { rows: inv } = await client.query(
         `INSERT INTO investors (name, legal_name, investor_type, email, phone,
                                 address_line1, address_line2, city, state, postal_code,
-                                country, tax_id_last4, tax_id_enc, tax_id_key, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+                                country, tax_id_last4, tax_id_enc, tax_id_key, fund_id, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
         [investorName, str(a.full_name), a.investor_type, a.email, a.phone,
          a.address_line1, a.address_line2, a.city, a.state, a.postal_code,
-         a.country, a.tax_id_last4, a.tax_id_enc, a.tax_id_key,
+         a.country, a.tax_id_last4, a.tax_id_enc, a.tax_id_key, fundId,
          `Registered ${String(a.submitted_at).slice(0, 10)}${a.note ? ` · ${a.note}` : ''}`]);
       investorId = inv[0].id;
 
@@ -3649,8 +3745,10 @@ router.post('/applications/:id/approve', blockInvestors, requireRole('admin', 'm
     }
 
     await audit(req.user.uid, 'application', Number(req.params.id), 'update',
-      `approved ${a.full_name} · investor ${investorId} · user ${userId}`);
-    res.json({ ok: true, investor_id: investorId, user_id: userId, name: investorName });
+      `approved ${a.full_name} · investor ${investorId} · user ${userId}${
+        fundId ? ` · entity ${fundId}` : ' · no entity assigned'}`);
+    res.json({ ok: true, investor_id: investorId, user_id: userId,
+               name: investorName, fund_id: fundId });
   }));
 
 /**

@@ -193,8 +193,11 @@ The boundary is enforced in SQL and in route middleware, not by hiding buttons:
 - CSV import is checked row by row; a row whose Owner is outside their entities is
   rejected with that reason, and a policy that currently belongs to another entity
   cannot be overwritten
-- The investor directory is filtered to investors holding positions in their
-  entities, and investor login details are withheld
+- The investor directory is filtered to the investors assigned to their entities,
+  the investors holding positions in their entities, and any granted to them by
+  name; investor login details are withheld. Somebody visible for a relationship
+  rather than a holding reads as zero positions — sight of the person is not
+  sight of their book
 
 `scripts/manager-security-test.mjs` attempts each of these directly against the
 API and asserts every cross-entity attempt fails.
@@ -313,6 +316,28 @@ economic percentages of it. Both are recorded: a policy's Overview tab carries a
 ownership cap table showing each investor's share, the dollar value of that share,
 and any unallocated remainder. Allocations are refused if they would push a policy
 past 100%.
+
+### Whose client they are
+
+Each investor can be assigned to an owner entity, which is the relationship
+rather than the money: it says which desk looks after them. **Only an
+administrator can set it** — the Edit dialog shows a manager the entity as a
+fact with a note saying who decides it, and a manager who submits a `fund_id`
+anyway has it silently dropped while the rest of their edit goes through.
+
+An assignment can be made at the moment a registration is approved, so a new
+investor appears on the right manager's list before they hold anything at all.
+The Investors page counts how many are still unassigned and filters by entity
+from the same picker used on the Dashboard.
+
+Everything the investor typed into the registration form — name, legal name,
+email, telephone, the full mailing address and the tax number — is editable
+afterwards by an administrator. The tax number never comes back to the browser
+in the ordinary course of things; the dialog shows only the last four digits
+with a *Show the number in full* link, and using it is written to the audit log.
+Managers can correct the contact details but cannot read or replace the tax
+number. `scripts/investor-entity-test.mjs` and `scripts/investor-entity-ui-test.mjs`
+cover all of this.
 
 A user account with the role **investor** is tied to one investor record and sees
 only the policies that investor holds a piece of. That restriction is enforced in
@@ -701,6 +726,20 @@ reach those rules correctly.
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
+| `register-test.mjs` | self-registration: what the form refuses, that it never says whether an address is already a client, tax-number encryption, approving and declining |
+| `register-ui-test.mjs` | one person from the Register link to their first sign-in, and the approval queue on the Investors page |
+| `investor-entity-test.mjs` | assigning an investor to an entity, who may set it, and that it grants sight of the person and not of their book |
+| `investor-entity-ui-test.mjs` | the investor record on screen: every registration field editable, the entity picker, the tax-number reveal, and what a manager is shown instead |
+| `investor-report-test.mjs` | the investor's own statements, scoped and weighted |
+| `entity-view-test.mjs` | filtering the Dashboard, Insureds, Servicing and Maturities by entity, and the arithmetic that follows |
+| `agreement-test.mjs` | drafting an operating agreement, issuing it, signing it in the portal, and the hash that freezes the text |
+| `documents-test.mjs` | uploading, scoping, downloading and deleting documents |
+| `documents-ui-test.mjs` | the Documents tab, its filters and the download it produces |
+| `entry-ui-test.mjs` | the entry forms: the state list, comma grouping while typing, and the carrier-value fields |
+| `privacy-test.mjs` | that an investor is shown initials rather than an insured's name, everywhere |
+| `schedule-test.mjs` / `schedule-ui-test.mjs` | premium schedules and what they put on screen |
+| `sample-import-test.mjs` | the ten-policy sample workbook, loaded in one upload |
+| `readability-test.mjs` | contrast and legibility across the interface, light and dark |
 
 Each is idempotent — they clean up after themselves and can be re-run against the
 same database.

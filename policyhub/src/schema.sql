@@ -772,3 +772,17 @@ ALTER TABLE investors ADD COLUMN IF NOT EXISTS postal_code   TEXT NOT NULL DEFAU
 ALTER TABLE investors ADD COLUMN IF NOT EXISTS country       TEXT NOT NULL DEFAULT '';
 ALTER TABLE investors ADD COLUMN IF NOT EXISTS tax_id_enc    TEXT;
 ALTER TABLE investors ADD COLUMN IF NOT EXISTS tax_id_key    TEXT NOT NULL DEFAULT '';
+
+-- ---------------------------------------------------------------------
+--  Which entity an investor belongs to
+--
+--  Distinct from where their money actually is: a position in a policy
+--  puts an investor in front of that policy's entity whatever this says.
+--  This is the relationship — whose client they are, and therefore which
+--  manager sees them in their list before they hold anything at all.
+--  Assigned by an administrator, usually at the moment a registration is
+--  approved.
+-- ---------------------------------------------------------------------
+ALTER TABLE investors ADD COLUMN IF NOT EXISTS fund_id INTEGER
+  REFERENCES funds(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_investors_fund ON investors (fund_id);
