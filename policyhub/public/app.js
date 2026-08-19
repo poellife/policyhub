@@ -44,6 +44,10 @@ const state = {
   funds: [],
   oppCount: 0,        // drives the badge in the menu
   showDecided: false, // whether the registration queue shows decided ones too
+  /* Policies ticked for deletion. A Set of ids rather than a flag on each
+     row, so a selection survives sorting, searching and filtering — you can
+     pick three from a carrier search, change the search, and pick two more. */
+  selected: new Set(),
 };
 
 /**
@@ -361,6 +365,7 @@ const MANAGER_NAV = STAFF_NAV.map(([r, label]) =>
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
 const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?.role);
+const isAdminUser    = () => state.user?.role === 'admin';
 const navItems = () =>
   isInvestorUser() ? INVESTOR_NAV : isManagerUser() ? MANAGER_NAV : STAFF_NAV;
 
@@ -897,6 +902,17 @@ async function policiesView() {
   state.funds = funds;
   const rows = sortPolicies(policies);
 
+  /* Only an administrator clears a shelf. A manager can still delete a policy
+     in their own entity one at a time, which is the deliberate act this is
+     not. */
+  const canBulkDelete = isAdminUser();
+  if (!canBulkDelete) state.selected.clear();
+  const shownIds = rows.map((p) => p.id);
+  const ticked = shownIds.filter((id) => state.selected.has(id));
+  const allShownTicked = shownIds.length > 0 && ticked.length === shownIds.length;
+  // Anything picked and then filtered away still counts, and is said so.
+  const offScreen = state.selected.size - ticked.length;
+
   const totals = rows.reduce((acc, p) => {
     const f = shareFactor(p);
     acc.face += (Number(p.face_amount) || 0) * f;
@@ -933,17 +949,34 @@ async function policiesView() {
       </select>
     </div>
 
+    ${canBulkDelete && state.selected.size ? `
+    <div class="bulk-bar" id="bulkBar">
+      <strong>${state.selected.size} ${state.selected.size === 1 ? 'policy' : 'policies'} selected</strong>
+      ${offScreen > 0 ? `<span class="muted">${offScreen} of them not on screen — the search
+        and filters above do not clear a selection</span>` : ''}
+      <div class="spacer"></div>
+      <button class="btn-sm" id="clearTicks">Clear selection</button>
+      <button class="btn-danger" id="bulkDeleteBtn">Delete ${state.selected.size} ${
+        state.selected.size === 1 ? 'policy' : 'policies'}</button>
+    </div>` : ''}
+
     <div class="card">
       <div class="table-wrap sticky-head">
         <table class="data">
-          <thead><tr>${policyColumns().map((c) =>
+          <thead><tr>${canBulkDelete ? `<th class="tick">
+            <input type="checkbox" id="tickAll" aria-label="Select every policy shown"
+              ${allShownTicked ? 'checked' : ''}></th>` : ''}${policyColumns().map((c) =>
             `<th class="sortable ${c.cls || ''}" data-key="${c.key}">${c.header}${
               state.sort.key === c.key ? `<span class="arrow">${state.sort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`
           ).join('')}</tr></thead>
           <tbody>
             ${rows.length === 0
-              ? `<tr><td colspan="${policyColumns().length}"><div class="empty">No policies yet. Import a CSV or add one manually.</div></td></tr>`
-              : rows.map((p) => `<tr class="clickable" data-id="${p.id}">${
+              ? `<tr><td colspan="${policyColumns().length + (canBulkDelete ? 1 : 0)}"><div class="empty">No policies yet. Import a CSV or add one manually.</div></td></tr>`
+              : rows.map((p) => `<tr class="clickable ${
+                  state.selected.has(p.id) ? 'ticked' : ''}" data-id="${p.id}">${
+                  canBulkDelete ? `<td class="tick"><input type="checkbox" data-tick="${p.id}"
+                    aria-label="Select ${esc(p.policy_number)}"
+                    ${state.selected.has(p.id) ? 'checked' : ''}></td>` : ''}${
                   policyColumns().map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
                 }</tr>`).join('')}
           </tbody>
@@ -960,7 +993,7 @@ async function policiesView() {
             const cols = policyColumns();
             const first = cols.findIndex((c) => c.key in totalOf);
             return cols.map((c, i) => {
-              if (i === 0) return `<td colspan="${first}">Totals — ${rows.length} policies</td>`;
+              if (i === 0) return `<td colspan="${first + (canBulkDelete ? 1 : 0)}">Totals — ${rows.length} policies</td>`;
               if (i < first) return '';
               return c.key in totalOf
                 ? `<td class="num">${fmtExact(totalOf[c.key])}</td>`
@@ -988,7 +1021,31 @@ async function policiesView() {
           render();
         }));
       document.querySelectorAll('tr.clickable').forEach((tr) =>
-        tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
+        tr.addEventListener('click', (e) => {
+          // A tick is not a navigation. Without this, choosing a policy to
+          // delete opens it instead.
+          if (e.target.closest('td.tick')) return;
+          go(`#/policy/${tr.dataset.id}`);
+        }));
+
+      /* Ticking re-renders, because the bar, the totals and the header box
+         all read from the same selection — patching them by hand is how one
+         of them ends up saying something different from the others. */
+      document.querySelectorAll('[data-tick]').forEach((box) =>
+        box.addEventListener('change', () => {
+          const id = Number(box.dataset.tick);
+          if (box.checked) state.selected.add(id); else state.selected.delete(id);
+          render();
+        }));
+      $('#tickAll')?.addEventListener('change', (e) => {
+        // "All" means all of what you are looking at, not all of the book.
+        for (const id of shownIds)
+          if (e.target.checked) state.selected.add(id); else state.selected.delete(id);
+        render();
+      });
+      $('#clearTicks')?.addEventListener('click', () => { state.selected.clear(); render(); });
+      $('#bulkDeleteBtn')?.addEventListener('click', () => openBulkDeleteDialog());
+
       $('#exportBtn').addEventListener('click', () => {
         // The export has to obey the same two rules as the screen: an
         // investor's figures are their share, and the carrier mechanics are
@@ -2226,6 +2283,86 @@ function openDeletePolicyDialog(p) {
   }, 'Delete permanently');
 }
 
+/**
+ * Deleting a batch.
+ *
+ * Everything that will go is counted by the server first and shown here —
+ * including the documents filed against those policies, which are the part
+ * nobody expects and the part that does not come back.
+ *
+ * The confirmation carries the count, so a phrase typed for one selection
+ * cannot authorise a different one.
+ */
+async function openBulkDeleteDialog() {
+  const ids = [...state.selected];
+  let tally;
+  try {
+    tally = await api('/policies/bulk-delete/preview', { method: 'POST', body: { ids } });
+  } catch (err) { alert(err.message); return; }
+
+  if (tally.missing?.length) {
+    // Somebody else has been working too. Drop them and say so.
+    for (const id of tally.missing) state.selected.delete(id);
+    if (!tally.count) { toast('Those policies have already been deleted'); render(); return; }
+  }
+
+  /* Policy number, who is insured, and how big it is. Enough to recognise a
+     row as one you meant to pick; carrier and status are noise at this
+     moment and they cost the money column its last two digits. */
+  const list = tally.policies.map((p) => `<tr>
+      <td class="strong">${esc(p.policy_number)}</td>
+      <td>${esc([p.last_name, p.first_name].filter(Boolean).join(', '))}</td>
+      <td class="dlg-amt">${money(p.face_amount)}</td>
+    </tr>`).join('');
+
+  const body = `
+    <p style="margin:0 0 14px;font-size:14px">
+      This permanently deletes <strong>${tally.count}
+      ${tally.count === 1 ? 'policy' : 'policies'}</strong> and everything recorded against them.
+    </p>
+    <div class="dlg-scroll">
+      <table class="data dlg-list"><tbody>${list}</tbody></table>
+    </div>
+    <table class="data" style="margin-bottom:16px"><tbody>
+      <tr><td>Death benefit</td><td class="strong">${fmtExact(tally.face_amount)}</td></tr>
+      <tr><td>Capital invested</td><td class="strong">${fmtExact(tally.invested)}</td></tr>
+      <tr><td>Ledger entries</td><td class="strong">${tally.transactions}</td></tr>
+      <tr><td>Value snapshots</td><td class="strong">${tally.values}</td></tr>
+      ${tally.holders ? `<tr><td>Investor allocations</td>
+        <td class="strong">${tally.holders}</td></tr>` : ''}
+      ${tally.documents ? `<tr><td>Documents filed against them</td>
+        <td class="strong">${tally.documents}</td></tr>` : ''}
+    </tbody></table>
+    <div class="error-box" style="margin-bottom:16px">
+      This cannot be undone. ${tally.holders
+        ? `${tally.holders} investor ${tally.holders === 1 ? 'allocation goes' : 'allocations go'} with
+           ${tally.count === 1 ? 'it' : 'them'} — those positions disappear from the investors' own
+           portfolios. `
+        : ''}${tally.documents
+        ? `${tally.documents} uploaded ${tally.documents === 1 ? 'document is' : 'documents are'}
+           deleted too. `
+        : ''}Every deletion is written to the activity log.
+    </div>
+    <p style="margin:0 0 14px;font-size:13px" class="secondary">
+      If these policies ended rather than being entered by mistake, set each status to Sold,
+      Matured or Lapsed instead — that drops them out of the dashboard and reports but keeps
+      the history.
+    </p>
+    ${inputField(`Type <b>${esc(tally.confirm_phrase)}</b> to confirm`, 'confirm', '', 'text',
+      'required autocomplete=off')}`;
+
+  openDialog(`Delete ${tally.count} ${tally.count === 1 ? 'policy' : 'policies'}`, body,
+    async (v) => {
+      if (String(v.confirm || '').trim() !== tally.confirm_phrase)
+        throw new Error(`That does not match. Type ${tally.confirm_phrase}.`);
+      const out = await api('/policies/bulk-delete',
+        { method: 'POST', body: { ids: tally.policies.map((p) => p.id), confirm: v.confirm } });
+      state.selected.clear();
+      toast(`Deleted ${out.deleted} ${out.deleted === 1 ? 'policy' : 'policies'}`);
+      render();
+    }, `Delete ${tally.count === 1 ? 'it' : 'them all'} permanently`);
+}
+
 function openInsuredDialog(ins, onSaved) {
   const isNew = !ins?.id;
   const body = `
@@ -2534,6 +2671,12 @@ async function servicingView() {
 
 /* --------------------------- opportunities --------------------------- */
 
+/* The standing minimum an investor may take. The server is the authority —
+   every opportunity carries its own `min_commitment_pct`, which is lower only
+   when fewer points than this are left. This is the fallback and the thing the
+   "last slice" wording is measured against. */
+const MIN_TAKE_PCT = 10;
+
 const OPP_STATUSES = ['Open', 'Passed', 'Closed', 'Withdrawn'];
 
 /** Days until a date, or null. Negative means it has passed. */
@@ -2722,6 +2865,12 @@ async function opportunityView() {
   // somebody holding 82% appears unable to reduce it to 40%.
   const myHeld = mine && ['Requested', 'Confirmed'].includes(mine.status) ? Number(mine.pct) : 0;
   const myMax = Math.min(100, remaining + myHeld);
+  /* The floor comes from the server rather than being written here, so the
+     page can never state a minimum the API would then refuse — including on
+     the last slice, where the floor drops to whatever is left. */
+  const myMin = Math.min(Number(o.min_commitment_pct ?? MIN_TAKE_PCT), myMax);
+  // The floor only drops below the standing minimum when that is all there is.
+  const lastSlice = myMin < MIN_TAKE_PCT - 1e-9;
   const canTake = isInvestorUser() && o.status === 'Open'
     && (daysUntil(o.offer_closes_on) === null || daysUntil(o.offer_closes_on) >= 0);
 
@@ -2823,12 +2972,15 @@ async function opportunityView() {
       ${canTake && myMax > 0 ? `
       <div class="opp-take">
         <div class="field-row">
-          <div class="field" style="margin:0;max-width:230px">
+          <div class="field" style="margin:0;max-width:260px">
             <label>Percentage you want</label>
-            <input type="number" id="takePct" step="0.01" min="0.01" max="${myMax}"
-              value="${mine ? Number(mine.pct) : ''}" placeholder="up to ${fmtPct(myMax)}">
-            ${myHeld ? `<span class="muted" style="font-size:12px">
-              You hold ${fmtPct(myHeld)}; changing this replaces it.</span>` : ''}
+            <input type="number" id="takePct" step="0.01" min="${myMin}" max="${myMax}"
+              value="${mine ? Number(mine.pct) : ''}"
+              placeholder="${fmtPct(myMin)} to ${fmtPct(myMax)}">
+            <span class="muted" style="font-size:12px">${lastSlice
+              ? `Only ${fmtPct(myMax)} is left, and the last slice is taken whole.`
+              : `Minimum ${fmtPct(myMin)}, up to ${fmtPct(myMax)}.`}${
+              myHeld ? ` You hold ${fmtPct(myHeld)}; changing this replaces it.` : ''}</span>
           </div>
           <div class="take-figures">
             <div><div class="label">Purchase price</div>
@@ -3111,6 +3263,10 @@ async function opportunityView() {
       const pctEl = $('#takePct');
       if (pctEl) {
         const base = a.base;
+        /* Below the minimum the figures still restate — somebody typing 4 to
+           see what 4 would cost should see it — but the request is refused,
+           and the refusal says so before they click rather than after. */
+        const tooSmall = (pct) => pct > 0 && pct < myMin - 1e-9;
         const recalc = () => {
           const pct = Number(pctEl.value);
           const ok = pct > 0 && pct <= myMax + 1e-9;
@@ -3120,22 +3276,23 @@ async function opportunityView() {
           $('#takeOutlay').textContent = base ? at(base.invested) : '—';
           $('#takeProfit').textContent = base ? at(base.profit) : '—';
           applyShare(ok ? pct : 0);
+          $('#takeBtn').disabled = !ok || tooSmall(pct);
           $('#takeMsg').innerHTML = pct > myMax + 1e-9
             ? `<div class="error-box">Only ${fmtPct(myMax)} is available to you${
-                myHeld ? `, including the ${fmtPct(myHeld)} you already hold` : ''}.</div>` : '';
+                myHeld ? `, including the ${fmtPct(myHeld)} you already hold` : ''}.</div>`
+            : tooSmall(pct)
+              ? `<div class="error-box">${lastSlice
+                  ? `Only ${fmtPct(myMax)} is left, and the last slice has to be taken whole — ask for ${fmtPct(myMin)}.`
+                  : `The smallest share we can take is ${fmtPct(myMin)}.`}</div>`
+              : '';
         };
         pctEl.addEventListener('input', recalc);
         recalc();
-      } else if (isInvestorUser()) {
-        // No box to type in — they already hold a confirmed slice, or the
-        // offer has closed. Show the page at whatever they actually have.
-        applyShare(myHeld);
-      }
-      if (pctEl) {
 
         $('#takeBtn').addEventListener('click', async () => {
           const pct = Number(pctEl.value);
           if (!pct || pct <= 0) { $('#takeMsg').innerHTML = '<div class="error-box">Enter a percentage.</div>'; return; }
+          if (pct < myMin - 1e-9) { recalc(); return; }
           try {
             await api(`/opportunities/${o.id}/commit`, { method: 'POST', body: { pct } });
             toast(`Requested ${fmtPct(pct)}`);
@@ -3145,6 +3302,10 @@ async function opportunityView() {
             $('#takeMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
           }
         });
+      } else if (isInvestorUser()) {
+        // No box to type in — they already hold a confirmed slice, or the
+        // offer has closed. Show the page at whatever they actually have.
+        applyShare(myHeld);
       }
 
       $('#withdrawBtn')?.addEventListener('click', async () => {
@@ -3615,6 +3776,8 @@ async function maturitiesView() {
   const collectedBasis = collected.reduce((s, r) => s + (Number(r.total_invested) || 0) * (shareFactor(r) || 1), 0);
   const gain = Number(t.total_proceeds) - collectedBasis;
   const multiple = collectedBasis > 0 ? Number(t.total_proceeds) / collectedBasis : null;
+  const paidCount = collected.length;
+  const unpaidCount = rows.length - paidCount;
 
   const nameOf = (r) =>
     esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() || '—');
@@ -3663,11 +3826,19 @@ async function maturitiesView() {
         <div class="note">${multiple ? `${multiple.toFixed(2)}× on capital collected` : 'no claims paid yet'}</div>
       </div>
       <div class="stat">
-        <div class="label">${t.paid_count > 0 ? 'Realized IRR' : 'IRR if collected today'}</div>
-        <div class="value">${fmtIrr(m.portfolio?.irr)}</div>
-        <div class="note">${t.paid_count === rows.length
-          ? 'all claims paid · dated cash flows'
-          : `${rows.length - t.paid_count} claim${rows.length - t.paid_count === 1 ? '' : 's'} still assumed collected today`}</div>
+        ${/* The headline is what the book has actually returned: claims the
+             carrier has paid, each dated the day the money arrived, exactly
+             as the paid rows below are worked out. An outstanding claim is
+             not folded in at today's date — it has had no time to run, so it
+             would flatter the rate. That projection is still here, under the
+             figure and named for what it is. */''}
+        <div class="label">${paidCount ? 'Realized IRR' : 'IRR if collected today'}</div>
+        <div class="value">${fmtIrr(paidCount ? m.realized?.irr : m.portfolio?.irr)}</div>
+        <div class="note">${paidCount
+          ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
+             received${unpaidCount ? ` · ${fmtIrr(m.portfolio?.irr)} with the other ${unpaidCount}
+             assumed collected today` : ''}`
+          : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}</div>
       </div>
     </div>
 

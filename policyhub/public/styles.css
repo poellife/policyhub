@@ -70,6 +70,9 @@
   /* A row you are reading, and the row under the cursor. */
   --stripe:         #fafbfc;
   --hover:          #f1f3f5;
+  /* A row you have ticked. Darker than hover, so a selection still reads as
+     a selection while the cursor is somewhere else on the table. */
+  --selected:       #e6e9ed;
 
   /* one-hue, two-shade data ramp */
   --series-1: #0a0a0a;
@@ -119,6 +122,7 @@
   --border-strong:  #454a51;
   --stripe:         #1c1e21;
   --hover:          #24272b;
+  --selected:       #2d3238;
 
   --series-1: #fafafa;
   --series-2: #8f8f8f;
@@ -1129,3 +1133,37 @@ dialog.wide { width: 760px; }
 /* A cell currently showing a share rather than the whole policy. */
 td.at-my-share { font-weight: 600; }
 .share-banner.at-share { border-left-color: var(--success-text); }
+
+/* ------------------------ bulk selection ----------------------------- */
+
+/* The tick column is a target, not a decoration: 34px so it can be hit
+   without care, and it stops the click reaching the row underneath. */
+td.tick, th.tick { width: 34px; padding-left: 14px; padding-right: 0; cursor: default; }
+td.tick input, th.tick input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+tr.ticked > td { background: var(--selected); }
+
+.bulk-bar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--surface-1); border: 1px solid var(--axis);
+  padding: 12px 16px; margin-bottom: 14px; font-size: 13.5px;
+}
+.bulk-bar .muted { font-size: 12.5px; }
+.bulk-bar .spacer { flex: 1 }
+
+/* The list of what is about to be deleted, inside a dialog that cannot grow.
+
+   Its own scroller rather than `.table-wrap`, which is built for full-width
+   page tables and leaves a 20px indent here — enough to push a death benefit
+   past the right-hand edge and show it with its last digits missing. A
+   truncated figure is a different number, so the money column is pinned and
+   a long name gives up its tail instead. */
+.dlg-scroll { max-height: 230px; overflow-y: auto; overflow-x: hidden; margin-bottom: 16px; }
+table.dlg-list { width: 100%; table-layout: fixed; }
+table.dlg-list td { box-sizing: border-box; white-space: nowrap; }
+table.dlg-list td:nth-child(1) { width: 36%; overflow: hidden; text-overflow: ellipsis; }
+table.dlg-list td:nth-child(2) { width: 34%; overflow: hidden; text-overflow: ellipsis; }
+/* Left-aligned, unlike every other money column in the application. The
+   dialog clips at its right-hand edge and a death benefit showing
+   "$14,049,49" is a different number; starting the figure at a known left
+   position means anything lost is trailing space. */
+table.dlg-list td.dlg-amt { width: 30%; text-align: left; }

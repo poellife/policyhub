@@ -61,6 +61,30 @@ cost, premiums, fees, servicing, commissions. It is shown only for claims that
 have actually been paid; an outstanding claim would otherwise read as a total
 loss of its basis.
 
+### The realized rate at the top of the register
+
+The headline IRR is **what the book has actually returned**: only claims the
+carrier has paid, each inflow dated the day the money arrived. It is the same
+calculation every paid row below it shows, done once over all of them together
+— one rate solved on the combined dated flows, not an average of the per-policy
+rates, which would weight a $50k position the same as a $5m one.
+
+Outstanding claims are deliberately **not** folded in at today's date. A claim
+that has not been paid has had no time to run, so treating it as collected today
+flatters the rate — on a book with 2 of 23 claims paid the two figures came out
+at 23.0% and 13.2%. That projection is still worth having, so it sits under the
+headline, named for what it is: *"13.21% with the other 21 assumed collected
+today"*. With every claim paid the two are identical, because there is nothing
+left to assume, and the note says so.
+
+Until anything has been paid the tile reads *IRR if collected today* rather than
+*Realized IRR*, because there is no realized rate to report.
+
+`scripts/realized-irr-test.mjs` checks the rate against an independently written
+XIRR solver — a check that used the application's own solver would only prove it
+was consistent with itself — and that recording, then clearing, a cheque moves
+the figure both ways.
+
 **It reverses.** Clearing the date of death returns the policy to the active book
 and discards any proceeds recorded against the claim, so a date typed into the
 wrong record is a mistake you can simply undo. Adding another life to a matured
@@ -163,6 +187,42 @@ insured, face amount, capital invested and the number of rows destroyed — the
 activity log is the only record that survives. Setting the status to Sold, Matured
 or Lapsed is the non-destructive alternative: it drops the policy out of the
 dashboard, alerts and reports while keeping its history.
+
+## Deleting policies, a lot at once
+
+Imports are why this exists. A file loaded with the wrong owner column, or
+twice, leaves rows that have to come out, and doing that one at a time — typing
+each policy number into a confirmation box — is how somebody gives up half way
+and leaves the book worse than either extreme.
+
+It is the most destructive thing in the application, so:
+
+- **Administrators only.** A portfolio manager can delete a policy in their own
+  entity one at a time from its own page; nobody clears a shelf but an admin.
+  Managers are not shown the tick boxes at all, and the API refuses them.
+- **All or nothing**, inside one transaction. If any policy in the batch has
+  already been deleted by somebody else the whole thing is refused and nothing
+  is removed — a bulk delete that half worked is worse than one that did not run.
+- **The confirmation carries the count** — `DELETE 12` — so a phrase typed for
+  one selection cannot authorise a different one.
+- **What goes with them is counted and shown first**: ledger entries, value
+  snapshots, investor allocations and the documents filed against those
+  policies. The last two are the ones nobody expects, and documents do not come
+  back.
+- **One audit entry per policy**, in the same shape a single deletion writes, each
+  marked as part of a batch.
+
+The selection lives on the Policies grid and survives searching, filtering and
+sorting — pick three from one carrier, search for another, pick two more. When
+some of what you have picked is no longer on screen the bar says so, because a
+count of five above three rows is alarming otherwise. **Select all** means all of
+what you are looking at, not the whole book.
+
+Capped at 500 per call, which keeps one transaction bounded.
+
+`scripts/bulk-delete-test.mjs` and `scripts/bulk-delete-ui-test.mjs` cover who
+may do it, what it refuses to be asked, the all-or-nothing rule, and that a
+selection survives a search.
 
 ## Roles
 
@@ -295,6 +355,35 @@ simultaneous 60% requests at the same offer and asserts exactly one succeeds.
 An investor changing a request they already hold is not blocked by their own
 percentage — someone holding 82% can reduce it to 40%, and the difference is
 released to everybody else.
+
+### The minimum share
+
+**Ten per cent is the smallest slice an investor may take.** A life settlement
+is a long, hands-on position — years of premium calls, servicing and paperwork
+against one policy — and a cap table of twenty two-per-cent holders costs more
+to administer than the small tickets are worth. The figure lives in one place,
+`MIN_COMMITMENT_PCT` in `src/api.js`.
+
+**The last slice is the exception.** If fewer than ten points are left, the
+floor drops to exactly what remains, and that remainder has to be taken whole.
+A floor that could leave a deal permanently six per cent short would be a worse
+rule than no floor at all. So the effective minimum is `min(10, what is left)`,
+and it is sent to the browser as `min_commitment_pct` on every opportunity
+rather than written into the page — the portal can never state a floor the API
+would then refuse.
+
+On screen the input carries the range as its `min` and its placeholder, the
+hint underneath reads *Minimum 10%, up to 100%* — or *Only 6% is left, and the
+last slice is taken whole* — and typing less disables the request button and
+says why, without a round trip. The figures still restate at whatever is typed,
+because somebody entering 4 to see what 4 would cost should see it.
+
+The floor binds investors, not staff. A manager confirming a request is making
+a commercial decision and is not held to it.
+
+`scripts/minimum-take-test.mjs` and `scripts/minimum-take-ui-test.mjs` cover
+the floor, the last-slice exception, a fractional remainder, reducing an
+existing request, and what a declined request releases.
 
 ### Who can do what
 
@@ -726,6 +815,11 @@ reach those rules correctly.
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
+| `bulk-delete-test.mjs` | who may clear a shelf, what it refuses, and that a refused batch removes nothing |
+| `bulk-delete-ui-test.mjs` | the tick column, a selection surviving a search, and what the dialog says first |
+| `realized-irr-test.mjs` | the realized rate over paid claims only, against an independent XIRR solver |
+| `minimum-take-test.mjs` | the ten per cent floor, the last slice taken whole, and who it binds |
+| `minimum-take-ui-test.mjs` | the range on the input, the reason shown before clicking, and the wording when under ten is left |
 | `register-test.mjs` | self-registration: what the form refuses, that it never says whether an address is already a client, tax-number encryption, approving and declining |
 | `register-ui-test.mjs` | one person from the Register link to their first sign-in, and the approval queue on the Investors page |
 | `investor-entity-test.mjs` | assigning an investor to an entity, who may set it, and that it grants sight of the person and not of their book |

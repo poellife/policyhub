@@ -885,6 +885,136 @@ router.delete('/policies/:id', blockInvestors, adminOrManager, inPolicyScope('id
     policy_number: p.policy_number, values: p.value_count, transactions: p.txn_count } });
 }));
 
+/**
+ * Deleting a lot of policies at once.
+ *
+ * This exists because of imports. A file loaded with the wrong owner
+ * column, or twice, or from the wrong export, leaves a hundred rows that
+ * have to come out — and doing that one policy at a time, typing each
+ * policy number into a confirmation box, is how somebody gives up half
+ * way and leaves the book in a worse state than either extreme.
+ *
+ * It is the most destructive thing in the application, so:
+ *
+ *   - administrators only. A portfolio manager can delete a policy in
+ *     their own entity one at a time; nobody clears a shelf but an admin.
+ *   - all or nothing, inside one transaction. A bulk delete that half
+ *     worked is worse than one that did not run.
+ *   - the confirmation carries the count, so a number typed for one
+ *     selection cannot authorise a different one.
+ *   - what goes with them is counted and shown first. Transactions and
+ *     value snapshots are obvious; the documents filed against a policy
+ *     are not, and those are files that do not come back.
+ */
+
+/** Beyond this, do it in two goes — one transaction should stay bounded. */
+const BULK_DELETE_LIMIT = 500;
+
+/** The exact words. Tied to the count, so it changes with the selection. */
+export const bulkDeletePhrase = (n) => `DELETE ${n}`;
+
+async function bulkDeleteTally(ids) {
+  const { rows } = await q(
+    `SELECT p.id, p.policy_number, p.carrier_name, p.face_amount, p.status,
+            i.first_name, i.last_name,
+            (SELECT COUNT(*)::int FROM policy_values v   WHERE v.policy_id = p.id) AS value_count,
+            (SELECT COUNT(*)::int FROM transactions t    WHERE t.policy_id = p.id) AS txn_count,
+            (SELECT COUNT(*)::int FROM policy_investors a WHERE a.policy_id = p.id) AS holder_count,
+            (SELECT COUNT(*)::int FROM documents d       WHERE d.policy_id = p.id) AS document_count,
+            (SELECT COALESCE(SUM(amount),0) FROM transactions t WHERE t.policy_id = p.id) AS invested
+       FROM policies p LEFT JOIN insureds i ON i.id = p.insured_id
+      WHERE p.id = ANY($1::int[])
+      ORDER BY p.policy_number`,
+    [ids]
+  );
+  const sum = (k) => rows.reduce((a, r) => a + Number(r[k] || 0), 0);
+  return {
+    policies: rows,
+    count: rows.length,
+    values: sum('value_count'),
+    transactions: sum('txn_count'),
+    holders: sum('holder_count'),
+    documents: sum('document_count'),
+    invested: sum('invested'),
+    face_amount: sum('face_amount'),
+    confirm_phrase: bulkDeletePhrase(rows.length),
+  };
+}
+
+/** Which ids were asked for, cleaned up — no duplicates, no rubbish. */
+function bulkIds(body) {
+  const raw = Array.isArray(body?.ids) ? body.ids : [];
+  const ids = [...new Set(raw.map((v) => int(v)).filter((v) => Number.isInteger(v) && v > 0))];
+  if (!ids.length) return { error: 'Choose at least one policy to delete.' };
+  if (ids.length > BULK_DELETE_LIMIT)
+    return { error: `That is ${ids.length} policies. Delete at most ${BULK_DELETE_LIMIT} at a time.` };
+  return { ids };
+}
+
+/** What would go, before anything does. */
+router.post('/policies/bulk-delete/preview', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return res.status(400).json({ error });
+    const tally = await bulkDeleteTally(ids);
+    const missing = ids.filter((id) => !tally.policies.some((p) => p.id === id));
+    res.json({ ...tally, missing });
+  }));
+
+router.post('/policies/bulk-delete', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return res.status(400).json({ error });
+
+    const tally = await bulkDeleteTally(ids);
+    if (tally.count !== ids.length) {
+      // Somebody else got there first, or the page was open a long time.
+      const gone = ids.length - tally.count;
+      return res.status(409).json({
+        error: `${gone} of those policies no longer ${gone === 1 ? 'exists' : 'exist'}. `
+             + 'Reload and choose again.',
+        found: tally.count,
+      });
+    }
+    if (str(req.body?.confirm) !== tally.confirm_phrase)
+      return res.status(400).json({
+        error: `Type ${tally.confirm_phrase} to confirm.`,
+        confirm_phrase: tally.confirm_phrase,
+      });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rowCount } = await client.query(
+        'DELETE FROM policies WHERE id = ANY($1::int[])', [ids]);
+      if (rowCount !== ids.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'The selection changed while it was being deleted. Nothing was removed.' });
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    /* One audit entry per policy, in the same shape a single deletion
+       writes, so the log reads the same however the policy was removed —
+       and marked as part of a batch, because thirty entries at the same
+       second with no explanation is its own kind of alarming. */
+    for (const p of tally.policies)
+      await audit(req.user.uid, 'policy', p.id, 'delete',
+        `${p.policy_number} · ${p.carrier_name} · ` +
+        `${[p.last_name, p.first_name].filter(Boolean).join(', ')} · face ${p.face_amount} · ` +
+        `${p.value_count} value snapshots · ${p.txn_count} transactions · ${p.invested} invested · ` +
+        `bulk delete of ${tally.count}`);
+
+    res.json({ ok: true, deleted: tally.count, values: tally.values,
+      transactions: tally.transactions, documents: tally.documents,
+      policy_numbers: tally.policies.map((p) => p.policy_number) });
+  }));
+
 /* ------------------------------------------------------------------ *
  * documents
  *
@@ -1395,6 +1525,34 @@ async function oppVisible(req, id) {
    table without a decision recorded. Funded → it became a policy. */
 const OPP_STATUSES = ['Open', 'Passed', 'Closed', 'Withdrawn', 'Funded'];
 
+/**
+ * The smallest slice an investor may ask for.
+ *
+ * A life settlement is not a liquid instrument — every position carries years
+ * of premium calls, servicing and paperwork, and a cap table of twenty
+ * two-per-cent holders costs more to administer than the small tickets are
+ * worth. Ten per cent is the floor.
+ *
+ * The one exception is the last slice. If fewer than ten points are left, an
+ * investor may take exactly what remains: a floor that could leave a deal
+ * permanently six per cent short would be a worse rule than no floor at all.
+ * So the effective minimum is `min(10, what is left)`.
+ *
+ * It binds what an INVESTOR may request. A manager confirming a request is
+ * making a commercial decision and is not held to it.
+ */
+export const MIN_COMMITMENT_PCT = 10;
+
+/** The smallest request that can be accepted right now, given what is left. */
+export const minimumTake = (remainingPct) =>
+  Math.min(MIN_COMMITMENT_PCT, Math.max(0, Number(remainingPct) || 0));
+
+/** "10%" rather than "10.0000%", but "6.25%" when the figure needs it. */
+const pctText = (n) => {
+  const v = Number(n) || 0;
+  return `${v % 1 ? String(Number(v.toFixed(2))) : String(Math.round(v))}%`;
+};
+
 const OPP_FIELDS = {
   policy_number: str, carrier_name: str, product_type: str, face_amount: num,
   insured_last_name: str, insured_first_name: str, insured_dob: date,
@@ -1455,6 +1613,13 @@ async function loadOpportunity(req, id) {
     o.my_commitment = o.commitments[0] || null;
   }
 
+  /* Sent rather than assumed, so the portal never states a floor the server
+     would disagree with — including on the last slice, where it is smaller.
+     Their own existing request is added back, because replacing it is not
+     competing with it. */
+  o.min_commitment_pct = minimumTake(
+    o.remaining_pct + (Number(o.my_commitment?.pct) || 0));
+
   const share = me === null ? 1 : (Number(o.my_commitment?.pct) || 0) / 100;
   o.analysis = analyseOpportunity(o, 1);
   // Alongside the whole-policy figures, what their own slice would cost.
@@ -1513,6 +1678,8 @@ router.get('/opportunities', wrap(async (req, res) => {
       ...o,
       taken_pct: taken,
       remaining_pct: Math.max(0, 100 - taken),
+      min_commitment_pct: minimumTake(
+        Math.max(0, 100 - taken) + (Number(o.my_pct) || 0)),
       irr_at_le: a.base?.irr ?? null,
       matures_on: a.base?.matures_on ?? null,
       shared_with: me === null ? o.shared_with : undefined,
@@ -1820,6 +1987,22 @@ router.post('/opportunities/:id/commit', wrap(async (req, res) => {
         error: remaining <= 0
           ? 'This opportunity has just been fully spoken for.'
           : `Only ${remaining.toFixed(remaining % 1 ? 4 : 0)}% is still available.`,
+        remaining_pct: Math.max(0, remaining),
+      });
+    }
+
+    /* The floor, checked here rather than only in the browser: the rule is
+       about what the firm will accept, so it has to hold for anything that
+       can reach this route. */
+    const floor = minimumTake(remaining);
+    if (pct < floor - 1e-9) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: floor < MIN_COMMITMENT_PCT
+          ? `Only ${pctText(remaining)} is left, and the last slice has to be taken whole — `
+            + `ask for ${pctText(floor)}.`
+          : `The smallest share we can take is ${pctText(MIN_COMMITMENT_PCT)}.`,
+        min_commitment_pct: floor,
         remaining_pct: Math.max(0, remaining),
       });
     }
@@ -2205,20 +2388,40 @@ router.get('/maturities', wrap(async (req, res) => {
   ]);
 
   // Return on each matured policy, and one IRR across all of them together.
-  const { byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true, fund });
+  const { policies, byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true, fund });
   const withReturn = rows.rows.map((r) => {
     const a = analyzeFlows(byPolicy.get(r.id) || []);
     return { ...r, irr: a.irr, irr_days: a.days, irr_short: a.short_period,
              irr_ambiguous: a.ambiguous, multiple: a.multiple };
   });
 
+  /* Two different questions, and the headline is the first one.
+   *
+   *   realized — what the book has actually returned. Only claims the
+   *     carrier has paid, and each one's inflow dated the day the cheque
+   *     arrived. That is a fact, and it is what every paid row on the
+   *     screen already shows.
+   *
+   *   assumed — the same calculation with every outstanding claim treated
+   *     as if it were collected today. Useful, but it is a projection, and
+   *     showing it under the word "realized" overstates the return on a
+   *     book with claims still in the post: an unpaid claim assumed
+   *     collected today has had no time to run, so it flatters the rate.
+   *
+   * Both go over, so the screen can lead with whichever it actually has and
+   * label it honestly. Neither is an average of the per-policy rates — that
+   * would weight a $50k position the same as a $5m one. */
+  const paidIds = new Set(policies.filter((p) => p.proceeds_amount != null).map((p) => p.id));
+  const paidFlows = [];
+  for (const id of paidIds) paidFlows.push(...(byPolicy.get(id) || []));
+
   res.json({
     rows: withReturn,
     totals: totals.rows[0],
-    // Realized return across every matured policy's dated flows — not an
-    // average of the per-policy rates, which would weight a $50k position
-    // the same as a $5m one.
+    /* Kept under its old name so nothing reading this endpoint breaks, and
+       it remains the right figure for "what if everything landed today". */
     portfolio: analyzeFlows(combined),
+    realized: { ...analyzeFlows(paidFlows), policy_count: paidIds.size },
     scopedToInvestor: scope !== null,
   });
 }));

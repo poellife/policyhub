@@ -173,9 +173,16 @@ check('the field is capped at what remains', Math.abs(Number(max) - 18) < 0.01, 
 await inv.fill('#takePct', '40'); await inv.waitForTimeout(350);
 check('typing more than that says so before you click',
   /Only 18% is available/.test(await inv.locator('#takeMsg').textContent()));
-await inv.click('#takeBtn'); await inv.waitForTimeout(2000);
-const refusal = (await inv.locator('#takeMsg').textContent().catch(() => '')) || '';
-check('and the server refuses it too', /Only 18%/.test(refusal), refusal.trim() || '(empty)');
+check('and there is nothing to click while it says so',
+  await inv.locator('#takeBtn').isDisabled());
+/* Sent past the screen entirely: the page explaining a limit and the server
+   enforcing it are two different jobs, and only the second one is a rule. */
+const direct = await fetch(`${BASE}/api/opportunities/${tight.id}/commit`, {
+  method: 'POST', headers: { Cookie: inv1c, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ pct: 40 }) });
+const refusal = (await direct.json())?.error || '';
+check('and the server refuses it with no screen involved',
+  direct.status === 409 && /Only 18%/.test(refusal), `${direct.status} ${refusal}`);
 
 console.log('\nCHANGING A REQUEST YOU ALREADY HOLD');
 // Investor 2 holds 82% of that same offer. Their own holding must not count
