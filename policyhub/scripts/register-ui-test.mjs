@@ -77,7 +77,6 @@ for (const [label, sel] of [
   ['a street address', 'input[name="address_line1"]'],
   ['a city', 'input[name="city"]'],
   ['a ZIP', 'input[name="postal_code"]'],
-  ['a tax number', 'input[name="tax_id"]'],
   ['a password', 'input[name="password"]'],
   ['and it typed twice', 'input[name="password2"]'],
 ])
@@ -86,8 +85,12 @@ check('the state is a list, not something to mistype',
   (await p.locator('#regForm select[name="state"] option').count()) >= 54);
 check('the passwords are masked',
   (await p.locator('#regForm input[name="password"]').getAttribute('type')) === 'password');
-check('it explains what happens to the tax number',
-  /encrypted the moment it reaches us/i.test(form));
+/* Deliberately absent. A stranger's first minute on the site is the worst
+   moment to ask for a Social Security number, and the account can be opened
+   without one — it is collected afterwards, on their own Account page. */
+check('it does not ask for a Social Security number at all',
+  (await p.locator('#regForm [name="tax_id"]').count()) === 0
+  && !/Social Security/i.test(form), form.slice(0, 240));
 check('and that we never see the password', /we never see it/i.test(form));
 
 console.log('\nFILLING IT IN');
@@ -102,7 +105,6 @@ await fill('address_line2', 'Unit 7');
 await fill('city', 'Birmingham');
 await p.selectOption('#regForm select[name="state"]', 'MI');
 await fill('postal_code', '48009');
-await fill('tax_id', '987-65-4321');
 await fill('note', 'Introduced by Alan Spiegel.');
 await fill('password', PASSWORD);
 await fill('password2', 'something-else-entirely');
@@ -167,20 +169,10 @@ const rowText = (await row.textContent()).replace(/\s+/g, ' ');
 check('with the entity it will be held in', rowText.includes(ENTITY), rowText.slice(0, 160));
 check('their address', /410 Larkspur Lane/.test(rowText));
 check('what they told us', /Introduced by Alan Spiegel/.test(rowText));
-check('and only four digits of the tax number',
-  /4321/.test(rowText) && !/987.?65.?4321/.test(rowText),
-  (rowText.match(/[•\-0-9]{6,}/) || [''])[0]);
+check('and no tax number, because none was asked for',
+  !/4321/.test(rowText) && !/•••/.test(rowText),
+  (rowText.match(/[•\-0-9]{6,}/) || ['none'])[0]);
 await staff.screenshot({ path: `${S}/rg4-queue.png`, fullPage: true });
-
-console.log('\nSEEING IT IN FULL IS A DELIBERATE ACT');
-await row.locator('[data-reveal-tax]').click();
-await staff.waitForTimeout(1200);
-check('an administrator can ask for the whole number',
-  /987-65-4321/.test(await row.textContent()),
-  (await row.locator('.app-tax').textContent()).trim());
-const audit = await json(await api('/audit'));
-check('and it is written down that they did',
-  (audit || []).some((r) => r.entity === 'application' && /revealed tax id/i.test(r.detail || '')));
 
 console.log('\nAPPROVING');
 await row.locator('[data-approve-app]').click();
@@ -222,6 +214,37 @@ check('named as the entity they registered',
 check('holding nothing until we allocate something',
   /0 positions|No policies/i.test(portal) || /positions/.test(portal), portal.slice(0, 160));
 await them.screenshot({ path: `${S}/rg6-first-login.png`, fullPage: true });
+
+console.log('\nAND ADD THEIR TAX NUMBER WHEN IT SUITS THEM');
+/* The form did not ask for it, so this is where it arrives — from the person
+   it belongs to, over a session that has already been authenticated. */
+await them.goto(`${BASE}/#/settings`);
+await them.waitForSelector('#pwForm', { timeout: 12000 });
+await them.waitForTimeout(700);
+const acct = (await them.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('their Account page says none is on file',
+  /do not have a tax number for you yet/i.test(acct), acct.slice(0, 200));
+check('with a box to put one in', (await them.locator('#taxForm [name="tax_id"]').count()) === 1);
+check('and it explains what happens to it',
+  /encrypted the moment it reaches us/i.test(acct));
+await them.fill('#taxForm [name="tax_id"]', '12345');
+await them.click('#taxForm button[type=submit]');
+await them.waitForTimeout(1200);
+check('a number that is not nine digits is refused, with the reason',
+  /nine digits/i.test(await them.locator('#taxMsg').textContent()),
+  (await them.locator('#taxMsg').textContent()).trim());
+await them.fill('#taxForm [name="tax_id"]', '654-32-1098');
+await them.click('#taxForm button[type=submit]');
+await them.waitForTimeout(1800);
+const saved = (await them.locator('.main').textContent()).replace(/\s+/g, ' ');
+check('a good one is saved and the panel changes to say so',
+  /Tax number on file, ending 1098/.test(saved), saved.slice(0, 200));
+check('the box is gone, because it is not theirs to change now',
+  (await them.locator('#taxForm').count()) === 0);
+check('and it says who to speak to instead', /call the office/i.test(saved));
+check('the whole number is never shown back to them',
+  !/654.?32.?1098/.test(saved));
+await them.screenshot({ path: `${S}/rg7-tax-on-file.png`, fullPage: true });
 
 console.log(`\nERRORS: ${errs.length ? errs.join(' | ') : 'none'}`);
 check('no page errors', errs.length === 0);

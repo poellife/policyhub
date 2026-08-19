@@ -537,14 +537,11 @@ function registerView() {
           <div class="field"><label for="rf_country">Country</label>
             <input id="rf_country" name="country" value="United States" autocomplete="country-name"></div>
 
-          <div class="dlg-section">For tax reporting</div>
-          <div class="field"><label for="rf_tax">Social Security number or Tax ID (EIN) *</label>
-            <input id="rf_tax" name="tax_id" inputmode="numeric" required autocomplete="off"
-                   placeholder="123-45-6789" maxlength="14">
-            <span class="muted" style="font-size:12px">Needed to issue your K&#8209;1. It is
-              encrypted the moment it reaches us, only the last four digits are ever displayed,
-              and every time anyone here looks at the full number it is written to the audit
-              log.</span></div>
+          ${/* No tax number here. It is needed eventually — a K-1 cannot be
+               issued without one — but not to open an account, and a
+               stranger's first minute on the site is the worst moment to ask
+               for it. It is collected afterwards, on their own record, once
+               there is a relationship. */''}
 
           <div class="dlg-section">Your password</div>
           <div class="field-row">
@@ -1738,7 +1735,7 @@ function returnTab(p, d) {
         <div class="label">${settled ? 'Proceeds received' : 'Proceeds assumed'}</div>
         <div class="value">${fmtExact(r.returned)}</div>
         <div class="note">${settled
-          ? `received ${d.proceeds_received_on ? fmtDate(d.proceeds_received_on) : '—'}`
+          ? `funded ${d.proceeds_received_on ? fmtDate(d.proceeds_received_on) : '—'}`
           : `death benefit as of ${fmtDate(d.as_of)}`}</div>
       </div>
       <div class="stat">
@@ -1767,7 +1764,7 @@ function returnTab(p, d) {
               value="${d.proceeds_amount ?? ''}" placeholder="${Number(d.death_benefit).toFixed(2)}">
             <span class="muted" style="font-size:12px">Exact amount received, after any loan
               or interest adjustment.</span></div>
-          <div class="field"><label>Date the cheque cleared</label>
+          <div class="field"><label>Date funded</label>
             <input type="date" id="calcPaid" value="${esc(dateInput(d.proceeds_received_on) || '')}">
             <span class="muted" style="font-size:12px">The IRR is measured to this date —
               collection lag is a real cost.</span></div>
@@ -3850,7 +3847,7 @@ async function maturitiesView() {
           <th>Matured</th><th>Insured</th><th>Policy #</th><th>Carrier</th>
           <th>Type</th>${investorView ? '' : '<th>Owner</th>'}
           <th class="num">Death benefit</th><th class="num">Invested</th>
-          <th class="num">Proceeds</th><th>Received</th><th class="num">Gain</th>
+          <th class="num">Proceeds</th><th>Funded</th><th class="num">Gain</th>
           <th class="num">IRR</th>
           ${canEditData() ? '<th></th>' : ''}
         </tr></thead>
@@ -3939,7 +3936,7 @@ async function maturitiesView() {
           { header: 'Death Benefit', get: (r) => Number(r.death_benefit || 0) * shareFactor(r) },
           { header: 'Capital Invested', get: (r) => Number(r.total_invested || 0) * shareFactor(r) },
           { header: 'Proceeds', get: (r) => r.proceeds_amount == null ? '' : Number(r.proceeds_amount) * shareFactor(r) },
-          { header: 'Received', key: 'proceeds_received_on' },
+          { header: 'Date Funded', key: 'proceeds_received_on' },
           { header: 'IRR', get: (r) => (r.irr == null ? '' : (r.irr * 100).toFixed(4)) },
           { header: 'Days Held', key: 'irr_days' },
         ]));
@@ -3955,7 +3952,7 @@ function openProceedsDialog(r) {
       death benefit ${fmtExact(r.death_benefit)}</span></div>
     <div class="field-row">
       ${moneyField('Gross proceeds received', 'proceeds_amount', r.proceeds_amount)}
-      ${inputField('Date received', 'proceeds_received_on', dateInput(r.proceeds_received_on), 'date')}
+      ${inputField('Date funded', 'proceeds_received_on', dateInput(r.proceeds_received_on), 'date')}
     </div>
     <span class="muted" style="font-size:12px">
       Enter what the carrier actually paid, which may differ from the death benefit
@@ -4934,6 +4931,39 @@ async function settingsView() {
         </div>
       </div>
 
+      ${/* Not asked for at sign-up, so this is where it arrives — from the
+           person it belongs to, over a session that has already been
+           authenticated. Filling a blank only: once a number is on file,
+           changing it goes through the office. */''}
+      ${isInvestorUser() ? `
+      <div class="card">
+        <div class="card-head"><h2>Tax reporting</h2></div>
+        <div class="card-body">
+          <div id="taxMsg"></div>
+          ${state.user.investor?.tax_id_last4 ? `
+            <p style="margin:0 0 6px;font-size:14px">
+              Tax number on file, ending
+              <strong>${esc(state.user.investor.tax_id_last4)}</strong>.</p>
+            <span class="muted" style="font-size:12.5px">Stored encrypted; only these four
+              digits are ever displayed, and every time anyone here reads the full number it
+              goes to the activity log. To correct it, call the office &mdash; a tax number
+              cannot be changed from this screen, because it decides where your K&#8209;1
+              goes.</span>` : `
+            <p style="margin:0 0 10px;font-size:14px">
+              We do not have a tax number for you yet. It is needed to issue your
+              K&#8209;1 &mdash; you can add it here whenever it suits you.</p>
+            <form id="taxForm">
+              ${inputField('Social Security number or Tax ID (EIN)', 'tax_id', '', 'text',
+                'required autocomplete=off inputmode=numeric maxlength=14 placeholder="123-45-6789"')}
+              <span class="muted" style="font-size:12.5px;display:block;margin:-6px 0 12px">
+                It is encrypted the moment it reaches us, only the last four digits are ever
+                displayed afterwards, and nobody here can read the whole number without it
+                being written to the activity log.</span>
+              <button class="primary" type="submit">Save it</button>
+            </form>`}
+        </div>
+      </div>` : ''}
+
       ${isInvestorUser() ? '' : `
       <div class="card">
         <div class="card-head"><h2>Import data</h2><div class="spacer"></div>
@@ -5039,6 +5069,18 @@ async function settingsView() {
           e.target.reset();
         } catch (err) {
           $('#pwMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+        }
+      });
+      $('#taxForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api('/me/tax-id', { method: 'PUT', body: formValues(e.target) });
+          // Re-read rather than patch: the panel it becomes is a different one.
+          state.user.investor.tax_id_last4 = r.tax_id_last4;
+          toast('Tax number saved');
+          render();
+        } catch (err) {
+          $('#taxMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
         }
       });
       document.querySelectorAll('[data-edit-user]').forEach((b) =>

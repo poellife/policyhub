@@ -37,6 +37,10 @@ const investor = await login(INVESTOR1.email, INVESTOR1.password);
 
 const PASSWORD = scratchPassword(TAG);
 
+const signIn = (email, password) => fetch(`${BASE}/api/auth/login`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email, password }) });
+
 const wipe = async () => {
   for (const a of ((await json(await api(admin, '/applications'))) || [])
     .filter((x) => String(x.email).includes(TAG))) {
@@ -103,8 +107,8 @@ await bad('a mangled email', { email: 'not-an-address' }, /valid email/i);
 await bad('a short password', { password: 'short' }, /10 characters/i);
 await bad('no phone number', { phone: '' }, /phone/i);
 await bad('half an address', { city: '', postal_code: '' }, /address/i);
-await bad('no tax number', { tax_id: '' }, /Social Security/i);
-await bad('a tax number that is too short', { tax_id: '12345' }, /nine-digit/i);
+await bad('a tax number that is not nine digits, if one is offered at all',
+  { tax_id: '12345' }, /nine-digit/i);
 check('and it says everything that is wrong at once, not one at a time',
   /name.*email.*password/i.test((await json(await register({}))).error || ''),
   (await json(await register({}))).error);
@@ -123,6 +127,51 @@ check('their address', /900 Maple Road/.test(mine.address_line1));
 check('and what they told us', /Introduced by/.test(mine.note));
 check('the count says one is waiting',
   (await json(await api(admin, '/applications/summary'))).pending >= 1);
+
+console.log('\nWHAT IS STORED, AND WHAT IS NOT');
+/* Deliberately not asked for on the form. A stranger's first minute on the
+   site is the worst moment to ask for a Social Security number, and an
+   account can be opened without one. It arrives afterwards, from the
+   investor's own Account page or from the office. */
+const noTax = await register(applicant(6, { tax_id: '' }));
+check('a registration with no tax number at all is accepted', noTax.status === 202,
+  String(noTax.status));
+const plain = ((await json(await api(admin, '/applications'))) || [])
+  .find((a) => a.email === `${TAG}-6@example.com`);
+check('and it queues like any other', plain?.status === 'Pending');
+check('with nothing shown where the number would be',
+  !plain?.tax_id_masked, JSON.stringify(plain?.tax_id_masked));
+const approvedPlain = await json(await api(admin, `/applications/${plain.id}/approve`,
+  { method: 'POST', body: {} }));
+check('approving one still creates the investor', !!approvedPlain.investor_id);
+const blank = await json(await api(admin, `/investors/${approvedPlain.investor_id}`));
+check('whose record simply has no tax number yet',
+  !blank.tax_id_last4, JSON.stringify(blank.tax_id_last4));
+
+console.log('\nTHE INVESTOR CAN SUPPLY IT THEMSELVES, LATER');
+const theirLogin = await signIn(`${TAG}-6@example.com`, PASSWORD);
+const theirs = theirLogin.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+const me6 = await json(await api(theirs, '/auth/me'));
+check('their own account says none is on file',
+  me6.investor && !me6.investor.tax_id_last4, JSON.stringify(me6.investor));
+check('a number that is not nine digits is refused',
+  (await api(theirs, '/me/tax-id', { method: 'PUT', body: { tax_id: '123' } })).status === 400);
+const supplied = await api(theirs, '/me/tax-id',
+  { method: 'PUT', body: { tax_id: '555-66-7788' } });
+check('a good one is accepted', supplied.status === 200, String(supplied.status));
+check('and the record now carries the last four',
+  (await json(await api(admin, `/investors/${approvedPlain.investor_id}`))).tax_id_last4 === '7788');
+check('but they cannot change it once it is there',
+  (await api(theirs, '/me/tax-id', { method: 'PUT', body: { tax_id: '111-11-1111' } })).status === 409);
+check('nor read it back in full',
+  (await api(theirs, `/investors/${approvedPlain.investor_id}/tax-id`)).status === 403);
+check('while an administrator still can',
+  (await json(await api(admin, `/investors/${approvedPlain.investor_id}/tax-id`))).tax_id === '555667788');
+check('and their supplying it is on the activity log',
+  ((await json(await api(admin, '/audit'))) || [])
+    .some((r) => /investor supplied their own tax number/i.test(r.detail || '')));
+check('staff cannot use the investor route as a back door',
+  (await api(admin, '/me/tax-id', { method: 'PUT', body: { tax_id: '999-99-9999' } })).status === 403);
 
 console.log('\nWHAT IS STORED, AND WHAT IS NOT');
 check('the chosen password is nowhere in the response',
@@ -145,9 +194,6 @@ check('an investor cannot see the queue at all',
   (await api(investor, '/applications')).status === 403);
 
 console.log('\nNOTHING WORKS UNTIL SOMEBODY SAYS SO');
-const signIn = (email, password) => fetch(`${BASE}/api/auth/login`, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ email, password }) });
 check('the applicant cannot sign in yet',
   (await signIn(`${TAG}-1@example.com`, PASSWORD)).status === 401);
 check('and no login was created for them',

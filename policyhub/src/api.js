@@ -270,24 +270,38 @@ router.post('/register', wrap(async (req, res) => {
   if (!str(b.address_line1) || !str(b.city) || !str(b.state) || !str(b.postal_code))
     problems.push('your full home address');
 
+  /* A tax number is NOT asked for at sign-up.
+   *
+   * It is needed eventually — a K-1 cannot be issued without one — but not to
+   * open an account, and a stranger's first interaction with the firm is the
+   * worst possible moment to ask for it: they are typing it into a form on a
+   * site they have no reason to trust yet, over a connection nobody has
+   * vouched for. It is collected afterwards, on the investor's own record,
+   * once there is a relationship.
+   *
+   * The field is still accepted here if something sends one, because the
+   * column and the encryption already exist and silently discarding a number
+   * somebody deliberately supplied would be worse than storing it properly.
+   * It is simply never required, and the form no longer asks. */
   const taxDigits = digitsOf(b.tax_id);
-  if (!taxDigits) problems.push('your Social Security number or tax ID');
-  else if (!looksLikeTaxId(taxDigits))
-    problems.push('a nine-digit Social Security number or tax ID');
+  if (taxDigits && !looksLikeTaxId(taxDigits))
+    problems.push('a nine-digit Social Security number or tax ID, or none at all');
 
   if (problems.length)
     return res.status(400).json({ error: `Please give ${problems.join(', ')}.` });
 
-  let sealed;
-  try {
-    sealed = sealField(taxDigits);
-  } catch (e) {
-    /* The key is missing or malformed. Storing the number in the clear
-       instead would be the worst possible response, so the form fails and
-       says so plainly rather than quietly downgrading. */
-    console.error('[register] tax id could not be encrypted:', e.message);
-    return res.status(503).json({
-      error: 'Registrations are temporarily unavailable. Please call the office.' });
+  let sealed = null;
+  if (taxDigits) {
+    try {
+      sealed = sealField(taxDigits);
+    } catch (e) {
+      /* The key is missing or malformed. Storing the number in the clear
+         instead would be the worst possible response, so the form fails and
+         says so plainly rather than quietly downgrading. */
+      console.error('[register] tax id could not be encrypted:', e.message);
+      return res.status(503).json({
+        error: 'Registrations are temporarily unavailable. Please call the office.' });
+    }
   }
 
   const hash = await hashPassword(password);
@@ -316,7 +330,11 @@ router.post('/register', wrap(async (req, res) => {
       [fullName, str(b.entity_name), type, email, str(b.phone),
        str(b.address_line1), str(b.address_line2), str(b.city), str(b.state),
        str(b.postal_code), str(b.country) || 'United States',
-       sealed.ciphertext, taxDigits.slice(-4), sealed.keyId, hash,
+       /* Empty string, not null: `tax_id_last4` and `tax_id_key` are NOT NULL
+          with a default, and an account opened without a number is the
+          ordinary case now rather than the exception. */
+       sealed?.ciphertext ?? null, taxDigits ? taxDigits.slice(-4) : '',
+       sealed?.keyId ?? '', hash,
        str(b.note).slice(0, 1000), String(ip).slice(0, 64)]
     );
     await audit(null, 'application', rows[0].id, 'create', `${fullName} · ${email}`);
@@ -356,7 +374,12 @@ router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true
 router.get('/auth/me', authenticate, wrap(async (req, res) => {
   const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role };
   if (req.user.role === 'investor' && req.user.iid) {
-    const { rows } = await q('SELECT id, name FROM investors WHERE id = $1', [req.user.iid]);
+    /* Only the last four digits of the tax number, and only so the Account
+       page can say whether one is on file. An investor knows their own
+       number; reading it back to them adds risk and answers nothing. */
+    const { rows } = await q(
+      'SELECT id, name, investor_type, tax_id_last4 FROM investors WHERE id = $1',
+      [req.user.iid]);
     out.investor = rows[0] || null;
   }
   if (req.user.role === 'manager') {
@@ -369,6 +392,57 @@ router.get('/auth/me', authenticate, wrap(async (req, res) => {
   res.json(out);
 }));
 router.post('/auth/password', authenticate, wrap(changePassword));
+
+/**
+ * An investor supplying their own tax number.
+ *
+ * It is not asked for at sign-up — a stranger's first minute on the site is
+ * the worst moment to ask for a Social Security number — so this is how it
+ * arrives afterwards, from the person it belongs to, over a session that has
+ * already been authenticated.
+ *
+ * Two deliberate limits:
+ *
+ *   - it fills a blank, it does not replace. Once a number is on file,
+ *     changing it goes through the office. An investor account is the one
+ *     most likely to be phished, and a quietly altered tax number sends
+ *     somebody else's K-1 to the wrong place.
+ *   - it never reads back. `GET /investors/:id/tax-id` stays administrators
+ *     only. The Account page shows the last four digits and nothing more.
+ */
+router.put('/me/tax-id', authenticate, wrap(async (req, res) => {
+  if (req.user.role !== 'investor' || !req.user.iid)
+    return res.status(403).json({ error: 'Not an investor account' });
+
+  const digits = digitsOf(req.body?.tax_id);
+  if (!looksLikeTaxId(digits))
+    return res.status(400).json({
+      error: 'A tax number is nine digits — a Social Security number or an EIN.' });
+
+  const { rows: cur } = await q(
+    'SELECT tax_id_last4 FROM investors WHERE id = $1', [req.user.iid]);
+  if (!cur[0]) return res.status(404).json({ error: 'Investor not found' });
+  if (cur[0].tax_id_last4)
+    return res.status(409).json({
+      error: `A tax number ending ${cur[0].tax_id_last4} is already on file. `
+           + 'Call the office to change it.' });
+
+  let sealed;
+  try {
+    sealed = sealField(digits);
+  } catch (e) {
+    console.error('[me/tax-id] could not encrypt:', e.message);
+    return res.status(503).json({
+      error: 'That cannot be stored safely right now. Please call the office.' });
+  }
+  await q(
+    `UPDATE investors SET tax_id_enc = $1, tax_id_key = $2, tax_id_last4 = $3,
+                          updated_at = now() WHERE id = $4`,
+    [sealed.ciphertext, sealed.keyId, digits.slice(-4), req.user.iid]);
+  await audit(req.user.uid, 'investor', req.user.iid, 'update',
+    `investor supplied their own tax number · ending ${digits.slice(-4)}`);
+  res.json({ ok: true, tax_id_last4: digits.slice(-4) });
+}));
 router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,

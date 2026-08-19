@@ -130,7 +130,7 @@ after saving.
 
 ### Conventions
 
-- **The inflow lands on the day the cheque cleared**, not the date of death.
+- **The inflow lands on the day the claim was funded**, not the date of death.
   Carriers take weeks to pay and that delay is a real cost to the return. On a
   five-year hold, a 76-day collection lag is worth about 1.5 points of IRR.
 - **Policy loans are excluded.** A loan is repaid out of the death benefit, so
@@ -405,6 +405,33 @@ economic percentages of it. Both are recorded: a policy's Overview tab carries a
 ownership cap table showing each investor's share, the dollar value of that share,
 and any unallocated remainder. Allocations are refused if they would push a policy
 past 100%.
+
+### The tax number is not asked for at sign-up
+
+A K-1 cannot be issued without a Social Security number or an EIN, but an
+account can be opened without one — and a stranger's first minute on the site,
+typing into a form belonging to a firm they have no reason to trust yet, is the
+worst possible moment to ask. So the registration form does not.
+
+It arrives afterwards, from either side:
+
+- **The investor**, on their own Account page, over a session that has already
+  been authenticated. `PUT /me/tax-id` fills a blank and does not replace one:
+  once a number is on file, changing it goes through the office. An investor
+  account is the one most likely to be phished, and a quietly altered tax number
+  sends somebody else's K-1 to the wrong place. The panel says so, and points at
+  the telephone.
+- **An administrator**, in the Edit investor dialog, which can both set and
+  replace it.
+
+Neither route reads it back to an investor. `GET /investors/:id/tax-id` stays
+administrators only and stays audited; the Account page shows the last four
+digits and nothing more, because an investor knows their own number and reading
+it back answers nothing.
+
+A number sent to `POST /register` anyway is still accepted and encrypted
+properly — silently discarding one somebody deliberately supplied would be worse
+than storing it — it is simply never required.
 
 ### Whose client they are
 

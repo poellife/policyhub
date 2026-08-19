@@ -131,7 +131,7 @@ const saved = await json(await api(`/policies/${policy.id}/irr`));
 check('the policy is now matured', saved.status === 'Matured', saved.status);
 check('the settlement was recorded', saved.settled === true);
 check('the cheque to the cent', Math.abs(saved.proceeds_amount - CHEQUE) < 0.005, saved.proceeds_amount);
-check('dated to the day it cleared', saved.proceeds_received_on === PAID_ON);
+check('dated to the day it was funded', saved.proceeds_received_on === PAID_ON);
 // The check this suite exists for.
 check('the server computes exactly what the browser displayed',
   fmtIrr(saved.result.irr) === onScreen,

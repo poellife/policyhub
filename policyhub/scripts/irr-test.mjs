@@ -181,7 +181,7 @@ const settled = await json(await api(admin, `/policies/${pol.id}/irr`));
 check('now reported as settled', settled.settled === true);
 check('the inflow is the cheque, not the death benefit', near(settled.result.returned, CHEQUE, 0.01));
 check('and it is marked as actual, not assumed', settled.result.flows.at(-1).actual === true);
-check('dated to the day the cheque cleared', settled.result.flows.at(-1).date === PAID_ON);
+check('dated to the day the claim was funded', settled.result.flows.at(-1).date === PAID_ON);
 
 const toPaid = xirr([...LEDGER.map(([d, , a]) => ({ date: d, amount: -a })),
                      { date: PAID_ON, amount: CHEQUE }]);
