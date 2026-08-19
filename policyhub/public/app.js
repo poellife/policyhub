@@ -44,6 +44,7 @@ const state = {
   funds: [],
   oppCount: 0,        // drives the badge in the menu
   showDecided: false, // whether the registration queue shows decided ones too
+  showCarry: false,   // the carried-interest breakdown on Maturities
   /* Policies ticked for deletion. A Set of ids rather than a flag on each
      row, so a selection survives sorting, searching and filtering — you can
      pick three from a carrier search, change the search, and pick two more. */
@@ -745,6 +746,17 @@ async function dashboardView() {
         <div class="value">${fmtExact(t.monthly_coi)}<span style="font-size:15px;color:var(--text-muted)">/mo</span></div>
         <div class="note">≈ ${fmtExact(annualPremium)} per year</div>
       </div>`}
+      ${sum.carry ? `
+      <div class="stat">
+        ${/* Ours. An investor is never sent this block, so the tile cannot
+             appear on their dashboard by accident. */''}
+        <div class="label">Carried interest</div>
+        <div class="value">${fmtExact(sum.carry.total)}</div>
+        <div class="note">if every policy matured today · ${sum.carry.policies}
+          ${sum.carry.policies === 1 ? 'policy' : 'policies'}${
+          sum.carry.policies_without_carry
+            ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
+      </div>` : ''}
       <div class="stat">
         <div class="label">Portfolio IRR</div>
         <div class="value">${fmtIrr(sum.irr?.irr)}</div>
@@ -1125,7 +1137,8 @@ async function policyView() {
   const p = await api(`/policies/${state.params.id}`);
   const values = [...p.values].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
   // Only fetched when the tab is open — it replays the whole ledger.
-  const irrData = detailTab === 'return' ? await api(`/policies/${p.id}/irr`) : null;
+  const irrData = ['return', 'carry'].includes(detailTab)
+    ? await api(`/policies/${p.id}/irr`) : null;
   const age = ageFrom(p.insured_dob);
   const coi = Number(p.cost_of_insurance) || 0;
   const av = Number(p.account_value) || 0;
@@ -1137,6 +1150,8 @@ async function policyView() {
   const tabs = [['overview', 'Overview'],
                 ...(isInvestorUser() ? [] : [['values', 'Value history']]),
                 ['transactions', 'Transactions'], ['return', 'Return / IRR'],
+                // Ours, never theirs — the tab is not built for an investor.
+                ...(isInvestorUser() ? [] : [['carry', 'Carried interest']]),
                 ['servicing', isInvestorUser() ? 'Premiums' : 'Servicing']];
 
   const html = `
@@ -1235,6 +1250,7 @@ function renderDetailTab(p, values, monthsCovered, irrData) {
   if (detailTab === 'values') return isInvestorUser() ? overviewTab(p) : valuesTab(p, values);
   if (detailTab === 'transactions') return transactionsTab(p);
   if (detailTab === 'return') return returnTab(p, irrData);
+  if (detailTab === 'carry') return carryTab(p, irrData);
   if (detailTab === 'servicing') return servicingTab(p, monthsCovered);
   return overviewTab(p, values);
 }
@@ -1943,6 +1959,84 @@ function wireReturnTab(p, d) {
   });
 }
 
+/**
+ * What this policy is worth to us.
+ *
+ * The investor's own screens have this already taken out and never name it.
+ * Here it is the subject: what the entity's agreement charges, what the
+ * profit is, and what the two come to — with the split spelled out line by
+ * line, because "10% of profit" hides which profit.
+ */
+function carryTab(p, d) {
+  const c = d?.carry;
+  if (!c) {
+    return `<div class="card"><div class="card-body"><div class="empty">
+      ${p.fund_code
+        ? `<strong>${esc(p.fund_code)}</strong> charges no carried interest — it is managed for
+           a fee, so the investors keep the whole profit on this policy.<br>
+           <span class="muted" style="font-size:13px">Change that under
+           Settings → Owner entities.</span>`
+        : `This policy is not held in an owner entity, so there is no operating agreement to
+           charge under and no carried interest on it.<br>
+           <span class="muted" style="font-size:13px">Assign it to an entity on the Overview
+           tab.</span>`}
+    </div></div></div>`;
+  }
+  const settled = c.earned;
+  const row = (label, value, note = '', strong = false) => `
+    <tr><td>${label}${note ? `<div class="muted" style="font-size:12px">${note}</div>` : ''}</td>
+      <td class="num ${strong ? 'strong' : ''}">${value}</td></tr>`;
+
+  return `
+    <div class="kpi-row">
+      <div class="stat">
+        <div class="label">${settled ? 'Carried interest earned' : 'Carried interest if it matured today'}</div>
+        <div class="value hero">${fmtExact(c.carry)}</div>
+        <div class="note">${fmtPct(c.rate)} of the profit${
+          c.fund_code ? ` · ${esc(c.fund_code)}` : ''}${
+          settled ? ' · the claim has been paid' : ' · not yet earned'}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Profit on the case</div>
+        <div class="value">${fmtExact(c.gross_profit)}</div>
+        <div class="note">${fmtExact(c.gross_return)} back on ${fmtExact(c.basis)} in</div>
+      </div>
+      <div class="stat">
+        <div class="label">To the investors</div>
+        <div class="value">${fmtExact(c.net_profit)}</div>
+        <div class="note">their capital returned first, then ${fmtPct(100 - Number(c.rate))} of what is left</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>How it splits</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${settled
+          ? 'on the claim actually paid' : 'assuming the claim is collected today'}</span></div>
+      <div class="table-wrap"><table class="data"><tbody>
+        ${row('Capital in', fmtExact(c.basis),
+          'Acquisition cost, premiums, fees, servicing and commissions')}
+        ${row(settled ? 'Claim paid' : 'Death benefit', fmtExact(c.gross_return))}
+        ${row('Profit', fmtExact(c.gross_profit),
+          'What is left once the investors have their capital back', true)}
+        ${row(`Managing partner — ${fmtPct(c.rate)}`, fmtExact(c.carry), '', true)}
+        ${row(`Investors — ${fmtPct(100 - Number(c.rate))}`, fmtExact(c.net_profit))}
+        ${row('Investors receive in total', fmtExact(c.net_return),
+          'Their capital back, plus their share of the profit', true)}
+      </tbody></table></div>
+      <div class="card-body">
+        <span class="muted" style="font-size:12.5px">
+          ${settled
+            ? `This is earned: the carrier has paid the claim.`
+            : `Nothing is earned yet — this is what the split would come to if the claim were
+               collected today, and it moves with every premium paid and with the death benefit
+               the carrier reports.`}
+          A case that loses money carries none.
+          The investors' own screens show their figures with this already deducted.
+        </span>
+      </div>
+    </div>`;
+}
+
 function wireDetailTab(p, values, irrData) {
   if (detailTab === 'overview') {
     $('#addOwnerBtn')?.addEventListener('click', async () => {
@@ -2280,24 +2374,56 @@ async function openPolicyDialog(p = null) {
 
 function openEntityDialog(f, onSaved) {
   const isNew = !f?.id;
+  const carryNow = f?.id ? Number(f.carry_pct) || 0 : 10;
   const body = `
     <div class="field-row">
       ${inputField('Code *', 'code', f?.code, 'text', 'required placeholder="e.g. LCG2"')}
       ${inputField('Full legal name', 'name', f?.name, 'text', 'placeholder="e.g. Life Capital Group 2, LLC"')}
     </div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(f?.notes || '')}</textarea></div>
+
+    <div class="dlg-section">Carried interest</div>
+    ${/* A term of the operating agreement, and not every entity has one —
+         some books are managed for a fee. Zero is not a special case, it is
+         this field with nothing in it. */''}
+    <div class="field-row">
+      <div class="field">
+        <label>Does this entity pay it?</label>
+        <select name="charges_carry" id="entCharges">
+          <option value="true" ${carryNow > 0 ? 'selected' : ''}>Yes — a share of the profit</option>
+          <option value="false" ${carryNow > 0 ? '' : 'selected'}>No — managed for a fee</option>
+        </select>
+      </div>
+      <div class="field" id="entPctWrap" style="${carryNow > 0 ? '' : 'display:none'}">
+        <label>Share of the profit</label>
+        <input name="carry_pct" type="number" step="0.001" min="0" max="100"
+               value="${carryNow > 0 ? carryNow : 10}">
+        <span class="muted" style="font-size:12px">Per cent, taken from the profit on each
+          case after the investor's capital is returned.</span>
+      </div>
+    </div>
     <span class="muted" style="font-size:12px">
       The code is what appears in the policy grid and reports. Renaming it updates every
       policy that points at this entity — nothing is reassigned.
+      ${f?.id ? `Changing the carried interest changes what every investor in this entity is
+      shown, on every screen, immediately. It is written to the activity log.` : ''}
     </span>`;
 
-  openDialog(isNew ? 'New owner entity' : 'Edit owner entity', body, async (v) => {
+  const dlg = openDialog(isNew ? 'New owner entity' : 'Edit owner entity', body, async (v) => {
+    if (v.charges_carry === 'false') v.carry_pct = 0;
+    delete v.charges_carry;
     if (isNew) await api('/funds', { method: 'POST', body: v });
     else await api(`/funds/${f.id}`, { method: 'PUT', body: v });
     state.funds = await api('/funds');
     toast(isNew ? 'Entity created' : 'Entity updated');
     onSaved?.();
   }, isNew ? 'Create entity' : 'Save');
+
+  // The percentage only means anything if they pay one.
+  $('#entCharges', dlg)?.addEventListener('change', (e) => {
+    $('#entPctWrap', dlg).style.display = e.target.value === 'true' ? '' : 'none';
+  });
+  return dlg;
 }
 
 function openDeletePolicyDialog(p) {
@@ -3829,6 +3955,8 @@ async function maturitiesView() {
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
+      ${m.carry ? `<button id="carryBtn">${
+        state.showCarry ? 'Hide carried interest' : 'Carried interest'}</button>` : ''}
       ${rows.length ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
     </div>
 
@@ -3889,6 +4017,7 @@ async function maturitiesView() {
           <th>Type</th>${investorView ? '' : '<th>Owner</th>'}
           <th class="num">Death benefit</th><th class="num">Invested</th>
           <th class="num">Proceeds</th><th>Funded</th><th class="num">Gain</th>
+          ${m.carry ? '<th class="num">Carried interest</th>' : ''}
           <th class="num">IRR</th>
           ${canEditData() ? '<th></th>' : ''}
         </tr></thead>
@@ -3913,6 +4042,11 @@ async function maturitiesView() {
             <td>${r.proceeds_received_on ? fmtDate(r.proceeds_received_on) : '<span class="muted">—</span>'}</td>
             <td class="num" ${g == null ? '' : `style="color:${g >= 0 ? 'var(--success-text)' : 'var(--critical)'}"`}>
               ${g == null ? '<span class="muted">—</span>' : fmtExact(g)}</td>
+            ${m.carry ? `<td class="num ${paid == null ? 'secondary' : ''}" title="${
+              paid == null ? 'Not earned yet — the claim has not been paid'
+              : 'Earned; the claim has been paid'}">${
+              Number(m.carry.byPolicy[r.id]) ? fmtExact(m.carry.byPolicy[r.id])
+                : '<span class="muted">—</span>'}</td>` : ''}
             <td class="num ${paid == null ? 'secondary' : ''}" title="${
               paid == null ? 'Provisional — assumes the death benefit is collected today'
               : r.irr_short ? 'Held under 90 days — an annualised rate is unreliable here'
@@ -3932,11 +4066,48 @@ async function maturitiesView() {
           <td class="num">${fmtExact(t.total_proceeds)}</td>
           <td></td>
           <td class="num">${fmtExact(gain)}</td>
+          ${m.carry ? `<td class="num">${fmtExact(m.carry.earned + m.carry.outstanding)}</td>` : ''}
           <td class="num">${fmtIrr(m.portfolio?.irr)}</td>
           ${canEditData() ? '<td></td>' : ''}
         </tr></tfoot>
       </table></div>
     </div>
+
+    ${m.carry ? `
+    <div class="card" id="carryCard" ${state.showCarry ? '' : 'style="display:none"'}>
+      <div class="card-head"><h2>Carried interest by entity</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">ours, on matured policies</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Entity</th><th class="num">Rate</th><th class="num">Policies</th>
+          <th class="num">Earned</th><th class="num">Still to come</th>
+          <th class="num">Total</th></tr></thead>
+        <tbody>${m.carry.byFund.length === 0
+          ? '<tr><td colspan="6"><div class="empty">Nothing has matured yet.</div></td></tr>'
+          : m.carry.byFund.map((f) => `<tr>
+              <td class="strong">${esc(f.fund_code)}</td>
+              <td class="num">${f.rate ? fmtPct(f.rate) : '<span class="muted">none</span>'}</td>
+              <td class="num">${f.policies}</td>
+              <td class="num strong">${fmtExact(f.earned)}</td>
+              <td class="num secondary">${fmtExact(f.outstanding)}</td>
+              <td class="num">${fmtExact(f.earned + f.outstanding)}</td>
+            </tr>`).join('')}</tbody>
+        ${m.carry.byFund.length ? `<tfoot><tr>
+          <td colspan="3">All entities</td>
+          <td class="num">${fmtExact(m.carry.earned)}</td>
+          <td class="num">${fmtExact(m.carry.outstanding)}</td>
+          <td class="num">${fmtExact(m.carry.earned + m.carry.outstanding)}</td>
+        </tr></tfoot>` : ''}
+      </table></div>
+      <div class="card-body">
+        <span class="muted" style="font-size:12.5px">
+          <strong>Earned</strong> is carried interest on claims the carrier has actually paid.
+          <strong>Still to come</strong> is what the matured-but-unpaid claims would produce
+          when they settle — real, but not yet money. They are kept apart rather than added,
+          because a figure that mixes them reports cash that has not arrived.
+          A case that lost money carries none, and an entity managed for a fee charges none.
+        </span>
+      </div>
+    </div>` : ''}
 
     <div class="card"><div class="card-body">
       <span class="muted" style="font-size:12px">
@@ -3966,6 +4137,10 @@ async function maturitiesView() {
       document.querySelectorAll('[data-proceeds]').forEach((b) =>
         b.addEventListener('click', () =>
           openProceedsDialog(rows.find((r) => r.id === Number(b.dataset.proceeds)))));
+      $('#carryBtn')?.addEventListener('click', () => {
+        state.showCarry = !state.showCarry;
+        render();
+      });
       $('#exportMaturitiesBtn')?.addEventListener('click', () =>
         exportCsv('maturities.csv', rows, [
           { header: 'Matured', key: 'matured_on' },
@@ -5057,14 +5232,18 @@ async function settingsView() {
       <div class="card-head"><h2>Owner entities</h2><div class="spacer"></div>
         ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Code</th><th>Full legal name</th><th class="num">Policies</th>
+        <thead><tr><th>Code</th><th>Full legal name</th><th>Carried interest</th>
+          <th class="num">Policies</th>
           <th class="num">Lives</th><th class="num">Avg age</th>
           <th class="num">Death benefit</th><th class="num">Invested</th><th>Notes</th><th></th></tr></thead>
         <tbody>${funds.length === 0
-          ? '<tr><td colspan="9"><div class="empty">No entities yet.</div></td></tr>'
+          ? '<tr><td colspan="10"><div class="empty">No entities yet.</div></td></tr>'
           : funds.map((f) => `<tr>
               <td class="strong">${esc(f.code)}</td>
               <td>${esc(f.name && f.name !== f.code ? f.name : '')}</td>
+              <td>${Number(f.carry_pct) > 0
+                ? `${fmtPct(f.carry_pct)} of profit`
+                : '<span class="muted">none — fee only</span>'}</td>
               <td class="num">${f.policy_count}</td>
               <td class="num">${f.lives_count || 0}</td>
               ${avgAgeCell(f)}

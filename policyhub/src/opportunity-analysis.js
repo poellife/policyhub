@@ -101,11 +101,13 @@ function annualRate(scheduled) {
 /**
  * One scenario: buy at the close, pay the premiums, collect at maturity.
  *
- * `net` is what an investor is shown: the managing partner's share of the
- * profit comes off the claim, so the figures somebody weighs up before
- * committing are the ones they would actually receive. Staff see it gross.
+ * `carryPct` is the owning entity's carried interest. When it is non-zero
+ * the managing partner's share of the profit comes off the claim, so the
+ * figures somebody weighs up before committing are the ones they would
+ * actually receive. Zero — which is what staff are passed, and what an
+ * entity managed for a fee carries — leaves them gross.
  */
-export function scenario(opp, offsetMonths, share = 1, net = false) {
+export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
   const price = Number(opp.asking_price) || 0;
   const benefit = Number(opp.face_amount) || 0;
   const close = iso(opp.expected_close) || today();
@@ -122,7 +124,7 @@ export function scenario(opp, offsetMonths, share = 1, net = false) {
     { date: matures, amount: benefit * share, label: 'Death benefit' },
   ];
 
-  const a = analyzeFlows(net ? flowsAfterCarry(flows) : flows);
+  const a = analyzeFlows(carryPct ? flowsAfterCarry(flows, carryPct) : flows);
   return {
     offset_months: offsetMonths,
     matures_on: matures,
@@ -143,9 +145,9 @@ export function scenario(opp, offsetMonths, share = 1, net = false) {
 /** Two years early, at life expectancy, two years late. */
 export const SCENARIO_OFFSETS = [-24, 0, 24];
 
-export function analyseOpportunity(opp, share = 1, net = false) {
+export function analyseOpportunity(opp, share = 1, carryPct = 0) {
   const scenarios = SCENARIO_OFFSETS
-    .map((m) => scenario(opp, m, share, net))
+    .map((m) => scenario(opp, m, share, carryPct))
     .filter(Boolean);
   const atLe = scenarios.find((s) => s.offset_months === 0) || null;
   return {

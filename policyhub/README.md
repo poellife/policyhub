@@ -103,10 +103,22 @@ active book.
 
 ## The managing partner's ten per cent
 
-Carried interest, on every case. The investor's capital comes back first —
-every dollar of acquisition cost, premium, fee, servicing and commission — and
-what is left over is split **90/10** between the investor and the managing
-partner. `CARRY_PCT` in `public/irr.js` is the whole configuration.
+Carried interest. The investor's capital comes back first — every dollar of
+acquisition cost, premium, fee, servicing and commission — and what is left
+over is split between the investor and the managing partner.
+
+**The rate belongs to the owning entity, not to the application.** Carried
+interest is a term of an operating agreement and not every book has one; some
+are managed for a fee instead. Settings → Owner entities carries the choice —
+*a share of the profit* or *managed for a fee* — and a percentage beside it,
+ten by default. Zero is not a special case, it is the same field with nothing
+in it, and a policy held in no entity at all carries none: there is no
+agreement to charge under, and showing an investor less than they are owed on
+the strength of an assumption is the wrong way to be wrong.
+
+Changing the rate changes what every investor in that entity is shown, on every
+screen, immediately — so it is written to the activity log in its own words
+(*"LCG1 · carried interest 0% → 10%"*) rather than as "update".
 
 **Investors are shown their figures net; staff see the book gross.** Nothing in
 the portal names the deduction, annotates a figure with it, or labels a column
@@ -126,6 +138,30 @@ Three properties, each of them a way of getting it wrong:
 - **It is per case.** A loss on one policy does not shelter the gain on another,
   so a policy's own figures never move because something else in the book
   matured.
+
+### What it is worth to us
+
+The investor's screens have it deducted and never name it. Ours are the other
+way round: the amount is the subject.
+
+- **A Carried interest tab on every policy**, staff only — the tab is not built
+  for an investor. It shows capital in, the claim or death benefit, the profit,
+  and the split line by line, because "10% of profit" hides which profit. A
+  policy still running says *"if it matured today"* and a paid one says
+  *earned*; the two are labelled rather than added.
+- **A tile on the dashboard**, over the live book only. What a matured policy
+  has produced belongs to the register below, and counting it in both places
+  would report the same money twice.
+- **A column on Maturities**, and a *Carried interest* button that opens a
+  breakdown by owner entity: **earned** on claims the carrier has actually
+  paid, **still to come** on matured claims not yet settled, and a total across
+  all entities. Earned and still-to-come are kept apart because a figure that
+  mixes them reports cash that has not arrived.
+
+None of this is ever sent to an investor. The blocks are omitted from their
+payloads entirely rather than sent empty — a key named `carry` would announce
+on their own screen the thing the operating agreement is there to explain — and
+`carry-test.mjs` scans every investor-facing payload for the word.
 
 ### Where it is applied
 

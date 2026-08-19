@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 // The IRR engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
-import { analyzeFlows, ledgerFlows, flowsAfterCarry, netOfCarry, CARRY_PCT,
+import { analyzeFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carryOn, CARRY_PCT,
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 // The agreement template is under public/ for the same reason the IRR engine
@@ -123,11 +123,42 @@ const shareOf = (policyCol, paramIndex) =>
  * @param basis  every dollar that went out on that policy
  * @param scopeParam  $n holding the investor id, NULL for staff
  */
-const afterCarry = (gross, basis, scopeParam) => `
+/* The rate for the entity that holds the policy. Carried interest is a term
+   of an operating agreement and not every entity has one — some books are
+   managed for a fee instead — so the rate belongs to the entity. A policy in
+   no entity has no agreement to charge under and carries none. */
+const carryRate = (fundCol = 'pl.fund_id') =>
+  `COALESCE((SELECT fx.carry_pct FROM funds fx WHERE fx.id = ${fundCol}), 0)`;
+
+const afterCarry = (gross, basis, scopeParam, fundCol = 'pl.fund_id') => `
   CASE WHEN $${scopeParam}::int IS NULL THEN (${gross})
-       ELSE (${gross}) - (${CARRY_PCT} / 100.0)
+       ELSE (${gross}) - (${carryRate(fundCol)} / 100.0)
             * GREATEST(0, COALESCE(${gross}, 0) - COALESCE(${basis}, 0))
   END`;
+
+/**
+ * What the managing partner's share comes to on one policy — for us, not
+ * for them. The investor's screens show their figures with this already
+ * taken out and never name it; ours show the amount itself.
+ *
+ * `flows` must be the GROSS flows, which is what `portfolioFlows` builds for
+ * a staff caller. `earned` says whether the claim was actually collected:
+ * carry on a policy still running is what WOULD be due if it matured today,
+ * and the two must not be added together as though they were the same money.
+ */
+function policyCarry(flows, { earned = false } = {}) {
+  const a = analyzeFlows(flows || []);
+  const carry = carryOn(a.returned, a.invested);
+  return {
+    basis: a.invested,
+    gross_return: a.returned,
+    gross_profit: a.profit,
+    carry,
+    net_return: a.returned - carry,
+    net_profit: a.profit - carry,
+    earned,
+  };
+}
 
 /** Blocks investors from routes meant for internal users. */
 function blockInvestors(req, res, next) {
@@ -657,18 +688,38 @@ router.get('/funds', blockInvestors, wrap(async (req, res) => {
   res.json(rows);
 }));
 
+/**
+ * The carried interest an entity charges, from a form.
+ *
+ * Absent means leave it alone, which is what lets a rename not silently
+ * change the terms. "Not charged" is simply zero — a book managed for a fee
+ * is not a special case, it is the same field with nothing in it.
+ */
+function carryPctFrom(body) {
+  if (body.charges_carry === false || body.charges_carry === 'false') return 0;
+  if (!('carry_pct' in body) && !('charges_carry' in body)) return null;
+  const v = num(body.carry_pct);
+  if (v === null) return body.charges_carry ? CARRY_PCT : 0;
+  if (v < 0 || v > 100) return { error: 'Carried interest is a percentage between 0 and 100.' };
+  return v;
+}
+
 router.post('/funds', blockScoped, requireRole('admin','editor'), wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
+  const carry = carryPctFrom(req.body);
+  if (carry && carry.error) return res.status(400).json({ error: carry.error });
   const { rows } = await q(
-    `INSERT INTO funds (code, name, notes) VALUES ($1,$2,$3)
+    `INSERT INTO funds (code, name, notes, carry_pct) VALUES ($1,$2,$3,COALESCE($4, 10))
      ON CONFLICT (code) DO UPDATE SET
        name  = COALESCE(NULLIF(EXCLUDED.name,''),  funds.name),
-       notes = COALESCE(NULLIF(EXCLUDED.notes,''), funds.notes)
+       notes = COALESCE(NULLIF(EXCLUDED.notes,''), funds.notes),
+       carry_pct = COALESCE($4, funds.carry_pct)
      RETURNING *`,
-    [code, str(req.body.name), str(req.body.notes)]
+    [code, str(req.body.name), str(req.body.notes), carry]
   );
-  await audit(req.user.uid, 'fund', rows[0].id, 'create', code);
+  await audit(req.user.uid, 'fund', rows[0].id, 'create',
+    `${code} · carried interest ${rows[0].carry_pct}%`);
   res.status(201).json(rows[0]);
 }));
 
@@ -676,12 +727,23 @@ router.put('/funds/:id', blockScoped, requireRole('admin','editor'), wrap(async 
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   try {
+    const carry = carryPctFrom(req.body);
+    if (carry && carry.error) return res.status(400).json({ error: carry.error });
+    const { rows: was } = await q('SELECT carry_pct FROM funds WHERE id = $1', [req.params.id]);
     const { rows } = await q(
-      `UPDATE funds SET code = $1, name = $2, notes = $3 WHERE id = $4 RETURNING *`,
-      [code, str(req.body.name), str(req.body.notes), req.params.id]
+      `UPDATE funds SET code = $1, name = $2, notes = $3,
+              carry_pct = COALESCE($4, carry_pct)
+        WHERE id = $5 RETURNING *`,
+      [code, str(req.body.name), str(req.body.notes), carry, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Entity not found' });
-    await audit(req.user.uid, 'fund', rows[0].id, 'update', code);
+    /* Changing the rate changes what every investor in that entity is shown,
+       so it is written down in its own words rather than as "update". */
+    const changed = was[0] && Number(was[0].carry_pct) !== Number(rows[0].carry_pct);
+    await audit(req.user.uid, 'fund', rows[0].id, 'update',
+      changed
+        ? `${code} · carried interest ${was[0].carry_pct}% → ${rows[0].carry_pct}%`
+        : code);
     res.json(rows[0]);
   } catch (e) {
     if (e.code === '23505')
@@ -1579,9 +1641,36 @@ router.get('/analytics/summary', wrap(async (req, res) => {
   const { combined } = await portfolioFlows(req, { fund });
   const irr = analyzeFlows(combined);
 
+  /* Carry is totalled over the LIVE book only. What a matured policy has
+     produced belongs to the Maturities register, which splits it into earned
+     and still-to-come; adding it in here as well would report the same money
+     twice under a heading that says "if every policy matured today". */
+  const { policies: flowPolicies, byPolicy } = scope !== null
+    ? { policies: [], byPolicy: new Map() }
+    : await portfolioFlows(req, { basis: 'active', fund });
+
+  /* What the managing partner's share would come to if every policy still
+     running matured today — ours to see, never sent to an investor. It is a
+     projection and is labelled as one; carry actually earned is on the
+     Maturities register, where the claims that produced it are. */
+  const carry = scope !== null ? null : (() => {
+    let total = 0, charged = 0, none = 0;
+    for (const p of flowPolicies) {
+      const rate = Number(p.carry_pct) || 0;
+      if (!rate) { none++; continue; }
+      const a = analyzeFlows(byPolicy.get(p.id) || []);
+      const amount = carryOn(a.returned, a.invested, rate);
+      if (amount > 0) charged++;
+      total += amount;
+    }
+    return { total, policies: charged, policies_without_carry: none, projected: true };
+  })();
+
   res.json({
     fund,
     totals: totals.rows[0],
+    // Spread, not `carry: null`: the key name alone would announce it.
+    ...(carry ? { carry } : {}),
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
@@ -1741,10 +1830,11 @@ async function loadOpportunity(req, id) {
   const share = me === null ? 1 : (Number(o.my_commitment?.pct) || 0) / 100;
   /* Net for an investor: they are weighing up what they would actually
      receive, and every figure on that page has to be the same money. */
-  const netTo = me !== null;
-  o.analysis = analyseOpportunity(o, 1, netTo);
+  const { rows: fr } = await q('SELECT carry_pct FROM funds WHERE id = $1', [o.fund_id]);
+  const oppCarry = me === null ? 0 : Number(fr[0]?.carry_pct) || 0;
+  o.analysis = analyseOpportunity(o, 1, oppCarry);
   // Alongside the whole-policy figures, what their own slice would cost.
-  o.my_analysis = share > 0 ? analyseOpportunity(o, share, netTo) : null;
+  o.my_analysis = share > 0 ? analyseOpportunity(o, share, oppCarry) : null;
   return o;
 }
 
@@ -1757,6 +1847,7 @@ router.get('/opportunities', wrap(async (req, res) => {
             o.insured_state, o.le_months, o.le_date, o.asking_price, o.annual_premium,
             o.expected_close, o.offer_closes_on, o.status, o.fund_id, o.notes,
             o.created_at, f.code AS fund_code,
+            COALESCE(f.carry_pct, 0)      AS carry_pct,
             COALESCE(t.taken_pct, 0)      AS taken_pct,
             COALESCE(t.confirmed_pct, 0)  AS confirmed_pct,
             (SELECT COUNT(*)::int FROM opportunity_shares s WHERE s.opportunity_id = o.id) AS shared_with,
@@ -1794,7 +1885,8 @@ router.get('/opportunities', wrap(async (req, res) => {
   const list = rows.map((o) => {
     const taken = Number(o.taken_pct) || 0;
     const withPremiums = { ...o, premiums: schedules.get(o.id) || [] };
-    const a = analyseOpportunity(withPremiums, 1, me !== null);
+    const a = analyseOpportunity(withPremiums, 1,
+      me === null ? 0 : Number(o.carry_pct) || 0);
     return {
       ...o,
       taken_pct: taken,
@@ -2373,6 +2465,7 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
             pl.insured_first, pl.insured_last, pl.insured_dob, pl.insured_gender,
             pl.proceeds_amount, pl.proceeds_received_on, pl.face_amount,
             COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
+            ${carryRate()} AS carry_pct,
             (${shareOf('pl.id', 1)}) AS my_pct,
             (${shareOf('pl.id', 1)}) / 100.0 AS factor
        FROM policy_latest pl
@@ -2405,7 +2498,8 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
        of the profit, per case. Done here rather than at each of the dozen
        places a rate is displayed, so no screen can be missed — every IRR,
        profit and multiple in the application is solved from these flows. */
-    const flows = scope === null ? raw : flowsAfterCarry(raw);
+    const pct = Number(p.carry_pct) || 0;
+    const flows = scope === null || !pct ? raw : flowsAfterCarry(raw, pct);
     byPolicy.set(p.id, flows);
     combined.push(...flows);
   }
@@ -2420,7 +2514,8 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
     `SELECT pl.id, pl.policy_number, pl.status, pl.matured_on,
             pl.proceeds_amount, pl.proceeds_received_on,
             COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
-            pl.face_amount, pl.cash_surrender_value,
+            pl.face_amount, pl.cash_surrender_value, pl.fund_id, pl.fund_code,
+            ${carryRate()} AS carry_pct,
             (${shareOf('pl.id', 2)}) AS my_pct
        FROM policy_latest pl
       WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
@@ -2446,7 +2541,8 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
   const gross = terminal
     ? [...base, { ...terminal, amount: terminal.amount * factor }]
     : base;
-  const withTerminal = scope === null ? gross : flowsAfterCarry(gross);
+  const rate = Number(p.carry_pct) || 0;
+  const withTerminal = scope === null || !rate ? gross : flowsAfterCarry(gross, rate);
 
   /* The dollar figures beside the rate have to be the same money the rate
      was solved on. `basis` is every dollar that went out on this policy at
@@ -2454,13 +2550,24 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
      death benefit and any claim paid read net for them and gross for us. */
   const basis = base.reduce((sum, f) => sum + (f.amount < 0 ? -f.amount : 0), 0);
   const net = (v) => (v == null ? null
-    : scope === null ? Number(v) : netOfCarry(Number(v), basis));
+    : scope === null ? Number(v) : netOfCarry(Number(v), basis, rate));
+
+  /* For us, the amount itself rather than the deduction. An investor never
+     receives this block: `scope` is their id, and it is only built when
+     there isn't one. Carry on a policy still running is what WOULD be due if
+     it matured today; on a paid claim it is earned. The two are labelled
+     rather than added. */
+  const carry = scope === null && rate
+    ? { ...policyCarry(gross), rate, earned: p.proceeds_amount != null,
+        fund_code: p.fund_code }
+    : null;
 
   res.json({
     policy_id: p.id,
     policy_number: p.policy_number,
     status: p.status,
     matured_on: p.matured_on,
+    ...(carry ? { carry } : {}),
     proceeds_amount: p.proceeds_amount == null ? null
       : net(Number(p.proceeds_amount) * factor),
     proceeds_received_on: p.proceeds_received_on,
@@ -2558,6 +2665,38 @@ router.get('/maturities', wrap(async (req, res) => {
   const paidFlows = [];
   for (const id of paidIds) paidFlows.push(...(byPolicy.get(id) || []));
 
+  /* Carried interest on the maturities — ours, and only ever ours. Split the
+     way the register itself splits: earned on claims the carrier has paid,
+     and outstanding on claims still to come. Adding them together would
+     report money that has not arrived as though it had. */
+  const carryRows = scope !== null ? null : policies.map((p) => {
+    const rate = Number(p.carry_pct) || 0;
+    const a = analyzeFlows(byPolicy.get(p.id) || []);
+    return {
+      policy_id: p.id, fund_code: p.fund_code || '', rate,
+      paid: p.proceeds_amount != null,
+      carry: rate ? carryOn(a.returned, a.invested, rate) : 0,
+    };
+  });
+  const carrySummary = carryRows === null ? null : (() => {
+    const byFund = new Map();
+    let earned = 0, outstanding = 0;
+    for (const r of carryRows) {
+      const key = r.fund_code || '(no entity)';
+      if (!byFund.has(key))
+        byFund.set(key, { fund_code: key, earned: 0, outstanding: 0, policies: 0, rate: r.rate });
+      const b = byFund.get(key);
+      b.policies++;
+      if (r.paid) { b.earned += r.carry; earned += r.carry; }
+      else { b.outstanding += r.carry; outstanding += r.carry; }
+    }
+    return {
+      earned, outstanding,
+      byFund: [...byFund.values()].sort((a2, b2) => (a2.fund_code < b2.fund_code ? -1 : 1)),
+      byPolicy: Object.fromEntries(carryRows.map((r) => [r.policy_id, r.carry])),
+    };
+  })();
+
   res.json({
     rows: withReturn,
     totals: totals.rows[0],
@@ -2565,6 +2704,7 @@ router.get('/maturities', wrap(async (req, res) => {
        it remains the right figure for "what if everything landed today". */
     portfolio: analyzeFlows(combined),
     realized: { ...analyzeFlows(paidFlows), policy_count: paidIds.size },
+    ...(carrySummary ? { carry: carrySummary } : {}),
     scopedToInvestor: scope !== null,
   });
 }));
@@ -3024,7 +3164,8 @@ router.get('/reports/returns', wrap(async (req, res) => {
     const a = analyzeFlows(byPolicy.get(p.id) || []);
     const factor = Number(p.factor) || 0;
     const basisOf = a.invested;
-    const net = (v) => (v == null ? null : scoped ? netOfCarry(Number(v), basisOf) : Number(v));
+    const net = (v) => (v == null ? null
+      : scoped ? netOfCarry(Number(v), basisOf, Number(p.carry_pct) || 0) : Number(v));
     return {
       id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
       product_type: p.product_type, fund_code: p.fund_code, status: p.status,
@@ -3269,6 +3410,11 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
 
 router.get('/reports/premium-forecast', wrap(async (req, res) => {
   const months = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
+  /* A horizon in days, for the short questions. "What is due this week" is not
+     a shorter version of "what is due over five years" — a month bucket cannot
+     answer it — so when `days` is given the reply is a dated list of payments
+     rather than a column of monthly totals. */
+  const days = req.query.days ? Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 0)) : 0;
   const fund = str(req.query.fund);
 
   const scope = scopeId(req);
@@ -3341,11 +3487,66 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   let running = 0;
   for (const b of schedule) { running += b.total; b.cumulative = running; }
 
+  /* Premiums somebody here posted to the schedule by hand. They are as real a
+     call on the investor's money as a date the carrier printed, and leaving
+     them out is what made this report read empty on a book imported without a
+     next-due column. */
+  const { rows: posted } = await q(
+    `SELECT r.id, r.due_date, r.amount, r.note, pl.id AS policy_id,
+            pl.policy_number, pl.carrier_name, pl.fund_code,
+            pl.display_name, pl.insured_first, pl.insured_last,
+            r.amount * (${shareOf('pl.id', 2)} / 100.0) AS my_amount
+       FROM policy_reminders r
+       JOIN policy_latest pl ON pl.id = r.policy_id
+      WHERE r.kind = 'Premium' AND r.done_at IS NULL AND r.due_date >= CURRENT_DATE
+        AND pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND ($1 = '' OR pl.fund_code = $1)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}
+      ORDER BY r.due_date, pl.insured_last`,
+    [fund, scope, funds]
+  );
+  const postedRows = posted.map((r) => ({
+    policy_id: r.policy_id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+    insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() || '—',
+    fund_code: r.fund_code, amount: Number(r.my_amount) || 0, mode: 'Scheduled',
+    due_date: String(r.due_date).slice(0, 10), overdue: false,
+    note: r.note || '', source: 'scheduled', reminder_id: r.id,
+  }));
+  for (const r of postedRows) {
+    const b = buckets.get(r.due_date.slice(0, 7));
+    if (b) { b.total += r.amount; b.payments.push(r); running += r.amount; }
+  }
+  // Re-run the cumulative column now that the posted rows are in their buckets.
+  let cum = 0;
+  for (const b of schedule) {
+    b.payments.sort((x, y) => (x.due_date < y.due_date ? -1 : 1));
+    cum += b.total; b.cumulative = cum;
+  }
+
+  /* The dated window. Everything due between today and today plus `days`,
+     from both sources, in one list — which is also exactly what a capital
+     call is made of. */
+  const from = today();
+  const to = new Date(Date.now() + (days || 0) * 86400000).toISOString().slice(0, 10);
+  const inWindow = days
+    ? schedule.flatMap((b) => b.payments)
+        // Anything already overdue belongs in front of somebody now, whatever
+        // window was asked for — it is the most urgent thing on the list.
+        .filter((x) => x.overdue || (x.due_date >= from && x.due_date <= to))
+        .sort((a, b2) => (a.due_date < b2.due_date ? -1 : 1))
+    : [];
+
   res.json({
     months,
+    days,
+    window: days
+      ? { days, from, to, total: inWindow.reduce((s2, x) => s2 + x.amount, 0),
+          payments: inWindow,
+          policies: new Set(inWindow.map((x) => x.policy_id)).size }
+      : null,
     generatedAt: new Date().toISOString(),
     schedule,
-    grandTotal: running,
+    grandTotal: cum,
     policiesScheduled: rows.length - noSchedule.length,
     noSchedule,
   });

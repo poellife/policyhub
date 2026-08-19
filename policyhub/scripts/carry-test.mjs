@@ -55,7 +55,8 @@ const wipe = async () => {
       if (String(p.policy_number).startsWith(PREFIX)) seen.set(p.id, p.policy_number);
   for (const [id, number] of seen)
     await api(admin, `/policies/${id}`, { method: 'DELETE', body: { confirm: number } });
-  for (const f of ((await json(await api(admin, '/funds'))) || []).filter((x) => x.code === FUND))
+  for (const f of ((await json(await api(admin, '/funds'))) || [])
+    .filter((x) => x.code === FUND || x.code === `${PREFIX}FEE`))
     await api(admin, `/funds/${f.id}`, { method: 'DELETE' });
 };
 await wipe();
@@ -280,6 +281,87 @@ const listedForThem = ((await json(await api(inv, '/opportunities'))) || [])
 check('the card in the list quotes the same rate as the page',
   near(listedForThem.irr_at_le, theirLe.irr, 1e-9),
   `${P(listedForThem.irr_at_le)} vs ${P(theirLe.irr)}`);
+
+console.log('\nAN ENTITY MANAGED FOR A FEE CHARGES NONE');
+/* Carried interest is a term of an operating agreement, and not every entity
+   has one. Turning it off has to reach every screen the same way turning it
+   on did. */
+const FEEONLY = `${PREFIX}FEE`;
+for (const f of ((await json(await api(admin, '/funds'))) || []).filter((x) => x.code === FEEONLY))
+  await api(admin, `/funds/${f.id}`, { method: 'DELETE' });
+const feeFund = await json(await api(admin, '/funds', { method: 'POST', body: {
+  code: FEEONLY, name: 'Fee only', charges_carry: false } }));
+check('an entity can be created with none', Number(feeFund.carry_pct) === 0,
+  String(feeFund.carry_pct));
+
+const D = await make('D', { cost: 500000, prem: 0, boughtAgo: 600,
+  benefit: 1500000, pct: 100 });
+await api(admin, `/policies/${D.id}`, { method: 'PUT', body: { fund_code: FEEONLY } });
+const feeTheirs = await json(await api(inv, `/policies/${D.id}/irr`));
+const feeOurs = await json(await api(admin, `/policies/${D.id}/irr`));
+check('the investor is quoted the whole death benefit',
+  near(feeTheirs.death_benefit, 1500000), M(feeTheirs.death_benefit));
+check('and exactly what we see',
+  near(feeTheirs.result.irr, feeOurs.result.irr, 1e-9),
+  `${P(feeTheirs.result.irr)} vs ${P(feeOurs.result.irr)}`);
+
+console.log('\nAND IT CAN BE TURNED BACK ON');
+await api(admin, `/funds/${feeFund.id}`, { method: 'PUT', body: {
+  code: FEEONLY, name: 'Fee only', charges_carry: true, carry_pct: 10 } });
+const nowCharged = await json(await api(inv, `/policies/${D.id}/irr`));
+check('the same policy now reads net',
+  near(nowCharged.death_benefit, 1500000 - 0.1 * (1500000 - 500000)),
+  M(nowCharged.death_benefit));
+check('and the change is on the activity log in plain words',
+  ((await json(await api(admin, '/audit'))) || [])
+    .some((r) => /carried interest 0.*→.*10/.test(r.detail || '')),
+  (((await json(await api(admin, '/audit'))) || [])
+    .find((r) => /carried interest/.test(r.detail || '')) || {}).detail);
+check('a rate outside 0–100 is refused',
+  (await api(admin, `/funds/${feeFund.id}`, { method: 'PUT', body: {
+    code: FEEONLY, charges_carry: true, carry_pct: 140 } })).status === 400);
+
+console.log('\nWE SEE THE AMOUNT ITSELF, THEY NEVER DO');
+/* The same arithmetic, read from the other side. On the investor's screens it
+   is a deduction that is never named; on ours it is the subject. */
+const ourCarry = (await json(await api(admin, `/policies/${A.id}/irr`))).carry;
+check('the policy carries a carried-interest block for us',
+  !!ourCarry, JSON.stringify(ourCarry));
+check('with the whole-policy profit, not one investor\'s share',
+  near(ourCarry.gross_profit, 1000000 - 640000), M(ourCarry.gross_profit));
+check('the amount is ten per cent of it', near(ourCarry.carry, 36000), M(ourCarry.carry));
+check('the investors keep the rest', near(ourCarry.net_profit, 324000), M(ourCarry.net_profit));
+check('and it is marked earned, because the claim was paid', ourCarry.earned === true);
+check('an investor is sent no such block',
+  (await json(await api(inv, `/policies/${A.id}/irr`))).carry === null ||
+  (await json(await api(inv, `/policies/${A.id}/irr`))).carry === undefined);
+
+const liveCarry = (await json(await api(admin, `/policies/${C.id}/irr`))).carry;
+check('a policy still running shows what would be due, marked as not earned',
+  liveCarry.earned === false && near(liveCarry.carry, 0.1 * (2000000 - 400000)),
+  `${M(liveCarry.carry)} · earned ${liveCarry.earned}`);
+
+const lossCarry = (await json(await api(admin, `/policies/${B.id}/irr`))).carry;
+check('and a case that lost money carries none',
+  near(lossCarry.carry, 0), M(lossCarry.carry));
+
+console.log('\nTHE REGISTER SPLITS EARNED FROM STILL TO COME');
+const reg = await json(await api(admin, `/maturities?fund=${FUND}`));
+check('carried interest is reported by entity', Array.isArray(reg.carry?.byFund),
+  JSON.stringify(reg.carry?.byFund));
+check('earned covers the claim that was paid',
+  near(reg.carry.earned, 36000), M(reg.carry.earned));
+check('and the loss-making one adds nothing to it',
+  reg.carry.byFund.every((f) => f.earned >= 0));
+check('an investor gets no breakdown at all',
+  (await json(await api(inv, `/maturities?fund=${FUND}`))).carry == null);
+
+const ourDashCarry = (await json(await api(admin, `/analytics/summary?fund=${FUND}`))).carry;
+check('the dashboard totals the live book only — matured carry lives on the register',
+  near(ourDashCarry.total, 0.1 * (2000000 - 400000)), M(ourDashCarry.total));
+check('and says it is a projection', ourDashCarry.projected === true);
+check('while an investor is sent none',
+  (await json(await api(inv, `/analytics/summary?fund=${FUND}`))).carry == null);
 
 console.log('\nNOTHING IN THEIR PORTAL NAMES IT');
 /* They will know the terms from the operating agreement. The portal simply

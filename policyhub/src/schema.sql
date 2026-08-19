@@ -786,3 +786,90 @@ ALTER TABLE investors ADD COLUMN IF NOT EXISTS tax_id_key    TEXT NOT NULL DEFAU
 ALTER TABLE investors ADD COLUMN IF NOT EXISTS fund_id INTEGER
   REFERENCES funds(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_investors_fund ON investors (fund_id);
+
+/* ====================================================================== *
+ * Capital calls
+ *
+ * A premium falls due on a policy several investors own between them.
+ * Somebody has to ask each of them for their share, say by when, and then
+ * know who has paid. That is a capital call, and until now it lived in
+ * whoever's inbox raised it.
+ *
+ * Three tables because there are three different things:
+ *
+ *   capital_calls        the ask: what it is for, and the date the money
+ *                        has to be in by. One deadline per call.
+ *   capital_call_items   the premiums it covers, frozen at the moment the
+ *                        call went out. A premium that later moves does
+ *                        not rewrite a notice already sent.
+ *   capital_call_lines   what each investor owes, and where it has got to.
+ *
+ * The line's state is deliberately two-sided. An investor saying they have
+ * sent the money and the office seeing it arrive are different facts, and
+ * collapsing them into one would mean either trusting a claim as a receipt
+ * or giving the investor no way to say anything at all.
+ * ====================================================================== */
+
+CREATE TABLE IF NOT EXISTS capital_calls (
+  id            SERIAL PRIMARY KEY,
+  reference     TEXT NOT NULL DEFAULT '',      -- e.g. "CC-2026-03"
+  title         TEXT NOT NULL DEFAULT '',
+  fund_id       INTEGER REFERENCES funds(id) ON DELETE SET NULL,
+  due_date      DATE NOT NULL,                 -- money to be received by
+  covers_from   DATE,                          -- the premium window it was raised over
+  covers_to     DATE,
+  note          TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT 'Open',  -- Open | Closed | Cancelled
+  created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at     TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_capital_calls_status ON capital_calls (status, due_date);
+
+CREATE TABLE IF NOT EXISTS capital_call_items (
+  id            SERIAL PRIMARY KEY,
+  call_id       INTEGER NOT NULL REFERENCES capital_calls(id) ON DELETE CASCADE,
+  policy_id     INTEGER REFERENCES policies(id) ON DELETE SET NULL,
+  -- Copied rather than joined: the notice has to keep saying what it said.
+  policy_number TEXT NOT NULL DEFAULT '',
+  carrier_name  TEXT NOT NULL DEFAULT '',
+  insured_name  TEXT NOT NULL DEFAULT '',
+  due_date      DATE,
+  amount        NUMERIC(16,2) NOT NULL DEFAULT 0,   -- whole-policy premium
+  note          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_capital_call_items ON capital_call_items (call_id);
+
+CREATE TABLE IF NOT EXISTS capital_call_lines (
+  id             SERIAL PRIMARY KEY,
+  call_id        INTEGER NOT NULL REFERENCES capital_calls(id) ON DELETE CASCADE,
+  investor_id    INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  amount         NUMERIC(16,2) NOT NULL DEFAULT 0,
+  -- What the investor said, and what the office saw. Two facts, not one.
+  marked_paid_at TIMESTAMPTZ,
+  marked_paid_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  marked_note    TEXT NOT NULL DEFAULT '',
+  confirmed_at   TIMESTAMPTZ,
+  confirmed_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  waived_at      TIMESTAMPTZ,
+  UNIQUE (call_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_capital_call_lines ON capital_call_lines (call_id);
+CREATE INDEX IF NOT EXISTS idx_capital_call_lines_inv ON capital_call_lines (investor_id);
+
+/* The premium a carrier statement says is next, recorded when the statement
+   is in hand rather than on a separate trip through the policy form. */
+ALTER TABLE policy_values ADD COLUMN IF NOT EXISTS next_premium_due    DATE;
+ALTER TABLE policy_values ADD COLUMN IF NOT EXISTS next_premium_amount NUMERIC(16,2);
+
+/* Carried interest is a term of the operating agreement, and not every
+   entity has one — some books are managed for a fee instead. So the rate
+   belongs to the owning entity rather than to the application. Zero means
+   the investors in that entity keep the whole profit.
+
+   Ten by default, which is what the existing books were built on. A policy
+   held in no entity at all carries none: there is no agreement to charge
+   under, and showing an investor less than they are owed on the strength of
+   an assumption is the wrong way to be wrong. */
+ALTER TABLE funds ADD COLUMN IF NOT EXISTS carry_pct NUMERIC(6,3) NOT NULL DEFAULT 10;
