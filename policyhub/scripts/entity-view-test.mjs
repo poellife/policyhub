@@ -126,9 +126,9 @@ check('the totals move with the rows',
      === Number(allMat.totals.policy_count),
   `${lcg1Mat.totals.policy_count} + ${lcg2Mat.totals.policy_count} = ${allMat.totals.policy_count}`);
 check('and so does the realized return — it is not left describing the whole book',
-  lcg1Mat.portfolio?.irr !== lcg2Mat.portfolio?.irr
+  lcg1Mat.portfolio?.rate !== lcg2Mat.portfolio?.rate
   || lcg1Mat.rows.length === lcg2Mat.rows.length,
-  `${lcg1Mat.portfolio?.irr} vs ${lcg2Mat.portfolio?.irr}`);
+  `${lcg1Mat.portfolio?.rate} vs ${lcg2Mat.portfolio?.rate}`);
 
 console.log('\nAVERAGE AGE, PER OWNER');
 /* Our two LCG1 fixtures are 80 and 90. The entity holds other policies

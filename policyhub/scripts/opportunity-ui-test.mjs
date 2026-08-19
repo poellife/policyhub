@@ -116,7 +116,7 @@ check('and how much is gone', /82% taken/.test(tightText));
 check('with a deadline in days', /Closes in \d day/.test(tightText), (tightText.match(/Closes in [^·]*/) || [''])[0]);
 check('the bar is filled to the taken share',
   Math.abs(Number((await tightCard.locator('.opp-bar > span').getAttribute('style')).match(/[\d.]+/)[0]) - 82) < 0.01);
-check('an IRR is shown on the card', /IRR AT LIFE EXPECTANCY/i.test(tightText));
+check('a return is shown on the card', /RETURN AT LIFE EXPECTANCY/i.test(tightText));
 check('no co-investor is named', !otherNames.test(tightText));
 await inv.screenshot({ path: `${S}/oi1-list.png`, fullPage: true });
 

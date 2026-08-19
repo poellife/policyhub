@@ -133,8 +133,8 @@ check('the other is still outstanding', ours.filter((r) => r.proceeds_amount == 
 
 const irr = await json(await api(`/policies/${one.id}/irr`));
 check('a return can be solved on the imported history',
-  irr.result?.irr !== null && irr.result.days > 365,
-  `${(irr.result?.irr * 100).toFixed(2)}% over ${irr.result?.days} days`);
+  irr.result?.rate !== null && irr.result.days > 365,
+  `${(irr.result?.rate * 100).toFixed(2)}% over ${irr.result?.days} days`);
 
 console.log('\nRE-UPLOADING IT CHANGES NOTHING');
 const before = (await json(await api(`/policies/${one.id}`))).total_invested;

@@ -17,8 +17,9 @@ leaves your database.
 | **Policies** | Sortable, filterable grid mirroring your existing CRM columns — policy #, insured, DOB, age, carrier, issue date, face, death benefit, owner, premium, AV, CSV, COI, invested, last withdrawal, values-as-of, status. Column totals in the footer. CSV export. |
 | **Policy detail** | Overview with **all lives insured** (survivorship / second-to-die policies carry two or more), **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
-| **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and IRR, with a per-policy claim record. |
-| **Return / IRR** | Date-exact internal rate of return on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio IRR on the dashboard. |
+| **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and return, with a per-policy claim record. Insured surname and forename sit in columns of their own and every heading sorts, either way. |
+| **Return** | Date-exact **simple interest** on every policy — hypothetical while in force, exact once the cheque is recorded — plus a portfolio rate on the dashboard. |
+| **Carried interest** | Admin only, on the top menu. What the firm has earned on paid claims and what is still to come, by owner entity and by policy, filtered by entity and by whether a case has settled. |
 | **Insureds** | Separate first and last name fields, DOB, current age, gender, state, life expectancy, policy counts, date of death. Searchable, editable, exportable. |
 | **Import** | Drop in any number of CSV files and Excel workbooks at once. Every sheet is read, every row is classified, and the whole dump — policies, insureds, additional lives, value history and the full ledger — loads in one pass. Column names are matched automatically; nothing is written until you have seen the preview. Three single-purpose importers remain for piecemeal updates. |
 | **Reports** | Six print-ready documents with a per-report cost-basis toggle: **portfolio summary**, **policy schedule** (landscape), **premium forecast**, **policy fact sheets** (one page each), and two return reports — **in force** and **realized**. |
@@ -49,8 +50,19 @@ calendar, the alerts, the premium forecast and the policies grid, and appears on
 the **Maturities** register instead. It is still reachable: its own page opens
 normally and the grid's status filter will show it again.
 
-The register carries, per policy, the maturity date, death benefit, capital
-invested, proceeds received and the date they arrived, plus the realized gain.
+The register carries, per policy, the maturity date, the insured's **surname and
+forename in columns of their own**, the policy number, carrier, product, owner
+entity, death benefit, capital invested, proceeds received and the date they were
+funded, plus the realized gain and the return.
+
+**Every heading sorts.** Click one and the register runs on that column, largest
+or latest first; click the same one again and it turns round. Names are split
+because the register is read by surname and a single "Surname, Forename" cell
+cannot be sorted by either. Blanks sort last whichever direction it runs, so an
+unpaid claim never displaces a paid one at the top. The card head says in words
+which column is in force and which way it is running, and the totals row is
+untouched by any of it — sorting rearranges rows, it never changes which rows
+are there.
 **Record proceeds** takes what the carrier actually paid, which is often not the
 death benefit — a loan balance or interest adjustment moves it. Until an amount
 is entered the claim reads *Awaiting*, and the totals separate benefit matured
@@ -63,7 +75,7 @@ loss of its basis.
 
 ### The realized rate at the top of the register
 
-The headline IRR is **what the book has actually returned**: only claims the
+The headline rate is **what the book has actually returned**: only claims the
 carrier has paid, each inflow dated the day the money arrived. It is the same
 calculation every paid row below it shows, done once over all of them together
 — one rate solved on the combined dated flows, not an average of the per-policy
@@ -77,13 +89,13 @@ headline, named for what it is: *"13.21% with the other 21 assumed collected
 today"*. With every claim paid the two are identical, because there is nothing
 left to assume, and the note says so.
 
-Until anything has been paid the tile reads *IRR if collected today* rather than
-*Realized IRR*, because there is no realized rate to report.
+Until anything has been paid the tile reads *Return if collected today* rather
+than *Realized return*, because there is no realized rate to report.
 
-`scripts/realized-irr-test.mjs` checks the rate against an independently written
-XIRR solver — a check that used the application's own solver would only prove it
-was consistent with itself — and that recording, then clearing, a cheque moves
-the figure both ways.
+`scripts/realized-irr-test.mjs` checks the rate against arithmetic worked out
+independently in the test — a check that used the application's own solver would
+only prove it was consistent with itself — and that recording, then clearing, a
+cheque moves the figure both ways.
 
 **It reverses.** Clearing the date of death returns the policy to the active book
 and discards any proceeds recorded against the claim, so a date typed into the
@@ -144,31 +156,47 @@ Three properties, each of them a way of getting it wrong:
 The investor's screens have it deducted and never name it. Ours are the other
 way round: the amount is the subject.
 
-- **A Carried interest tab on every policy**, staff only — the tab is not built
-  for an investor. It shows capital in, the claim or death benefit, the profit,
-  and the split line by line, because "10% of profit" hides which profit. A
-  policy still running says *"if it matured today"* and a paid one says
-  *earned*; the two are labelled rather than added.
-- **A tile on the dashboard**, over the live book only. What a matured policy
-  has produced belongs to the register below, and counting it in both places
-  would report the same money twice.
-- **A column on Maturities**, and a *Carried interest* button that opens a
-  breakdown by owner entity: **earned** on claims the carrier has actually
-  paid, **still to come** on matured claims not yet settled, and a total across
-  all entities. Earned and still-to-come are kept apart because a figure that
-  mixes them reports cash that has not arrived.
+**One page, on the top menu, for admins only.** *Carried interest* is not a tab
+inside a policy and not a column on a register — it is a screen of its own, and
+the whole subject lives there. A manager does not see the button, and the API
+refuses the request rather than merely hiding it: `GET /carry` is behind
+`requireRole('admin')`, so an editor who may change every policy in the book
+still cannot read what the book earns us.
+
+The page answers three questions:
+
+- **Earned** — carried interest on claims the carrier has actually paid.
+- **Still to come** — what would be due if every remaining case settled today.
+- **Both together** — shown, but captioned *only the first of the two is money*.
+  They are separate fields in the response, never summed into one, because a
+  single figure mixing them reports cash that has not arrived.
+
+Under the tiles, the same book twice: **by owner entity**, carrying each
+agreement's rate, its policy count, capital in, profit and the two figures; and
+**by policy**, largest amount first, with surname and forename in their own
+columns and a line straight through to the policy. Two filters sit in the head —
+owner entity, and whether a case is **still running**, **matured**, or both —
+and a CSV export of exactly what is on screen. A policy that lost money shows a
+dash rather than a zero fee, and an entity managed for a fee reads *none* in the
+rate column while its profit is still reported, because we manage it either way.
+
+A **tile on the dashboard** keeps the live book's projection in view, over
+active policies only. What a matured policy has produced belongs to the page,
+and counting it in both places would report the same money twice.
 
 None of this is ever sent to an investor. The blocks are omitted from their
 payloads entirely rather than sent empty — a key named `carry` would announce
 on their own screen the thing the operating agreement is there to explain — and
-`carry-test.mjs` scans every investor-facing payload for the word.
+`carry-test.mjs` scans every investor-facing payload for the word, and
+`carry-page-test.mjs` checks that the page itself is refused to a manager, an
+editor and an investor alike.
 
 ### Where it is applied
 
 Two chokepoints, which is what keeps a dozen screens consistent:
 
 - `flowsAfterCarry()` in `public/irr.js` takes the whole deduction off the final
-  inflow of a policy's cash flows. Every IRR, profit and multiple in the
+  inflow of a policy's cash flows. Every rate, profit and multiple in the
   application is solved from those flows, so the rate an investor is quoted is
   the rate on the money they receive. It comes off the last inflow rather than
   being spread, because that is the payment it is actually withheld from —
@@ -183,7 +211,7 @@ share weighting happens before or after. That is what lets the same rule be
 applied in SQL on whole-policy columns in one place and in JavaScript on an
 investor's own flows in another, and still agree to the cent — which
 `carry-test.mjs` checks by comparing the two against arithmetic worked out by
-hand, and the rate against an independently written XIRR solver.
+hand.
 
 **Nothing they pay in is touched.** Capital invested, premiums due and the
 servicing calendar are the same numbers for everybody. Carry never reduces a
@@ -195,12 +223,32 @@ deal they get.
 
 ---
 
-## Return and IRR
+## Return
 
-Every policy has a **Return / IRR** tab. It solves the internal rate of return
-from the policy's dated cash flows — the day each premium actually left and the
-day money actually came back — over a 365-day year. That is Excel's XIRR
-convention, so any figure here reconciles against a spreadsheet.
+Every policy has a **Return** tab. The rate is **simple interest over actual
+days**: every dollar earns for exactly as long as it is outstanding, and the
+interest itself earns nothing.
+
+```
+                       profit
+rate  =  ───────────────────────────────────
+          Σ  amount out × days outstanding / 365
+```
+
+The denominator is the **dollar-years outstanding** — one dollar left in for one
+year is one dollar-year, and $650,000 left in for seven and a half years is
+about 4.9 million of them. Divide the profit by that and you have the annual
+rate the money earned while it was actually at work. It is shown beside the rate
+so the arithmetic can be followed.
+
+This is the convention the premium calculation workbooks use, and it is what an
+investor is told the return is, so it is what the application reports. It is
+**not** compounding: an IRR on the same case will read higher, because IRR
+assumes each dollar returned is reinvested at the same rate until the end. Eugene
+Kohn's file, for example, is 12.0000% simple against a materially higher
+compound rate on identical flows. The compound figure is still computed
+(`compound_rate` in `public/irr.js`) for anyone reconciling a case against a
+spreadsheet's XIRR, and no screen leads with it.
 
 Two questions get answered:
 
@@ -208,7 +256,7 @@ Two questions get answered:
   this morning?" The carrier's current death benefit is dropped in at today's
   date against the real ledger. It is labelled as the hypothetical it is.
 - **Once the claim is settled** — the exact realized return, using the cheque
-  that actually arrived on the day it actually cleared.
+  that actually arrived on the day it was funded.
 
 **The calculator.** On the same tab, three fields: the final date of death, the
 exact death benefit cheque, and the date it cleared. The rate, the profit and the
@@ -218,7 +266,7 @@ which is what moves the policy to Maturities, then records the proceeds.
 
 The browser and the server run the **same solver from the same file**
 (`public/irr.js`, imported by `src/api.js`), so the number on screen while you
-type is the number that gets stored. `scripts/irr-ui-test.mjs` asserts exactly
+type is the number that gets stored. `scripts/rate-ui-test.mjs` asserts exactly
 that, comparing what the browser displayed against what the server computed
 after saving.
 
@@ -226,24 +274,25 @@ after saving.
 
 - **The inflow lands on the day the claim was funded**, not the date of death.
   Carriers take weeks to pay and that delay is a real cost to the return. On a
-  five-year hold, a 76-day collection lag is worth about 1.5 points of IRR.
+  five-year hold, a 76-day collection lag is worth about 1.5 points of return.
 - **Policy loans are excluded.** A loan is repaid out of the death benefit, so
   counting it as income would double it against the proceeds.
 - **A lapse is a loss, not a blank.** No death benefit is assumed, so no rate is
   invented — but the capital lost is still reported.
-- **A rate is never fabricated.** Cash that only ever went out has no IRR;
-  the answer is "—", not zero.
+- **A rate is never fabricated.** Cash that only ever went out has no rate at
+  all — the denominator is dollar-years with nothing ever returned against them
+  — so the answer is "—", not zero.
 
 ### The two return reports
 
 **Return — policies in force** and **Return — realized** are the printable form of
-all this. Both carry headline tiles, an IRR-by-policy chart, owner-entity
+all this. Both carry headline tiles, a return-by-policy chart, owner-entity
 subtotals, the full ranking, and a methodology note stating exactly what was
 assumed.
 
 Three things they do deliberately:
 
-- **Rates are capital-weighted, never averaged.** An entity's IRR is solved from
+- **Rates are capital-weighted, never averaged.** An entity's rate is solved from
   the combined flows of its policies. The simple mean of the individual rates is
   printed beside it, because the gap between the two is itself information — on
   the sample book the mean reads 29.6% against a weighted 17.6%, which is what a
@@ -255,18 +304,18 @@ Three things they do deliberately:
   death benefit with a `*` and is counted as collected today; the tile splits
   cash received from cash assumed.
 
-The IRR-by-policy chart is anchored at zero, so a losing position runs left of
+The return-by-policy chart is anchored at zero, so a losing position runs left of
 the line in the status colour with a signed label — direction, colour and number
 all carry the sign, never colour alone.
 
 ### Where else it appears
 
-- **Dashboard** — portfolio IRR if every remaining policy matured today.
-- **Maturities** — an IRR column, and one rate across every matured policy's
-  combined flows. That is a true portfolio IRR, not an average of the rows: a
+- **Dashboard** — the portfolio rate if every remaining policy matured today.
+- **Maturities** — a Return column, and one rate across every matured policy's
+  combined flows. That is a true portfolio rate, not an average of the rows: a
   $5m position counts for more than a $50k one.
 - **Investor logins** — the same rates. Scaling every flow by a percentage
-  leaves the rate unchanged, so an investor's IRR on a policy equals the
+  leaves the rate unchanged, so an investor's return on a policy equals the
   sponsor's; only the dollars beside it are theirs.
 
 Rates that need reading with care are marked with a **\***: an unpaid claim
@@ -322,10 +371,10 @@ selection survives a search.
 
 | Role | Sees | Can change | Settings |
 |---|---|---|---|
-| **admin** | everything | everything, including other users | yes |
-| **editor** | everything | everything except users and deletes | yes |
-| **viewer** | everything | nothing | password only |
-| **manager** | only their owning entities | everything inside them, including import, maturities and delete | **no** — password only |
+| **admin** | everything, including **Carried interest** | everything, including other users | yes |
+| **editor** | everything except Carried interest | everything except users and deletes | yes |
+| **viewer** | everything except Carried interest | nothing | password only |
+| **manager** | only their owning entities, never Carried interest | everything inside them, including import, maturities and delete | **no** — password only |
 | **investor** | only policies they hold a share of | nothing | password only |
 
 ### Portfolio managers
@@ -397,7 +446,7 @@ immediacy.
 A place to introduce a policy to investors before anybody owns it.
 
 An opportunity is **its own record, not a policy**. A deal that may never
-close must not reach the dashboard, the IRR reports or the maturities
+close must not reach the dashboard, the return reports or the maturities
 register, and keeping it separate means no query has to remember to exclude
 it. When it funds, one click creates the policy, records the purchase price in
 the ledger and writes the cap table from the confirmed allocations — nothing
@@ -610,8 +659,10 @@ audit_log        who changed what, when
 `policy_latest` is a view joining each policy to its most recent value snapshot and
 its invested-to-date totals — it's what the grid and dashboard read from.
 
-IRR is computed in `public/irr.js` — one implementation, loaded by the browser
-and imported by the server, so the two can never drift apart.
+The return is computed in `public/irr.js` — one implementation, loaded by the
+browser and imported by the server, so the two can never drift apart. It holds
+the simple-interest solver, an XIRR solver kept for reference, and
+`flowsAfterCarry()`.
 
 `policy_maturity_date(policy_id)` is the maturity rule as a SQL function, and
 `apply_policy_maturity(policy_id)` applies it. Triggers on `insureds`,
@@ -733,7 +784,7 @@ covers it.
 
 **Re-running the same file is safe.** A ledger row identical to one already on
 file — same policy, date, type and amount — is skipped and counted, so a second
-upload cannot double your capital invested and halve every IRR computed from it.
+upload cannot double your capital invested and halve every return computed from it.
 Policies and snapshots update in place rather than duplicating. If a policy
 genuinely took two identical payments on the same day, tick **Allow duplicate
 ledger rows**.
@@ -782,8 +833,8 @@ and avoids running headless Chrome on the server — which would not fit in a
 | Policy schedule | Every policy as a landscape table with column totals — the formatted version of the grid |
 | Premium forecast | 12/24/36/60-month projection by month with running capital requirement, optional payment-level detail, and an explicit list of policies that *could not* be projected |
 | Policy fact sheet | One page per policy: headline tiles, policy terms, premium and servicing, all lives insured, AV/CSV history chart and recent carrier values |
-| Return — policies in force | IRR on every live policy as if it matured today. Ranked best to worst, with an IRR-by-policy chart, owner-entity subtotals and the capital-weighted book rate. Landscape. |
-| Return — realized | The same for matured policies, using the cheque that actually arrived on the day it cleared. Landscape. |
+| Return — policies in force | Simple interest on every live policy as if it matured today. Ranked best to worst, with a return-by-policy chart, owner-entity subtotals and the capital-weighted book rate. Landscape. |
+| Return — realized | The same for matured policies, using the cheque that actually arrived on the day it was funded. Landscape. |
 
 **Cost basis toggle.** Every report can be generated with or without acquisition
 cost, capital invested and benefit multiple, so the same document serves an
@@ -945,15 +996,17 @@ reach those rules correctly.
 | `master-import-test.mjs` | one-file import: classification, dependency ordering, inference, refusals, re-run safety, scoping |
 | `opportunity-test.mjs` | sharing, privacy between investors, the race for the last slice, decisions, deadlines, LE scenarios, funding |
 | `opportunity-ui-test.mjs` | the menu badge, the scarcity bar, the scenario table, and taking a share |
-| `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
-| `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
+| `rate-test.mjs` | the simple-interest solver against arithmetic worked out by hand, the compound solver against Excel's documented example, then the API |
+| `rate-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `carry-page-test.mjs` | the Carried interest page: refused to a manager, an editor and an investor, earned kept apart from projected, and each filter built from the rows it claims |
+| `carry-page-ui-test.mjs` | the screen itself: the button an admin sees and a manager does not, the filters, and that nothing is left behind on the policy page or the register — plus the register's sorting |
 | `premium-dues-test.mjs` | that the Portfolio card and the Premiums page show the same dates and the same money |
 | `bulk-delete-test.mjs` | who may clear a shelf, what it refuses, and that a refused batch removes nothing |
 | `bulk-delete-ui-test.mjs` | the tick column, a selection surviving a search, and what the dialog says first |
-| `realized-irr-test.mjs` | the realized rate over paid claims only, against an independent XIRR solver |
+| `realized-irr-test.mjs` | the realized rate over paid claims only, against arithmetic worked out independently in the suite |
 | `minimum-take-test.mjs` | the ten per cent floor, the last slice taken whole, and who it binds |
 | `minimum-take-ui-test.mjs` | the range on the input, the reason shown before clicking, and the wording when under ten is left |
 | `register-test.mjs` | self-registration: what the form refuses, that it never says whether an address is already a client, tax-number encryption, approving and declining |

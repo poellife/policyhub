@@ -62,19 +62,17 @@ const wipe = async () => {
 };
 await wipe();
 
-/** XIRR by bisection, written here rather than imported — a check that used
-    the same solver as the thing it checks would only prove it is consistent. */
-const xirr = (flows) => {
-  const t0 = new Date(flows[0].date);
-  const npv = (r) => flows.reduce((s, f) =>
-    s + f.amount / (1 + r) ** ((new Date(f.date) - t0) / 86400000 / 365), 0);
-  let lo = -0.9999, hi = 100;
-  if (npv(lo) * npv(hi) > 0) return null;
-  for (let i = 0; i < 300; i++) {
-    const mid = (lo + hi) / 2;
-    if (npv(lo) * npv(mid) <= 0) hi = mid; else lo = mid;
-  }
-  return (lo + hi) / 2;
+/**
+ * Simple interest, worked out here so the check does not lean on the code
+ * it is checking: profit divided by dollar-years, where a dollar out for a
+ * year is one dollar-year.
+ */
+const byHandRate = (flows) => {
+  const end = flows[flows.length - 1].date;
+  const days = (a, b) => (new Date(b) - new Date(a)) / 86400000;
+  const profit = flows.reduce((s, f) => s + f.amount, 0);
+  const dollarYears = flows.reduce((s, f) => s + -f.amount * (days(f.date, end) / 365), 0);
+  return dollarYears > 0 ? profit / dollarYears : null;
 };
 
 /** A policy bought `boughtAgo` days back, dead `diedAgo` days back. */
@@ -102,10 +100,10 @@ const a = await make('A', { cost: 400000, boughtAgo: 1100, diedAgo: 200, benefit
 let m = await load();
 check('the policy matured on its date of death', mine(m).length === 1, String(mine(m).length));
 check('there is no realized rate, because nothing has been realized',
-  m.realized?.irr == null && m.realized?.policy_count === 0,
-  `${pct(m.realized?.irr)} over ${m.realized?.policy_count} paid`);
+  m.realized?.rate == null && m.realized?.policy_count === 0,
+  `${pct(m.realized?.rate)} over ${m.realized?.policy_count} paid`);
 check('but the assumed figure is still there, for the claim outstanding',
-  m.portfolio?.irr != null, pct(m.portfolio?.irr));
+  m.portfolio?.rate != null, pct(m.portfolio?.rate));
 
 console.log('\nRECORDING THE CHEQUE MAKES IT REAL');
 /* Paid 60 days ago, not today. If the summary dated it today it would show
@@ -116,16 +114,16 @@ m = await load();
 const rowA = mine(m).find((r) => r.policy_number === `${PREFIX}-A`);
 check('one paid claim is counted', m.realized?.policy_count === 1, String(m.realized?.policy_count));
 check('and with only one, the realized figure is that policy’s own rate',
-  near(m.realized.irr, rowA.irr), `${pct(m.realized.irr)} vs row ${pct(rowA.irr)}`);
+  near(m.realized.rate, rowA.rate), `${pct(m.realized.rate)} vs row ${pct(rowA.rate)}`);
 /* Worked out independently: 400,000 out 1,100 days ago, 1,000,000 back 60
    days ago. If the summary dated that inflow today instead, the rate would
    come out lower over a longer holding period, and this would catch it. */
-const byHand = xirr([{ date: iso(-1100), amount: -400000 }, { date: iso(-60), amount: 1000000 }]);
+const byHand = byHandRate([{ date: iso(-1100), amount: -400000 }, { date: iso(-60), amount: 1000000 }]);
 check('and it is dated the day the cheque arrived, not today',
-  near(m.realized.irr, byHand, 1e-4), `${pct(m.realized.irr)} vs ${pct(byHand)} worked out by hand`);
+  near(m.realized.rate, byHand, 1e-4), `${pct(m.realized.rate)} vs ${pct(byHand)} worked out by hand`);
 check('with everything paid, the assumed figure agrees — there is nothing left to assume',
-  near(m.realized.irr, m.portfolio.irr),
-  `realized ${pct(m.realized.irr)} · assumed ${pct(m.portfolio.irr)}`);
+  near(m.realized.rate, m.portfolio.rate),
+  `realized ${pct(m.realized.rate)} · assumed ${pct(m.portfolio.rate)}`);
 
 console.log('\nA PAID CLAIM AND AN OUTSTANDING ONE ARE NOT THE SAME NUMBER');
 const b = await make('B', { cost: 900000, boughtAgo: 300, diedAgo: 20, benefit: 2000000 });
@@ -134,13 +132,13 @@ check('two have matured, one of them paid',
   mine(m).length === 2 && m.realized.policy_count === 1,
   `${mine(m).length} matured · ${m.realized.policy_count} paid`);
 check('the realized figure still ignores the unpaid one',
-  near(m.realized.irr, rowA.irr, 2e-3), `${pct(m.realized.irr)} vs ${pct(rowA.irr)}`);
+  near(m.realized.rate, rowA.rate, 2e-3), `${pct(m.realized.rate)} vs ${pct(rowA.rate)}`);
 check('while the assumed figure moves, because it folds it in',
-  !near(m.portfolio.irr, m.realized.irr, 1e-3),
-  `realized ${pct(m.realized.irr)} · assumed ${pct(m.portfolio.irr)}`);
+  !near(m.portfolio.rate, m.realized.rate, 1e-3),
+  `realized ${pct(m.realized.rate)} · assumed ${pct(m.portfolio.rate)}`);
 check('and the assumed one reads higher, which is the whole reason to separate them',
-  m.portfolio.irr > m.realized.irr,
-  `assumed ${pct(m.portfolio.irr)} vs realized ${pct(m.realized.irr)}`);
+  m.portfolio.rate > m.realized.rate,
+  `assumed ${pct(m.portfolio.rate)} vs realized ${pct(m.realized.rate)}`);
 
 console.log('\nPAY THE SECOND AND THEY CONVERGE');
 await api(admin, `/policies/${b.id}/proceeds`, { method: 'PUT', body: {
@@ -148,22 +146,22 @@ await api(admin, `/policies/${b.id}/proceeds`, { method: 'PUT', body: {
 m = await load();
 check('both are counted as paid', m.realized.policy_count === 2, String(m.realized.policy_count));
 check('and the two figures are now the same, because nothing is being assumed',
-  near(m.realized.irr, m.portfolio.irr),
-  `${pct(m.realized.irr)} vs ${pct(m.portfolio.irr)}`);
+  near(m.realized.rate, m.portfolio.rate),
+  `${pct(m.realized.rate)} vs ${pct(m.portfolio.rate)}`);
 
 console.log('\nIT IS ONE RATE OVER THE FLOWS, NOT AN AVERAGE OF THE RATES');
 /* The two policies are deliberately different sizes. A mean of the two
    per-policy rates would weight the $400k position the same as the $900k
    one, which is what this checks against. */
 const rows = mine(m);
-const mean = rows.reduce((s, r) => s + Number(r.irr), 0) / rows.length;
+const mean = rows.reduce((s, r) => s + Number(r.rate), 0) / rows.length;
 check('the portfolio rate is not the mean of the row rates',
-  !near(m.realized.irr, mean, 1e-4),
-  `portfolio ${pct(m.realized.irr)} · mean of rows ${pct(mean)}`);
+  !near(m.realized.rate, mean, 1e-4),
+  `portfolio ${pct(m.realized.rate)} · mean of rows ${pct(mean)}`);
 check('and it sits inside the range they span',
-  m.realized.irr > Math.min(...rows.map((r) => Number(r.irr)))
-  && m.realized.irr < Math.max(...rows.map((r) => Number(r.irr))),
-  rows.map((r) => `${r.policy_number} ${pct(Number(r.irr))}`).join(' · '));
+  m.realized.rate > Math.min(...rows.map((r) => Number(r.rate)))
+  && m.realized.rate < Math.max(...rows.map((r) => Number(r.rate))),
+  rows.map((r) => `${r.policy_number} ${pct(Number(r.rate))}`).join(' · '));
 
 console.log('\nCLEARING THE CHEQUE PUTS IT BACK');
 await api(admin, `/policies/${b.id}/proceeds`, { method: 'PUT', body: {
@@ -171,7 +169,7 @@ await api(admin, `/policies/${b.id}/proceeds`, { method: 'PUT', body: {
 m = await load();
 check('one paid again', m.realized.policy_count === 1, String(m.realized.policy_count));
 check('and the realized rate is back to the one policy that was paid',
-  near(m.realized.irr, rowA.irr, 2e-3), `${pct(m.realized.irr)} vs ${pct(rowA.irr)}`);
+  near(m.realized.rate, rowA.rate, 2e-3), `${pct(m.realized.rate)} vs ${pct(rowA.rate)}`);
 
 await wipe();
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL REALIZED IRR CHECKS PASSED');

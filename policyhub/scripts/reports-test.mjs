@@ -84,7 +84,7 @@ await p.emulateMedia({media:'screen'});
 
 console.log('\nRETURN — POLICIES IN FORCE');
 const s5 = await run('return-active','active return');
-check('headline is the hypothetical rate', /IRR IF MATURED TODAY/i.test(s5));
+check('headline is the hypothetical rate', /RETURN IF MATURED TODAY/i.test(s5));
 check('names it as unrealized', /have not been realized/i.test(s5));
 check('ranks policies by return', /POLICIES, RANKED BY RETURN/i.test(s5));
 check('breaks out owner entities', /BY OWNER ENTITY/i.test(s5));
@@ -96,7 +96,8 @@ const activeExcluded = (await p.evaluate(
 check('lists what it leaves out, when there is anything to leave out',
   activeExcluded.length ? /NOT IN THIS REPORT/i.test(s5) : !/NOT IN THIS REPORT/i.test(s5),
   `${activeExcluded.length} excluded`);
-check('states the XIRR convention', /365-day year/.test(s5));
+check('states that it is simple interest, not compounded',
+  /simple interest/i.test(s5) && /interest earns nothing/i.test(s5));
 check('shows cost basis when ticked', /CAPITAL INVESTED/i.test(s5));
 const chart5 = await p.locator('#rptReturnChart svg').count();
 check('the IRR chart is drawn', chart5 === 1);
@@ -105,11 +106,11 @@ check('with bars anchored at zero', /drawn from zero/.test(s5));
 const s5nb = await run('return-active','active return, no basis', {basis:false});
 check('cost basis disappears when unticked',
   !/CAPITAL INVESTED/i.test(s5nb) && !/MULTIPLE/i.test(s5nb));
-check('but the rates remain', /IRR/.test(s5nb));
+check('but the rates remain', /Return/i.test(s5nb));
 
 console.log('\nRETURN — REALIZED');
 const s6 = await run('return-realized','realized return');
-check('headline is the realized rate', /REALIZED IRR/i.test(s6));
+check('headline is the realized rate', /REALIZED RETURN/i.test(s6));
 check('explains the payment-date convention',
   /dated to the day it cleared rather than the date of death/i.test(s6));
 check('has a matured and a paid column', /matured/i.test(s6) && /paid/i.test(s6));
@@ -156,7 +157,7 @@ check('with what they have paid in broken out', /WHAT THEY HAVE PAID IN/i.test(s
 check('and what is due next', /PREMIUMS COMING UP/i.test(s7));
 check('their share sits beside the full policy figure',
   /THEIR SHARE/i.test(s7) && /FULL POLICY/i.test(s7));
-check('a portfolio rate is given', /PORTFOLIO IRR/i.test(s7));
+check('a portfolio rate is given', /PORTFOLIO RETURN/i.test(s7));
 check('and the basis is stated plainly',
   /percentage of the policy beside it,\s+never the whole policy/i.test(s7));
 check('the picker offers investors to choose from',

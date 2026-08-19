@@ -7,7 +7,7 @@ import { reportsView, buildOpportunitySheet } from './reports.js';
 // The agreement's clauses live in one file, read by the browser for preview
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
-import { analyzeFlows, fmtIrr, today as irrToday } from './irr.js';
+import { analyzeFlows, fmtRate, today as irrToday } from './irr.js';
 
 /* ------------------------------- api --------------------------------- */
 
@@ -44,7 +44,8 @@ const state = {
   funds: [],
   oppCount: 0,        // drives the badge in the menu
   showDecided: false, // whether the registration queue shows decided ones too
-  showCarry: false,   // the carried-interest breakdown on Maturities
+  // Which column the Maturities register is ordered by, and which way.
+  matSort: { key: 'matured_on', dir: -1 },
   /* Policies ticked for deletion. A Set of ids rather than a flag on each
      row, so a selection survives sorting, searching and filtering — you can
      pick three from a carrier search, change the search, and pick two more. */
@@ -338,6 +339,11 @@ const STAFF_NAV = [
   ['investors', 'Investors'],
   ['documents', 'Documents'],
   ['reports', 'Reports'],
+  // What the firm earns. Administrators only — a portfolio manager runs a
+  // book, and what the managing partner takes out of it is not theirs to
+  // read. Filtered out of the menu below rather than merely refused on
+  // arrival, so it is never a tab that answers 403.
+  ['carry', 'Carried interest'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
   // unchanged, and the dashboard still offers it directly.
@@ -360,8 +366,9 @@ const INVESTOR_NAV = [
 // A portfolio manager works inside their own entities. They get no Settings tab
 // — no owner entities, no user management, no activity log — but they still need
 // somewhere to change their own password, so that becomes "Account".
-const MANAGER_NAV = STAFF_NAV.map(([r, label]) =>
-  r === 'settings' ? ['settings', 'Account'] : [r, label]);
+const MANAGER_NAV = STAFF_NAV
+  .filter(([r]) => r !== 'carry')
+  .map(([r, label]) => (r === 'settings' ? ['settings', 'Account'] : [r, label]));
 
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
@@ -405,7 +412,11 @@ function premiumDues(svc) {
 
 const isAdminUser    = () => state.user?.role === 'admin';
 const navItems = () =>
-  isInvestorUser() ? INVESTOR_NAV : isManagerUser() ? MANAGER_NAV : STAFF_NAV;
+  isInvestorUser() ? INVESTOR_NAV
+    : isManagerUser() ? MANAGER_NAV
+    // An editor or viewer is staff but not an administrator.
+    : state.user?.role === 'admin' ? STAFF_NAV
+      : STAFF_NAV.filter(([r]) => r !== 'carry');
 
 /* Display multiplier.
  *
@@ -758,10 +769,10 @@ async function dashboardView() {
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
       <div class="stat">
-        <div class="label">Portfolio IRR</div>
-        <div class="value">${fmtIrr(sum.irr?.irr)}</div>
-        <div class="note">${sum.irr?.days
-          ? `if every policy matured today · ${(sum.irr.days / 365).toFixed(1)} yr span`
+        <div class="label">Portfolio return</div>
+        <div class="value">${fmtRate(sum.rate?.rate)}</div>
+        <div class="note">${sum.rate?.days
+          ? `if every policy matured today · ${(sum.rate.days / 365).toFixed(1)} yr span`
           : 'no dated cash flows yet'}</div>
       </div>
       ${isInvestorUser() ? `
@@ -1137,8 +1148,7 @@ async function policyView() {
   const p = await api(`/policies/${state.params.id}`);
   const values = [...p.values].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
   // Only fetched when the tab is open — it replays the whole ledger.
-  const irrData = ['return', 'carry'].includes(detailTab)
-    ? await api(`/policies/${p.id}/irr`) : null;
+  const irrData = detailTab === 'return' ? await api(`/policies/${p.id}/irr`) : null;
   const age = ageFrom(p.insured_dob);
   const coi = Number(p.cost_of_insurance) || 0;
   const av = Number(p.account_value) || 0;
@@ -1149,9 +1159,7 @@ async function policyView() {
   // nothing left of the tab once those are taken out, so it goes.
   const tabs = [['overview', 'Overview'],
                 ...(isInvestorUser() ? [] : [['values', 'Value history']]),
-                ['transactions', 'Transactions'], ['return', 'Return / IRR'],
-                // Ours, never theirs — the tab is not built for an investor.
-                ...(isInvestorUser() ? [] : [['carry', 'Carried interest']]),
+                ['transactions', 'Transactions'], ['return', 'Return'],
                 ['servicing', isInvestorUser() ? 'Premiums' : 'Servicing']];
 
   const html = `
@@ -1250,7 +1258,6 @@ function renderDetailTab(p, values, monthsCovered, irrData) {
   if (detailTab === 'values') return isInvestorUser() ? overviewTab(p) : valuesTab(p, values);
   if (detailTab === 'transactions') return transactionsTab(p);
   if (detailTab === 'return') return returnTab(p, irrData);
-  if (detailTab === 'carry') return carryTab(p, irrData);
   if (detailTab === 'servicing') return servicingTab(p, monthsCovered);
   return overviewTab(p, values);
 }
@@ -1724,14 +1731,15 @@ function stepRow(r) {
     </div>`;
 }
 
-/* ---------------------------- return / IRR --------------------------- */
+/* ------------------------------ return ------------------------------- */
 
 /**
  * Internal rate of return on this policy, and a calculator for the one
  * number that matters at the end: what the cheque actually was and when it
  * cleared. Both figures are solved from dated cash flows — the day each
  * premium left and the day the money came back — so they answer the same
- * question a spreadsheet's XIRR would, and can be checked against one.
+ * question the office's own calculation workbook asks, and can be checked
+ * against one line for line.
  */
 function returnTab(p, d) {
   if (!d) return '<div class="empty"><span class="spin"></span></div>';
@@ -1753,7 +1761,7 @@ function returnTab(p, d) {
     'Cash flows change direction more than once (a withdrawal between premiums, ' +
     'for example), so more than one rate can satisfy the equation. The one shown ' +
     'is the first root above −100%.');
-  if (!settled && r.irr !== null) caveats.push(
+  if (!settled && r.rate !== null) caveats.push(
     d.status === 'Matured'
       ? 'The claim has not been recorded as paid, so this assumes the death benefit ' +
         'is collected today. Enter the cheque below for the exact figure.'
@@ -1772,8 +1780,8 @@ function returnTab(p, d) {
   return `
     <div class="kpi-row">
       <div class="stat">
-        <div class="label">${settled ? 'Realized IRR' : d.status === 'Matured' ? 'IRR if collected today' : 'IRR if matured today'}</div>
-        <div class="value hero">${fmtIrr(r.irr)}</div>
+        <div class="label">${settled ? 'Realized return' : d.status === 'Matured' ? 'Return if collected today' : 'Return if matured today'}</div>
+        <div class="value hero">${fmtRate(r.rate)}</div>
         <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
           r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
       </div>
@@ -1817,13 +1825,13 @@ function returnTab(p, d) {
               or interest adjustment.</span></div>
           <div class="field"><label>Date funded</label>
             <input type="date" id="calcPaid" value="${esc(dateInput(d.proceeds_received_on) || '')}">
-            <span class="muted" style="font-size:12px">The IRR is measured to this date —
+            <span class="muted" style="font-size:12px">The return is measured to this date —
               collection lag is a real cost.</span></div>
         </div>
 
         <div class="kpi-row" style="margin-top:4px">
           <div class="stat">
-            <div class="label">Exact IRR</div>
+            <div class="label">Exact return</div>
             <div class="value hero" id="calcIrr">${dash}</div>
             <div class="note" id="calcNote">Enter a cheque amount and date</div>
           </div>
@@ -1835,7 +1843,7 @@ function returnTab(p, d) {
           <div class="stat">
             <div class="label">Against the assumption</div>
             <div class="value" id="calcDelta">${dash}</div>
-            <div class="note">vs ${fmtIrr(r.irr)} shown above</div>
+            <div class="note">vs ${fmtRate(r.rate)} shown above</div>
           </div>
         </div>
 
@@ -1860,8 +1868,9 @@ function returnTab(p, d) {
 
     <div class="card"><div class="card-body">
       <span class="muted" style="font-size:12px">
-        IRR is solved on actual dates over a 365-day year — the same convention as
-        Excel's XIRR, so these figures reconcile against a spreadsheet. Policy loans
+        The return is simple interest, not compounded: every dollar earns the rate for
+        exactly as long as it is outstanding and the interest itself earns nothing, which
+        is the convention the operating agreements are written in. Policy loans
         are excluded: a loan is repaid out of the death benefit, so counting it as
         income would double it against the proceeds.</span>
     </div></div>`;
@@ -1886,15 +1895,15 @@ function wireReturnTab(p, d) {
     // Same solver the server uses — one implementation, so the number on
     // screen while typing is the number that gets saved.
     const a = analyzeFlows([...d.ledger, { date: paid, amount, label: 'Death benefit received' }]);
-    $('#calcIrr').textContent = fmtIrr(a.irr);
+    $('#calcIrr').textContent = fmtRate(a.rate);
     $('#calcProfit').textContent = fmtExact(a.profit);
     $('#calcProfit').style.color = a.profit >= 0 ? 'var(--success-text)' : 'var(--critical)';
     $('#calcMultiple').textContent = a.multiple ? `${a.multiple.toFixed(2)}× capital` : '—';
     $('#calcNote').textContent = `${a.days} days · ${a.years.toFixed(2)} years held`;
-    const base = d.result.irr;
-    const delta = base === null || a.irr === null ? null : a.irr - base;
+    const base = d.result.rate;
+    const delta = base === null || a.rate === null ? null : a.rate - base;
     $('#calcDelta').textContent = delta === null ? '—'
-      : `${delta >= 0 ? '+' : '−'}${fmtIrr(Math.abs(delta))}`;
+      : `${delta >= 0 ? '+' : '−'}${fmtRate(Math.abs(delta))}`;
     $('#calcDelta').style.color = delta === null ? '' : delta >= 0 ? 'var(--success-text)' : 'var(--critical)';
   };
 
@@ -1957,84 +1966,6 @@ function wireReturnTab(p, d) {
       e.target.disabled = false;
     }
   });
-}
-
-/**
- * What this policy is worth to us.
- *
- * The investor's own screens have this already taken out and never name it.
- * Here it is the subject: what the entity's agreement charges, what the
- * profit is, and what the two come to — with the split spelled out line by
- * line, because "10% of profit" hides which profit.
- */
-function carryTab(p, d) {
-  const c = d?.carry;
-  if (!c) {
-    return `<div class="card"><div class="card-body"><div class="empty">
-      ${p.fund_code
-        ? `<strong>${esc(p.fund_code)}</strong> charges no carried interest — it is managed for
-           a fee, so the investors keep the whole profit on this policy.<br>
-           <span class="muted" style="font-size:13px">Change that under
-           Settings → Owner entities.</span>`
-        : `This policy is not held in an owner entity, so there is no operating agreement to
-           charge under and no carried interest on it.<br>
-           <span class="muted" style="font-size:13px">Assign it to an entity on the Overview
-           tab.</span>`}
-    </div></div></div>`;
-  }
-  const settled = c.earned;
-  const row = (label, value, note = '', strong = false) => `
-    <tr><td>${label}${note ? `<div class="muted" style="font-size:12px">${note}</div>` : ''}</td>
-      <td class="num ${strong ? 'strong' : ''}">${value}</td></tr>`;
-
-  return `
-    <div class="kpi-row">
-      <div class="stat">
-        <div class="label">${settled ? 'Carried interest earned' : 'Carried interest if it matured today'}</div>
-        <div class="value hero">${fmtExact(c.carry)}</div>
-        <div class="note">${fmtPct(c.rate)} of the profit${
-          c.fund_code ? ` · ${esc(c.fund_code)}` : ''}${
-          settled ? ' · the claim has been paid' : ' · not yet earned'}</div>
-      </div>
-      <div class="stat">
-        <div class="label">Profit on the case</div>
-        <div class="value">${fmtExact(c.gross_profit)}</div>
-        <div class="note">${fmtExact(c.gross_return)} back on ${fmtExact(c.basis)} in</div>
-      </div>
-      <div class="stat">
-        <div class="label">To the investors</div>
-        <div class="value">${fmtExact(c.net_profit)}</div>
-        <div class="note">their capital returned first, then ${fmtPct(100 - Number(c.rate))} of what is left</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head"><h2>How it splits</h2><div class="spacer"></div>
-        <span class="muted" style="font-size:12px">${settled
-          ? 'on the claim actually paid' : 'assuming the claim is collected today'}</span></div>
-      <div class="table-wrap"><table class="data"><tbody>
-        ${row('Capital in', fmtExact(c.basis),
-          'Acquisition cost, premiums, fees, servicing and commissions')}
-        ${row(settled ? 'Claim paid' : 'Death benefit', fmtExact(c.gross_return))}
-        ${row('Profit', fmtExact(c.gross_profit),
-          'What is left once the investors have their capital back', true)}
-        ${row(`Managing partner — ${fmtPct(c.rate)}`, fmtExact(c.carry), '', true)}
-        ${row(`Investors — ${fmtPct(100 - Number(c.rate))}`, fmtExact(c.net_profit))}
-        ${row('Investors receive in total', fmtExact(c.net_return),
-          'Their capital back, plus their share of the profit', true)}
-      </tbody></table></div>
-      <div class="card-body">
-        <span class="muted" style="font-size:12.5px">
-          ${settled
-            ? `This is earned: the carrier has paid the claim.`
-            : `Nothing is earned yet — this is what the split would come to if the claim were
-               collected today, and it moves with every premium paid and with the death benefit
-               the carrier reports.`}
-          A case that loses money carries none.
-          The investors' own screens show their figures with this already deducted.
-        </span>
-      </div>
-    </div>`;
 }
 
 function wireDetailTab(p, values, irrData) {
@@ -2937,8 +2868,8 @@ async function opportunitiesView() {
           <div class="value">${fmtExact(o.asking_price)}</div>
           <div class="note">${o.face_amount && o.asking_price
             ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
-        <div><div class="label">IRR at life expectancy</div>
-          <div class="value">${fmtIrr(o.irr_at_le)}</div>
+        <div><div class="label">Return at life expectancy</div>
+          <div class="value">${fmtRate(o.rate_at_le)}</div>
           <div class="note">${o.le_months ? `LE ${o.le_months} months` : 'no LE on file'}</div></div>
         <div><div class="label">Projected maturity</div>
           <div class="value" style="font-size:16px">${o.matures_on ? fmtDate(o.matures_on) : '—'}</div>
@@ -3044,7 +2975,7 @@ async function opportunityView() {
      `data-full` and are restated the moment the percentage changes, so
      the schedule, the scenarios and the outlay all move together and
      none of them can be left describing a different share from the
-     others. Dates, years, multiples and the IRR are not scaled: they do
+     others. Dates, years, multiples and the rate are not scaled: they do
      not depend on how much of the policy you own. */
   const shareCell = (full, cls = '') => `<td class="num ${cls}" data-full="${Number(full) || 0}"
     >${fmtExact(full)}</td>`;
@@ -3077,9 +3008,9 @@ async function opportunityView() {
               s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
           <tr><td class="strong">Multiple</td>
             ${a.scenarios.map((s) => cell(s, (x) => `${x.multiple.toFixed(2)}×`)).join('')}</tr>
-          <tr><td class="strong">IRR</td>
+          <tr><td class="strong">Return</td>
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}"
-              style="font-size:16px">${fmtIrr(s.irr)}</td>`).join('')}</tr>
+              style="font-size:16px">${fmtRate(s.rate)}</td>`).join('')}</tr>
         </tbody>
       </table></div>`;
   };
@@ -3165,7 +3096,7 @@ async function opportunityView() {
             — restates at the percentage you type, before you request anything.
             A request then holds that percentage straight away, so what other investors see as
             available drops immediately. It becomes an allocation once Poel Capital confirms it.
-            The IRR is not affected by how much you take — a rate has no size.
+            The return is not affected by how much you take — a rate has no size.
           </span>
         </div>
         <div id="takeMsg" style="margin-top:10px"></div>
@@ -3203,8 +3134,8 @@ async function opportunityView() {
           ${a.le_from ? `The estimate runs from ${fmtDate(a.le_from)}, the date of the LE report,
           not from today.` : ''}
           ${projected ? 'Premiums beyond the posted schedule are continued at the same annual rate.' : ''}
-          IRR is solved on the actual date of every cash flow over a 365-day year — the same
-          convention as Excel’s XIRR.
+          The return is simple interest over actual days — no compounding — the same
+          convention the operating agreements use.
         </span>
       </div>
     </div>
@@ -3642,7 +3573,7 @@ function openScheduleDialog(o) {
     <span class="muted" style="font-size:12px">
       Every payment is written exactly as entered — nothing is rounded or interpolated on
       save. Saving replaces the posted schedule with what is in this table, so removing a
-      row here removes the payment. Years beyond the last one are carried into the IRR
+      row here removes the payment. Years beyond the last one are carried into the return
       analysis at the same annual rate.
     </span>
   `, async () => {
@@ -3737,7 +3668,7 @@ function openSheetDialog(o) {
     <span class="muted" style="font-size:12px">
       At 100% the sheet shows the whole policy. Below that it shows the full premium and that
       participation's share side by side, with the cost and death benefit for that slice.
-      The IRR is the same at any percentage — every cash flow scales together.
+      The return is the same at any percentage — every cash flow scales together.
       ${!o.impairments && !o.thesis ? '<br><br><strong>Nothing has been written for the medical '
         + 'or investment-case sections yet.</strong> Use <strong>Edit</strong> to add them, or '
         + 'the sheet will print with the numbers alone.' : ''}
@@ -3924,13 +3855,250 @@ async function openFundDialog(o) {
  * of the active book automatically. On a survivorship policy that means the
  * *second* death, since a second-to-die contract pays nothing on the first.
  */
+/**
+ * The Maturities table, as one list of columns.
+ *
+ * Header, cells, totals and sort key all come from the same definition, so a
+ * column cannot be added to one and forgotten in another — which is how a
+ * totals row ends up one cell out of step with the figures above it.
+ *
+ * `value` is what the column sorts on: the number behind a formatted figure,
+ * or the raw string behind a name. Sorting on what is printed would put
+ * $1,000,000 before $9.
+ */
+function maturityColumns(m, investorView) {
+  const f = (r) => shareFactor(r);
+  const benefit = (r) => Number(r.death_benefit || 0) * f(r);
+  const basis = (r) => Number(r.total_invested || 0) * f(r);
+  const paid = (r) => (r.proceeds_amount == null ? null : Number(r.proceeds_amount) * f(r));
+  const gain = (r) => (paid(r) == null ? null : paid(r) - basis(r));
+  const dash = '<span class="muted">—</span>';
+
+  return [
+    { key: 'matured_on', header: 'Matured', value: (r) => r.matured_on || '',
+      cell: (r) => `<span class="strong">${fmtDate(r.matured_on)}</span>` },
+    /* First and last in their own columns: the register is read by surname,
+       and a single "Surname, Forename" cell cannot be sorted by either. */
+    { key: 'insured_last', header: 'Last name', value: (r) => r.insured_last || '',
+      cell: (r) => `${esc(r.insured_last || '')}${r.lives_count > 1
+        ? ` <span class="muted" style="font-size:12px">+${r.lives_count - 1}</span>` : ''}` },
+    { key: 'insured_first', header: 'First name', value: (r) => r.insured_first || '',
+      cell: (r) => esc(r.insured_first || '') },
+    { key: 'policy_number', header: 'Policy #', cls: 'secondary',
+      value: (r) => r.policy_number || '', cell: (r) => esc(r.policy_number || '') },
+    { key: 'carrier_name', header: 'Carrier', value: (r) => r.carrier_name || '',
+      cell: (r) => esc(r.carrier_name || '') },
+    { key: 'product_type', header: 'Type', value: (r) => r.product_type || '',
+      cell: (r) => esc(r.product_type || '—') },
+    ...(investorView ? [] : [{ key: 'fund_code', header: 'Owner',
+      value: (r) => r.fund_code || '', cell: (r) => esc(r.fund_code || '—') }]),
+    { key: 'death_benefit', header: 'Death benefit', cls: 'num', total: 'total_death_benefit',
+      value: benefit, cell: (r) => fmtExact(benefit(r)) },
+    { key: 'total_invested', header: 'Invested', cls: 'num', total: 'total_invested',
+      value: basis, cell: (r) => fmtExact(basis(r)) },
+    { key: 'proceeds_amount', header: 'Proceeds', cls: 'num', total: 'total_proceeds',
+      value: (r) => paid(r), cell: (r) => (paid(r) == null
+        ? '<span class="badge grace"><span class="dot"></span>Awaiting</span>' : fmtExact(paid(r))) },
+    { key: 'proceeds_received_on', header: 'Funded', value: (r) => r.proceeds_received_on || '',
+      cell: (r) => (r.proceeds_received_on ? fmtDate(r.proceeds_received_on) : dash) },
+    { key: 'gain', header: 'Gain', cls: 'num', value: (r) => gain(r),
+      cell: (r) => (gain(r) == null ? dash
+        : `<span style="color:${gain(r) >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${
+            fmtExact(gain(r))}</span>`) },
+    { key: 'rate', header: 'Return', cls: 'num', value: (r) => r.rate,
+      cell: (r) => `<span title="${paid(r) == null
+        ? 'Provisional — assumes the death benefit is collected today'
+        : r.rate_short ? 'Held under 90 days — an annualised rate is unreliable here'
+        : r.rate_ambiguous ? 'Cash flows change direction more than once; more than one rate can satisfy the equation'
+        : `${r.rate_days} days held`}">${fmtRate(r.rate)}${
+        r.rate != null && (paid(r) == null || r.rate_short || r.rate_ambiguous)
+          ? '<span class="muted"> *</span>' : ''}</span>` },
+  ];
+}
+
+/** Sort by whichever column was clicked, blanks last whichever way it runs. */
+function sortMaturities(rows, cols) {
+  const { key, dir } = state.matSort;
+  const col = cols.find((c) => c.key === key);
+  if (!col) return rows;
+  return [...rows].sort((a, b) => {
+    const av = col.value(a), bv = col.value(b);
+    const aEmpty = av === null || av === undefined || av === '';
+    const bEmpty = bv === null || bv === undefined || bv === '';
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+    return String(av).localeCompare(String(bv), 'en', { numeric: true }) * dir;
+  });
+}
+
+/**
+ * What the firm earns, in one place.
+ *
+ * The investor's screens have this deducted and never name it. Here it is
+ * the subject: what each entity's agreement charges, what the profit on
+ * each case is, and what the two come to.
+ *
+ * Earned and projected are never added together. Earned is carried interest
+ * on claims the carrier has actually paid; projected is what a case would
+ * produce if it settled today. Both are real, but only one is money, and a
+ * single figure mixing them reports cash that has not arrived.
+ */
+async function carryView() {
+  const status = state.carryStatus || 'all';
+  const [d, funds] = await Promise.all([
+    api(`/carry?status=${status}&fund=${encodeURIComponent(entityFilter())}`),
+    state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
+  ]);
+  state.funds = funds;
+  const t = d.totals;
+  const money = (n) => fmtExact(n);
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Carried interest</h1>
+        <div class="sub">${t.policies} ${t.policies === 1 ? 'policy' : 'policies'}${
+          t.charged < t.policies
+            ? ` · ${t.policies - t.charged} in entities that charge none` : ''}${
+          entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
+      <div class="spacer"></div>
+      <select id="carryStatus" class="head-select">
+        ${[['all', 'All policies'], ['active', 'Still running'], ['matured', 'Matured']]
+          .map(([v, label]) =>
+            `<option value="${v}" ${status === v ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+      ${entityPicker(funds)}
+      ${d.rows.length ? '<button id="exportCarryBtn">Export CSV</button>' : ''}
+    </div>
+
+    <div class="kpi-row">
+      <div class="stat">
+        <div class="label">Earned</div>
+        <div class="value hero">${money(t.earned)}</div>
+        <div class="note">on claims the carrier has paid</div>
+      </div>
+      <div class="stat">
+        <div class="label">Still to come</div>
+        <div class="value">${money(t.projected)}</div>
+        <div class="note">if every remaining case settled today</div>
+      </div>
+      <div class="stat">
+        <div class="label">Both together</div>
+        <div class="value">${money(t.earned + t.projected)}</div>
+        <div class="note">only the first of the two is money</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>By owner entity</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">the rate is a term of each agreement</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Entity</th><th class="num">Rate</th><th class="num">Policies</th>
+          <th class="num">Capital in</th><th class="num">Profit</th>
+          <th class="num">Earned</th><th class="num">Still to come</th>
+          <th class="num">Total</th></tr></thead>
+        <tbody>${d.byFund.length === 0
+          ? '<tr><td colspan="8"><div class="empty">Nothing to report.</div></td></tr>'
+          : d.byFund.map((f) => `<tr>
+              <td class="strong">${esc(f.fund_code)}</td>
+              <td class="num">${f.carry_pct > 0
+                ? fmtPct(f.carry_pct) : '<span class="muted">none</span>'}</td>
+              <td class="num">${f.policies}</td>
+              <td class="num">${money(f.basis)}</td>
+              <td class="num">${money(f.gross_profit)}</td>
+              <td class="num strong">${money(f.earned)}</td>
+              <td class="num secondary">${money(f.projected)}</td>
+              <td class="num">${money(f.earned + f.projected)}</td>
+            </tr>`).join('')}</tbody>
+        ${d.byFund.length ? `<tfoot><tr>
+          <td colspan="5">All entities</td>
+          <td class="num">${money(t.earned)}</td>
+          <td class="num">${money(t.projected)}</td>
+          <td class="num">${money(t.earned + t.projected)}</td>
+        </tr></tfoot>` : ''}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>By policy</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">largest first</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Last name</th><th>First name</th><th>Policy #</th><th>Carrier</th>
+          <th>Owner</th><th>Status</th><th class="num">Rate</th>
+          <th class="num">Capital in</th><th class="num">Comes back</th>
+          <th class="num">Profit</th><th class="num">Carried interest</th>
+          <th class="num">To investors</th></tr></thead>
+        <tbody>${d.rows.length === 0
+          ? '<tr><td colspan="12"><div class="empty">No policies match.</div></td></tr>'
+          : d.rows.map((r) => `<tr class="clickable" data-id="${r.id}">
+              <td class="strong">${esc(r.insured_last || '')}</td>
+              <td>${esc(r.insured_first || '')}</td>
+              <td class="secondary">${esc(r.policy_number)}</td>
+              <td>${esc(r.carrier_name || '')}</td>
+              <td>${esc(r.fund_code || '—')}</td>
+              <td>${r.earned
+                ? '<span class="badge good"><span class="dot"></span>Earned</span>'
+                : `<span class="muted">${esc(r.status)}</span>`}</td>
+              <td class="num">${r.carry_pct > 0
+                ? fmtPct(r.carry_pct) : '<span class="muted">none</span>'}</td>
+              <td class="num">${money(r.basis)}</td>
+              <td class="num">${money(r.gross_return)}</td>
+              <td class="num">${money(r.gross_profit)}</td>
+              <td class="num strong">${r.carry ? money(r.carry) : '<span class="muted">—</span>'}</td>
+              <td class="num secondary">${money(r.net_profit)}</td>
+            </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="card-body">
+        <span class="muted" style="font-size:12.5px">
+          The investors' capital comes back first — acquisition cost, premiums, fees,
+          servicing and commissions — and what is left is split at the rate in each
+          entity's agreement. <strong>Earned</strong> means the carrier has paid; every
+          other row is what would be due if that case settled today, which is why the two
+          are never added into one figure. A case that lost money carries none, and an
+          entity managed for a fee charges none.
+        </span>
+      </div>
+    </div>`;
+
+  return {
+    html,
+    after: () => {
+      wireEntityPicker();
+      $('#carryStatus').addEventListener('change', (e) => {
+        state.carryStatus = e.target.value;
+        render();
+      });
+      document.querySelectorAll('tr.clickable').forEach((tr) =>
+        tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
+      $('#exportCarryBtn')?.addEventListener('click', () =>
+        exportCsv('carried-interest.csv', d.rows, [
+          { header: 'Last Name', key: 'insured_last' },
+          { header: 'First Name', key: 'insured_first' },
+          { header: 'Policy #', key: 'policy_number' },
+          { header: 'Carrier', key: 'carrier_name' },
+          { header: 'Owner', key: 'fund_code' },
+          { header: 'Status', key: 'status' },
+          { header: 'Earned', get: (r) => (r.earned ? 'Yes' : 'No') },
+          { header: 'Rate %', key: 'carry_pct' },
+          { header: 'Capital In', key: 'basis' },
+          { header: 'Comes Back', key: 'gross_return' },
+          { header: 'Profit', key: 'gross_profit' },
+          { header: 'Carried Interest', key: 'carry' },
+          { header: 'To Investors', key: 'net_profit' },
+        ]));
+    },
+  };
+}
+
 async function maturitiesView() {
   const [m, funds] = await Promise.all([
     api(`/maturities${entityQuery() ? `?${entityQuery()}` : ''}`),
     loadFunds(),
   ]);
   const t = m.totals;
-  const rows = m.rows;
+  const matCols = maturityColumns(m, isInvestorUser());
+  const rows = sortMaturities(m.rows, matCols);
   const investorView = isInvestorUser();
 
   // Realized position: what came in against what went in. Only meaningful once
@@ -3955,8 +4123,6 @@ async function maturitiesView() {
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
-      ${m.carry ? `<button id="carryBtn">${
-        state.showCarry ? 'Hide carried interest' : 'Carried interest'}</button>` : ''}
       ${rows.length ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
     </div>
 
@@ -3998,11 +4164,11 @@ async function maturitiesView() {
              not folded in at today's date — it has had no time to run, so it
              would flatter the rate. That projection is still here, under the
              figure and named for what it is. */''}
-        <div class="label">${paidCount ? 'Realized IRR' : 'IRR if collected today'}</div>
-        <div class="value">${fmtIrr(paidCount ? m.realized?.irr : m.portfolio?.irr)}</div>
+        <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}</div>
+        <div class="value">${fmtRate(paidCount ? m.realized?.rate : m.portfolio?.rate)}</div>
         <div class="note">${paidCount
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
-             received${unpaidCount ? ` · ${fmtIrr(m.portfolio?.irr)} with the other ${unpaidCount}
+             received${unpaidCount ? ` · ${fmtRate(m.portfolio?.rate)} with the other ${unpaidCount}
              assumed collected today` : ''}`
           : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}</div>
       </div>
@@ -4010,104 +4176,43 @@ async function maturitiesView() {
 
     <div class="card">
       <div class="card-head"><h2>Matured policies</h2><div class="spacer"></div>
-        <span class="muted" style="font-size:12px">most recent first</span></div>
+        <span class="muted" style="font-size:12px">sorted by ${
+          esc((matCols.find((c) => c.key === state.matSort.key) || {}).header || '')
+        }, ${state.matSort.dir === 1 ? 'low to high' : 'high to low'} · click a heading to change it</span></div>
       <div class="table-wrap"><table class="data">
         <thead><tr>
-          <th>Matured</th><th>Insured</th><th>Policy #</th><th>Carrier</th>
-          <th>Type</th>${investorView ? '' : '<th>Owner</th>'}
-          <th class="num">Death benefit</th><th class="num">Invested</th>
-          <th class="num">Proceeds</th><th>Funded</th><th class="num">Gain</th>
-          ${m.carry ? '<th class="num">Carried interest</th>' : ''}
-          <th class="num">IRR</th>
+          ${matCols.map((c) => `<th class="sortable ${c.cls || ''}" data-mat-key="${c.key}">${
+            c.header}${state.matSort.key === c.key
+              ? `<span class="arrow">${state.matSort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`).join('')}
           ${canEditData() ? '<th></th>' : ''}
         </tr></thead>
-        <tbody>${rows.map((r) => {
-          const f = shareFactor(r);
-          const benefit = Number(r.death_benefit || 0) * f;
-          const basis = Number(r.total_invested || 0) * f;
-          const paid = r.proceeds_amount == null ? null : Number(r.proceeds_amount) * f;
-          const g = paid == null ? null : paid - basis;
-          return `<tr class="clickable" data-id="${r.id}">
-            <td class="strong">${fmtDate(r.matured_on)}</td>
-            <td>${nameOf(r)}${r.lives_count > 1
-                 ? ` <span class="muted" style="font-size:12px">+${r.lives_count - 1}</span>` : ''}</td>
-            <td class="secondary">${esc(r.policy_number)}</td>
-            <td>${esc(r.carrier_name)}</td>
-            <td>${esc(r.product_type || '—')}</td>
-            ${investorView ? '' : `<td>${esc(r.fund_code || '—')}</td>`}
-            <td class="num">${fmtExact(benefit)}</td>
-            <td class="num">${fmtExact(basis)}</td>
-            <td class="num">${paid == null
-              ? '<span class="badge grace"><span class="dot"></span>Awaiting</span>' : fmtExact(paid)}</td>
-            <td>${r.proceeds_received_on ? fmtDate(r.proceeds_received_on) : '<span class="muted">—</span>'}</td>
-            <td class="num" ${g == null ? '' : `style="color:${g >= 0 ? 'var(--success-text)' : 'var(--critical)'}"`}>
-              ${g == null ? '<span class="muted">—</span>' : fmtExact(g)}</td>
-            ${m.carry ? `<td class="num ${paid == null ? 'secondary' : ''}" title="${
-              paid == null ? 'Not earned yet — the claim has not been paid'
-              : 'Earned; the claim has been paid'}">${
-              Number(m.carry.byPolicy[r.id]) ? fmtExact(m.carry.byPolicy[r.id])
-                : '<span class="muted">—</span>'}</td>` : ''}
-            <td class="num ${paid == null ? 'secondary' : ''}" title="${
-              paid == null ? 'Provisional — assumes the death benefit is collected today'
-              : r.irr_short ? 'Held under 90 days — an annualised rate is unreliable here'
-              : r.irr_ambiguous ? 'Cash flows change direction more than once; more than one rate can satisfy the equation'
-              : `${r.irr_days} days held`}">
-              ${fmtIrr(r.irr)}${r.irr != null && (paid == null || r.irr_short || r.irr_ambiguous)
-                ? '<span class="muted"> *</span>' : ''}</td>
-            ${canEditData() ? `<td><button class="btn-sm" data-proceeds="${r.id}"
-                 >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button></td>` : ''}
-          </tr>`;
-        }).join('')}</tbody>
-        <tfoot><tr>
-          <td colspan="${investorView ? 5 : 6}">Totals — ${rows.length}
-            ${rows.length === 1 ? 'policy' : 'policies'}</td>
-          <td class="num">${fmtExact(t.total_death_benefit)}</td>
-          <td class="num">${fmtExact(t.total_invested)}</td>
-          <td class="num">${fmtExact(t.total_proceeds)}</td>
-          <td></td>
-          <td class="num">${fmtExact(gain)}</td>
-          ${m.carry ? `<td class="num">${fmtExact(m.carry.earned + m.carry.outstanding)}</td>` : ''}
-          <td class="num">${fmtIrr(m.portfolio?.irr)}</td>
-          ${canEditData() ? '<td></td>' : ''}
-        </tr></tfoot>
+        <tbody>${rows.map((r) => `<tr class="clickable" data-id="${r.id}">${
+          matCols.map((c) => `<td class="${c.cls || ''}">${c.cell(r)}</td>`).join('')}${
+          canEditData() ? `<td><button class="btn-sm" data-proceeds="${r.id}"
+            >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button></td>` : ''}
+        </tr>`).join('')}</tbody>
+        <tfoot><tr>${(() => {
+          /* Built from the same column list as the head, so a column added to
+             one cannot leave the other a cell out of step. */
+          const totals = {
+            total_death_benefit: t.total_death_benefit, total_invested: t.total_invested,
+            total_proceeds: t.total_proceeds, gain,
+            rate: m.portfolio?.rate,
+          };
+          const first = matCols.findIndex((c) => c.total || c.key === 'gain'
+            || c.key === 'rate');
+          return matCols.map((c, i) => {
+            if (i === 0) return `<td colspan="${first}">Totals — ${rows.length}
+              ${rows.length === 1 ? 'policy' : 'policies'}</td>`;
+            if (i < first) return '';
+            if (c.key === 'rate') return `<td class="num">${fmtRate(totals.rate)}</td>`;
+            const v = totals[c.total || c.key];
+            return v === null || v === undefined
+              ? '<td></td>' : `<td class="num">${fmtExact(v)}</td>`;
+          }).join('') + (canEditData() ? '<td></td>' : '');
+        })()}</tr></tfoot>
       </table></div>
     </div>
-
-    ${m.carry ? `
-    <div class="card" id="carryCard" ${state.showCarry ? '' : 'style="display:none"'}>
-      <div class="card-head"><h2>Carried interest by entity</h2><div class="spacer"></div>
-        <span class="muted" style="font-size:12px">ours, on matured policies</span></div>
-      <div class="table-wrap"><table class="data">
-        <thead><tr><th>Entity</th><th class="num">Rate</th><th class="num">Policies</th>
-          <th class="num">Earned</th><th class="num">Still to come</th>
-          <th class="num">Total</th></tr></thead>
-        <tbody>${m.carry.byFund.length === 0
-          ? '<tr><td colspan="6"><div class="empty">Nothing has matured yet.</div></td></tr>'
-          : m.carry.byFund.map((f) => `<tr>
-              <td class="strong">${esc(f.fund_code)}</td>
-              <td class="num">${f.rate ? fmtPct(f.rate) : '<span class="muted">none</span>'}</td>
-              <td class="num">${f.policies}</td>
-              <td class="num strong">${fmtExact(f.earned)}</td>
-              <td class="num secondary">${fmtExact(f.outstanding)}</td>
-              <td class="num">${fmtExact(f.earned + f.outstanding)}</td>
-            </tr>`).join('')}</tbody>
-        ${m.carry.byFund.length ? `<tfoot><tr>
-          <td colspan="3">All entities</td>
-          <td class="num">${fmtExact(m.carry.earned)}</td>
-          <td class="num">${fmtExact(m.carry.outstanding)}</td>
-          <td class="num">${fmtExact(m.carry.earned + m.carry.outstanding)}</td>
-        </tr></tfoot>` : ''}
-      </table></div>
-      <div class="card-body">
-        <span class="muted" style="font-size:12.5px">
-          <strong>Earned</strong> is carried interest on claims the carrier has actually paid.
-          <strong>Still to come</strong> is what the matured-but-unpaid claims would produce
-          when they settle — real, but not yet money. They are kept apart rather than added,
-          because a figure that mixes them reports cash that has not arrived.
-          A case that lost money carries none, and an entity managed for a fee charges none.
-        </span>
-      </div>
-    </div>` : ''}
 
     <div class="card"><div class="card-body">
       <span class="muted" style="font-size:12px">
@@ -4115,9 +4220,10 @@ async function maturitiesView() {
         acquisition cost, premiums, fees, servicing and commissions — and is shown
         only once the claim has been paid. A policy returns to the active book if
         its date of death is removed.<br>
-        IRR is solved on the actual date of every cash flow over a 365-day year, the
-        same convention as Excel's XIRR. The portfolio figure combines every matured
-        policy's flows into one series rather than averaging the rates, so a large
+        The return is simple interest over actual days — every dollar earns for exactly
+        as long as it is outstanding, and the interest earns nothing. The portfolio figure
+        combines every matured policy's flows into one series rather than averaging the
+        rates, so a large
         position counts for more than a small one. A <strong>*</strong> marks a rate
         that needs reading with care — an unpaid claim assumed collected today, a
         holding period under 90 days, or flows that change direction more than once.
@@ -4137,14 +4243,20 @@ async function maturitiesView() {
       document.querySelectorAll('[data-proceeds]').forEach((b) =>
         b.addEventListener('click', () =>
           openProceedsDialog(rows.find((r) => r.id === Number(b.dataset.proceeds)))));
-      $('#carryBtn')?.addEventListener('click', () => {
-        state.showCarry = !state.showCarry;
-        render();
-      });
+      document.querySelectorAll('th[data-mat-key]').forEach((th) =>
+        th.addEventListener('click', () => {
+          const key = th.dataset.matKey;
+          /* Clicking the column you are already on turns it round; a new one
+             starts high-to-low, which is what somebody scanning a money
+             column almost always wants first. */
+          state.matSort = { key, dir: state.matSort.key === key ? -state.matSort.dir : -1 };
+          render();
+        }));
       $('#exportMaturitiesBtn')?.addEventListener('click', () =>
         exportCsv('maturities.csv', rows, [
           { header: 'Matured', key: 'matured_on' },
-          { header: 'Insured', get: (r) => r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() },
+          { header: 'Last Name', key: 'insured_last' },
+          { header: 'First Name', key: 'insured_first' },
           { header: 'Policy #', key: 'policy_number' },
           { header: 'Carrier', key: 'carrier_name' },
           { header: 'Product', key: 'product_type' },
@@ -4153,8 +4265,10 @@ async function maturitiesView() {
           { header: 'Capital Invested', get: (r) => Number(r.total_invested || 0) * shareFactor(r) },
           { header: 'Proceeds', get: (r) => r.proceeds_amount == null ? '' : Number(r.proceeds_amount) * shareFactor(r) },
           { header: 'Date Funded', key: 'proceeds_received_on' },
-          { header: 'IRR', get: (r) => (r.irr == null ? '' : (r.irr * 100).toFixed(4)) },
-          { header: 'Days Held', key: 'irr_days' },
+          { header: 'Gain', get: (r) => (r.proceeds_amount == null ? ''
+            : (Number(r.proceeds_amount) - Number(r.total_invested || 0)) * shareFactor(r)) },
+          { header: 'Return %', get: (r) => (r.rate == null ? '' : (r.rate * 100).toFixed(4)) },
+          { header: 'Days Held', key: 'rate_days' },
         ]));
     },
   };
@@ -4725,7 +4839,7 @@ function importView() {
           <span class="muted" style="font-size:12px">
             Off by default: a transaction identical to one already on file — same policy,
             date, type and amount — is skipped and counted, so re-running a file cannot
-            double your capital invested and halve every IRR. Tick this only if the policy
+            double your capital invested and halve every return. Tick this only if the policy
             genuinely took two identical payments on the same day.</span>
         </div>
 
@@ -6204,6 +6318,7 @@ const VIEWS = {
   opportunity: () => (String(state.params.extra || '').startsWith('sheet-')
     ? opportunitySheetView() : opportunityView()),
   maturities: maturitiesView,
+  carry: carryView,
   insureds: insuredsView,
   investors: investorsView,
   investor: investorView,

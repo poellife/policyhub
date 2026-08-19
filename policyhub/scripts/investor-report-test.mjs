@@ -112,9 +112,9 @@ check('and the twelve-month total is summed', rep.upcoming_12mo > 0,
   String(rep.upcoming_12mo));
 
 console.log('\nA RATE, AND WHAT IT RESTS ON');
-check('a portfolio IRR is solved', rep.totals.irr !== null, String(rep.totals.irr));
-check('and one per position', rep.positions.every((p) => p.irr !== null),
-  rep.positions.map((p) => p.irr).join(','));
+check('a portfolio IRR is solved', rep.totals.rate !== null, String(rep.totals.rate));
+check('and one per position', rep.positions.every((p) => p.rate !== null),
+  rep.positions.map((p) => p.rate).join(','));
 check('each position states the percentage held',
   rep.positions.map((p) => p.pct).sort((a, b) => a - b).join(',') === '25,40');
 

@@ -304,8 +304,8 @@ check('its own premium tab landed too',
   wb2d.transactions.filter((t) => t.txn_type === 'Premium Payment').length === 7);
 
 const wbIrr = await json(await api(`/policies/${wb1.id}/irr`));
-check('an IRR falls out immediately', wbIrr.result.irr !== null,
-  `${(wbIrr.result.irr * 100).toFixed(2)}% on $${wbIrr.result.invested.toLocaleString('en-US')}`);
+check('an IRR falls out immediately', wbIrr.result.rate !== null,
+  `${(wbIrr.result.rate * 100).toFixed(2)}% on $${wbIrr.result.invested.toLocaleString('en-US')}`);
 check('capital invested is acquisition plus every premium',
   Math.abs(wbIrr.result.invested - (295000 + 26500 + 26500 + 27200 + 28100 + 29000 + 30150)) < 0.01,
   String(wbIrr.result.invested));

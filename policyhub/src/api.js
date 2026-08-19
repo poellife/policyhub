@@ -1,12 +1,12 @@
 import express from 'express';
 import { createHash } from 'node:crypto';
-// The IRR engine lives under public/ because the browser loads it too: the
+// The rate engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
 import { analyzeFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carryOn, CARRY_PCT,
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
-// The agreement template is under public/ for the same reason the IRR engine
+// The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
 import { renderAgreement, canonicalText, AGREEMENT_FIELDS } from '../public/agreement-template.js';
@@ -1633,13 +1633,13 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     }
   }
 
-  // Book-level IRR. Every policy's dated flows in one series, with each
+  // Book-level return. Every policy's dated flows in one series, with each
   // live policy carrying a death benefit dated today — "what the book has
   // returned if every remaining insured died this morning". Realized
   // policies contribute the cheque that actually arrived, on the day it
   // arrived, so this converges on the true number as the book runs off.
   const { combined } = await portfolioFlows(req, { fund });
-  const irr = analyzeFlows(combined);
+  const returnOnBook = analyzeFlows(combined);
 
   /* Carry is totalled over the LIVE book only. What a matured policy has
      produced belongs to the Maturities register, which splits it into earned
@@ -1676,7 +1676,7 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
     lives: Number(ages.rows[0].lives) || 0,
     livesWithDob: Number(ages.rows[0].with_dob) || 0,
-    irr,
+    rate: returnOnBook,
     scopedToInvestor: scope !== null,
   });
 }));
@@ -1869,7 +1869,7 @@ router.get('/opportunities', wrap(async (req, res) => {
     [me, funds, canSeePassed(req)]
   );
 
-  // Pull every schedule in one query: an IRR computed from the stated
+  // Pull every schedule in one query: a rate computed from the stated
   // annual premium would not match the one on the detail page, and two
   // different numbers for the same deal is worse than none.
   const { rows: prem } = rows.length
@@ -1893,7 +1893,7 @@ router.get('/opportunities', wrap(async (req, res) => {
       remaining_pct: Math.max(0, 100 - taken),
       min_commitment_pct: minimumTake(
         Math.max(0, 100 - taken) + (Number(o.my_pct) || 0)),
-      irr_at_le: a.base?.irr ?? null,
+      rate_at_le: a.base?.rate ?? null,
       matures_on: a.base?.matures_on ?? null,
       shared_with: me === null ? o.shared_with : undefined,
     };
@@ -2496,7 +2496,7 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
     if (terminal) raw.push({ ...terminal, amount: terminal.amount * factor });
     /* An investor is shown their return after the managing partner's share
        of the profit, per case. Done here rather than at each of the dozen
-       places a rate is displayed, so no screen can be missed — every IRR,
+       places a rate is displayed, so no screen can be missed — every rate,
        profit and multiple in the application is solved from these flows. */
     const pct = Number(p.carry_pct) || 0;
     const flows = scope === null || !pct ? raw : flowsAfterCarry(raw, pct);
@@ -2529,7 +2529,7 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
       WHERE policy_id = $1 ORDER BY txn_date, id`, [req.params.id]
   );
 
-  // Investors see their slice. IRR itself is unchanged by scaling every
+  // Investors see their slice. The rate itself is unchanged by scaling every
   // flow — a rate has no size — but the dollars beside it must be theirs.
   const factor = scope === null ? 1 : (Number(p.my_pct) || 0) / 100;
   const asOf = today();
@@ -2578,6 +2578,77 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
     settled: p.proceeds_amount != null,
     ledger: base,                                    // outflows only, dated
     result: analyzeFlows(withTerminal),
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * carried interest
+ *
+ * Ours, and only ever ours. An investor's screens have this deducted and
+ * never name it; this endpoint is the other side of the same arithmetic and
+ * is closed to them twice over — `blockInvestors` refuses the request, and
+ * `requireRole('admin')` refuses everyone else besides.
+ *
+ * Administrators only rather than staff generally: what the firm earns is
+ * not a portfolio manager's business, and a manager scoped to one entity
+ * asking for "all entities" would be a question with an awkward answer.
+ * ------------------------------------------------------------------ */
+
+/* The words the screen uses, against the words `portfolioFlows` knows.
+   Kept as a map rather than passed straight through: "matured" reading as
+   "all" because the filter did not recognise it is the kind of silence that
+   looks like working software. */
+const CARRY_BASIS = { active: 'active', matured: 'realized', all: 'all' };
+
+router.get('/carry', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const asked = str(req.query.status) || 'all';
+  const basis = CARRY_BASIS[asked];
+  if (!basis)
+    return res.status(400).json({ error: 'Status must be active, matured or all.' });
+  const fund = str(req.query.fund);
+  const { policies, byPolicy } = await portfolioFlows(req, { basis, fund });
+
+  const rows = policies.map((p) => {
+    const rate = Number(p.carry_pct) || 0;
+    const a = analyzeFlows(byPolicy.get(p.id) || []);
+    const earned = p.proceeds_amount != null;
+    return {
+      id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
+      product_type: p.product_type, fund_code: p.fund_code || '',
+      display_name: p.display_name, insured_first: p.insured_first,
+      insured_last: p.insured_last, status: p.status, matured_on: p.matured_on,
+      carry_pct: rate,
+      basis: a.invested, gross_return: a.returned, gross_profit: a.profit,
+      carry: rate ? carryOn(a.returned, a.invested, rate) : 0,
+      net_profit: a.profit - (rate ? carryOn(a.returned, a.invested, rate) : 0),
+      /* Earned means the carrier has paid. Everything else is what WOULD be
+         due if the claim were collected today — real, but not money. The two
+         are never added together. */
+      earned,
+      rate: a.rate,
+    };
+  }).sort((x, y) => y.carry - x.carry);
+
+  const byFund = new Map();
+  let earned = 0, projected = 0;
+  for (const r of rows) {
+    const key = r.fund_code || '(no entity)';
+    if (!byFund.has(key))
+      byFund.set(key, { fund_code: key, carry_pct: r.carry_pct, policies: 0,
+                        earned: 0, projected: 0, basis: 0, gross_profit: 0 });
+    const b = byFund.get(key);
+    b.policies++; b.basis += r.basis; b.gross_profit += r.gross_profit;
+    if (r.earned) { b.earned += r.carry; earned += r.carry; }
+    else { b.projected += r.carry; projected += r.carry; }
+  }
+
+  res.json({
+    status: asked,
+    fund,
+    rows,
+    totals: { earned, projected, policies: rows.length,
+              charged: rows.filter((r) => r.carry_pct > 0).length },
+    byFund: [...byFund.values()].sort((a2, b2) => (a2.fund_code < b2.fund_code ? -1 : 1)),
   });
 }));
 
@@ -2637,12 +2708,12 @@ router.get('/maturities', wrap(async (req, res) => {
         WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds, fund]),
   ]);
 
-  // Return on each matured policy, and one IRR across all of them together.
+  // Return on each matured policy, and one rate across all of them together.
   const { policies, byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true, fund });
   const withReturn = rows.rows.map((r) => {
     const a = analyzeFlows(byPolicy.get(r.id) || []);
-    return { ...r, irr: a.irr, irr_days: a.days, irr_short: a.short_period,
-             irr_ambiguous: a.ambiguous, multiple: a.multiple };
+    return { ...r, rate: a.rate, rate_days: a.days, rate_short: a.short_period,
+             rate_ambiguous: a.ambiguous, multiple: a.multiple };
   });
 
   /* Two different questions, and the headline is the first one.
@@ -3146,7 +3217,7 @@ router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (
  *              the day it arrived (or the benefit assumed collected today
  *              where the claim is still outstanding)
  *
- * Owner entities get their own IRR computed from their own combined flows,
+ * Owner entities get their own rate computed from their own combined flows,
  * not by averaging the policies inside them — a $5m position and a $50k one
  * do not contribute equally to a rate, and averaging pretends they do.
  */
@@ -3160,7 +3231,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
   const rows = policies.map((p) => {
     /* The rate already carries the deduction — `portfolioFlows` applied it
        to the flows — so the dollars beside it have to as well, or the table
-       would show a profit that its own IRR disagrees with. */
+       would show a profit that its own rate disagrees with. */
     const a = analyzeFlows(byPolicy.get(p.id) || []);
     const factor = Number(p.factor) || 0;
     const basisOf = a.invested;
@@ -3179,7 +3250,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
         : net(Number(p.proceeds_amount) * factor),
       proceeds_received_on: p.proceeds_received_on,
       settled: p.proceeds_amount != null,
-      irr: a.irr, invested: a.invested, returned: a.returned, profit: a.profit,
+      rate: a.rate, invested: a.invested, returned: a.returned, profit: a.profit,
       multiple: a.multiple, days: a.days, years: a.years,
       first_flow: a.first_flow, last_flow: a.last_flow,
       short_period: a.short_period, extreme: a.extreme, ambiguous: a.ambiguous,
@@ -3187,10 +3258,10 @@ router.get('/reports/returns', wrap(async (req, res) => {
   }).sort((x, y) => {
     // Highest return first; anything without a computable rate sinks to the
     // bottom rather than sorting as if it were zero.
-    if (x.irr === null && y.irr === null) return y.invested - x.invested;
-    if (x.irr === null) return 1;
-    if (y.irr === null) return -1;
-    return y.irr - x.irr;
+    if (x.rate === null && y.rate === null) return y.invested - x.invested;
+    if (x.rate === null) return 1;
+    if (y.rate === null) return -1;
+    return y.rate - x.rate;
   });
 
   const groups = new Map();
@@ -3202,9 +3273,9 @@ router.get('/reports/returns', wrap(async (req, res) => {
   const byFund = [...groups.entries()].map(([fund_code, ids]) => {
     const flows = ids.flatMap((id) => byPolicy.get(id) || []);
     const a = analyzeFlows(flows);
-    return { fund_code, n: ids.length, irr: a.irr, invested: a.invested,
+    return { fund_code, n: ids.length, rate: a.rate, invested: a.invested,
              returned: a.returned, profit: a.profit, multiple: a.multiple, days: a.days };
-  }).sort((x, y) => (y.irr ?? -Infinity) - (x.irr ?? -Infinity));
+  }).sort((x, y) => (y.rate ?? -Infinity) - (x.rate ?? -Infinity));
 
   // Anything the basis leaves out is named, so the reader can see the shape of
   // what is missing instead of assuming the table is the whole book.
@@ -3223,13 +3294,13 @@ router.get('/reports/returns', wrap(async (req, res) => {
   const portfolio = analyzeFlows(combined);
   // The simple mean is reported alongside, because the gap between it and the
   // capital-weighted rate is itself worth seeing.
-  const rated = rows.filter((r) => r.irr !== null);
-  const meanIrr = rated.length ? rated.reduce((s, r) => s + r.irr, 0) / rated.length : null;
+  const rated = rows.filter((r) => r.rate !== null);
+  const meanIrr = rated.length ? rated.reduce((s, r) => s + r.rate, 0) / rated.length : null;
 
   res.json({
     basis, as_of: asOf, fund,
     rows, byFund, excluded, portfolio,
-    mean_irr: meanIrr,
+    mean_rate: meanIrr,
     rated_count: rated.length,
     scopedToInvestor: scope !== null,
   });
@@ -3368,7 +3439,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         proceeds_received_on: p.proceeds_received_on,
         settled: p.proceeds_amount != null,
         invested: a.invested, returned: a.returned, profit: a.profit,
-        multiple: a.multiple, irr: a.irr, days: a.days,
+        multiple: a.multiple, rate: a.rate, days: a.days,
         short_period: a.short_period, extreme: a.extreme, ambiguous: a.ambiguous,
       };
     });
@@ -3390,7 +3461,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         invested: rows.reduce((s, r) => s + r.invested, 0),
         annual_premium: live.reduce((s, r) => s + r.premium_required, 0),
         proceeds: realized.reduce((s, r) => s + (r.proceeds_amount || 0), 0),
-        irr: overall.irr,
+        rate: overall.rate,
         multiple: overall.multiple,
         profit: overall.profit,
         short_period: overall.short_period, extreme: overall.extreme,

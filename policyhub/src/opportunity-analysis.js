@@ -132,7 +132,7 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     premium_count: premiums.length,
     projected_beyond_schedule: extended,
     annual_premium_assumed: annual,
-    irr: a.irr,
+    rate: a.rate,
     invested: a.invested,
     returned: a.returned,
     profit: a.profit,

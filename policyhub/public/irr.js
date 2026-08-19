@@ -1,4 +1,15 @@
 /* =====================================================================
+   What a position returned.
+
+   The headline figure is SIMPLE interest — no compounding — because that
+   is the convention the operating agreements and the office's premium
+   calculation workbooks are written in. `simpleRate` below is the one the
+   screens quote.
+
+   The date-exact compounding rate (XIRR) is still computed and returned
+   alongside it as `compound_rate`, for anyone comparing a case against an
+   instrument quoted that way. It is not what the application displays.
+
    Date-exact internal rate of return (XIRR).
 
    Every cash flow carries its own date and is discounted by the actual
@@ -109,7 +120,46 @@ function signChanges(flows) {
 }
 
 /**
- * IRR plus everything needed to present it honestly.
+ * Simple interest — the return, without compounding.
+ *
+ * Every dollar earns the rate for exactly as long as it is outstanding, and
+ * the interest itself earns nothing. That is the convention the operating
+ * agreements are written in and the one the office's own premium
+ * calculation workbooks use, so a figure produced here can be checked
+ * against a sheet without argument.
+ *
+ *     dollar-years  =  Σ  amount_out_i × days_to_the_end_i / 365
+ *     rate          =  profit / dollar-years
+ *
+ * "Dollar-years" is how much money was tied up and for how long: a dollar
+ * out for a year is one dollar-year. It is what makes the arithmetic fair
+ * when payments go out on different dates — a premium paid twelve years
+ * before the claim did far more work than one paid four months before it,
+ * and dividing profit by capital alone would pretend otherwise.
+ *
+ * Money coming back early counts against the total rather than for it,
+ * because a dollar returned stops earning. With no early inflows — the
+ * ordinary case, one purchase, premiums, then the claim — this reduces
+ * exactly to the workbook's own formula.
+ *
+ * Returns null rather than a number when nothing was outstanding: a rate on
+ * capital that was never at risk is undefined, not zero.
+ */
+export function simpleRate(flows) {
+  if (!flows || flows.length < 2) return null;
+  const end = flows[flows.length - 1].date;
+  let dollarYears = 0;
+  let profit = 0;
+  for (const f of flows) {
+    const amount = Number(f.amount);
+    profit += amount;
+    dollarYears += -amount * (daysBetween(f.date, end) / 365);
+  }
+  return dollarYears > 0 ? profit / dollarYears : null;
+}
+
+/**
+ * The return plus everything needed to present it honestly.
  *
  * A 40% return earned over three weeks annualises to something absurd, and
  * a flow pattern that changes sign more than once can have several
@@ -127,10 +177,19 @@ export function analyzeFlows(rawFlows) {
   const first = flows[0]?.date ?? null;
   const last = flows[flows.length - 1]?.date ?? null;
   const days = first && last ? daysBetween(first, last) : 0;
-  const rate = xirr(flows);
+  const rate = simpleRate(flows);
+  /* Dollar-years is worth returning rather than recomputing: it is the
+     denominator the rate stands on, and a screen that quotes a rate can
+     then say how much money was working and for how long. */
+  const dollarYears = flows.reduce(
+    (s2, f) => s2 + -Number(f.amount) * (daysBetween(f.date, last) / 365), 0);
 
   return {
-    irr: rate,                                   // decimal, e.g. 0.1834 = 18.34%
+    rate,                                        // decimal, e.g. 0.1834 = 18.34%
+    dollar_years: dollarYears,
+    /* The compounding equivalent, for anyone comparing this against an
+       instrument quoted that way. Not what the screens show. */
+    compound_rate: xirr(flows),
     flows,
     invested: out,
     returned: inn,
@@ -259,7 +318,7 @@ export function ledgerFlows(transactions = [], scale = 1) {
 }
 
 /** Format a decimal rate for display, with a ceiling on the absurd. */
-export function fmtIrr(rate, { dp = 2 } = {}) {
+export function fmtRate(rate, { dp = 2 } = {}) {
   if (rate === null || rate === undefined || !Number.isFinite(rate)) return '—';
   const pct = rate * 100;
   if (pct > 9999) return '>9,999%';

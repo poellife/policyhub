@@ -61,19 +61,17 @@ const wipe = async () => {
 };
 await wipe();
 
-/** XIRR by bisection, written here so the check does not lean on the solver
-    it is checking. */
-const xirr = (flows) => {
-  const t0 = new Date(flows[0].date);
-  const npv = (r) => flows.reduce((s, f) =>
-    s + f.amount / (1 + r) ** ((new Date(f.date) - t0) / 86400000 / 365), 0);
-  let lo = -0.9999, hi = 100;
-  if (npv(lo) * npv(hi) > 0) return null;
-  for (let i = 0; i < 300; i++) {
-    const mid = (lo + hi) / 2;
-    if (npv(lo) * npv(mid) <= 0) hi = mid; else lo = mid;
-  }
-  return (lo + hi) / 2;
+/**
+ * Simple interest, worked out here so the check does not lean on the code
+ * it is checking: profit divided by dollar-years, where a dollar out for a
+ * year is one dollar-year.
+ */
+const byHandRate = (flows) => {
+  const end = flows[flows.length - 1].date;
+  const days = (a, b) => (new Date(b) - new Date(a)) / 86400000;
+  const profit = flows.reduce((s, f) => s + f.amount, 0);
+  const dollarYears = flows.reduce((s, f) => s + -f.amount * (days(f.date, end) / 365), 0);
+  return dollarYears > 0 ? profit / dollarYears : null;
 };
 
 /**
@@ -131,27 +129,27 @@ check('the multiple follows the same money',
   near(theirs.result.multiple, NET / BASIS, 1e-6),
   `${theirs.result.multiple?.toFixed(6)} vs ${(NET / BASIS).toFixed(6)}`);
 
-const byHand = xirr([
+const byHand = byHandRate([
   { date: iso(-1000), amount: -300000 },
   { date: iso(-400), amount: -20000 },
   { date: iso(-30), amount: NET },
 ]);
 check('and the rate is solved on exactly those flows',
-  near(theirs.result.irr, byHand, 1e-5), `${P(theirs.result.irr)} vs ${P(byHand)} by hand`);
+  near(theirs.result.rate, byHand, 1e-5), `${P(theirs.result.rate)} vs ${P(byHand)} by hand`);
 
 console.log('\nWE STILL SEE THE WHOLE THING');
 const ours = await json(await api(admin, `/policies/${A.id}/irr`));
 check('the claim is the full amount', near(ours.proceeds_amount, 1000000), M(ours.proceeds_amount));
 check('the profit is the gross profit',
   near(ours.result.profit, 1000000 - 640000), M(ours.result.profit));
-const oursByHand = xirr([
+const oursByHand = byHandRate([
   { date: iso(-1000), amount: -600000 },
   { date: iso(-400), amount: -40000 },
   { date: iso(-30), amount: 1000000 },
 ]);
 check('and our rate is the gross rate, higher than theirs',
-  near(ours.result.irr, oursByHand, 1e-5) && ours.result.irr > theirs.result.irr,
-  `ours ${P(ours.result.irr)} · theirs ${P(theirs.result.irr)}`);
+  near(ours.result.rate, oursByHand, 1e-5) && ours.result.rate > theirs.result.rate,
+  `ours ${P(ours.result.rate)} · theirs ${P(theirs.result.rate)}`);
 
 console.log('\nTHE MATURITIES REGISTER AGREES WITH THE POLICY PAGE');
 const mReg = await json(await api(inv, `/maturities?fund=${FUND}`));
@@ -165,8 +163,8 @@ check('their death benefit reads net too',
 check('the register totals match the policy page exactly',
   near(mReg.totals.total_proceeds, NET), `${M(mReg.totals.total_proceeds)} vs ${M(NET)}`);
 check('and the realized rate is the one their own policy page shows',
-  near(mReg.realized.irr, theirs.result.irr, 1e-6),
-  `${P(mReg.realized.irr)} vs ${P(theirs.result.irr)}`);
+  near(mReg.realized.rate, theirs.result.rate, 1e-6),
+  `${P(mReg.realized.rate)} vs ${P(theirs.result.rate)}`);
 const ourReg = await json(await api(admin, `/maturities?fund=${FUND}`));
 check('while ours totals the gross claim',
   near(ourReg.totals.total_proceeds, 1000000), M(ourReg.totals.total_proceeds));
@@ -186,8 +184,8 @@ check('the investor receives the whole claim',
 check('their loss is not made smaller by the arrangement',
   near(lossTheirs.result.profit, -400000), M(lossTheirs.result.profit));
 check('and it reads exactly as it does for us',
-  near(lossTheirs.result.irr, lossOurs.result.irr, 1e-9),
-  `${P(lossTheirs.result.irr)} vs ${P(lossOurs.result.irr)}`);
+  near(lossTheirs.result.rate, lossOurs.result.rate, 1e-9),
+  `${P(lossTheirs.result.rate)} vs ${P(lossOurs.result.rate)}`);
 
 console.log('\nONE CASE’S LOSS DOES NOT SHELTER ANOTHER’S GAIN');
 /* Both policies are now in the same book. If carry were netted across the
@@ -196,8 +194,8 @@ const afterB = await json(await api(inv, `/policies/${A.id}/irr`));
 check('the paid case still shows the same net claim',
   near(afterB.proceeds_amount, NET), `${M(afterB.proceeds_amount)} vs ${M(NET)}`);
 check('and the same rate as before the loss existed',
-  near(afterB.result.irr, theirs.result.irr, 1e-9),
-  `${P(afterB.result.irr)} vs ${P(theirs.result.irr)}`);
+  near(afterB.result.rate, theirs.result.rate, 1e-9),
+  `${P(afterB.result.rate)} vs ${P(theirs.result.rate)}`);
 
 /* ------------------------------------------------------------------ *
  * A policy still running.
@@ -245,7 +243,7 @@ check('the returns report shows the net claim',
 check('with the profit that goes with it',
   near(rowRpt.profit, 162000), M(rowRpt.profit));
 check('and the same rate as the policy page',
-  near(rowRpt.irr, theirs.result.irr, 1e-9), `${P(rowRpt.irr)} vs ${P(theirs.result.irr)}`);
+  near(rowRpt.rate, theirs.result.rate, 1e-9), `${P(rowRpt.rate)} vs ${P(theirs.result.rate)}`);
 
 console.log('\nAN OPPORTUNITY IS QUOTED THE SAME WAY IT WILL PAY');
 /* What somebody weighs up before committing has to be the money they would
@@ -275,12 +273,12 @@ check('their outlay is identical — nothing is taken from what they pay',
 check('their profit is ninety per cent of ours',
   near(theirLe.profit, ourLe.profit * 0.9), `${M(theirLe.profit)} vs ${M(ourLe.profit * 0.9)}`);
 check('and their rate is lower than ours',
-  theirLe.irr < ourLe.irr, `${P(theirLe.irr)} vs ${P(ourLe.irr)}`);
+  theirLe.rate < ourLe.rate, `${P(theirLe.rate)} vs ${P(ourLe.rate)}`);
 const listedForThem = ((await json(await api(inv, '/opportunities'))) || [])
   .find((x) => x.id === opp.id);
 check('the card in the list quotes the same rate as the page',
-  near(listedForThem.irr_at_le, theirLe.irr, 1e-9),
-  `${P(listedForThem.irr_at_le)} vs ${P(theirLe.irr)}`);
+  near(listedForThem.rate_at_le, theirLe.rate, 1e-9),
+  `${P(listedForThem.rate_at_le)} vs ${P(theirLe.rate)}`);
 
 console.log('\nAN ENTITY MANAGED FOR A FEE CHARGES NONE');
 /* Carried interest is a term of an operating agreement, and not every entity
@@ -302,8 +300,8 @@ const feeOurs = await json(await api(admin, `/policies/${D.id}/irr`));
 check('the investor is quoted the whole death benefit',
   near(feeTheirs.death_benefit, 1500000), M(feeTheirs.death_benefit));
 check('and exactly what we see',
-  near(feeTheirs.result.irr, feeOurs.result.irr, 1e-9),
-  `${P(feeTheirs.result.irr)} vs ${P(feeOurs.result.irr)}`);
+  near(feeTheirs.result.rate, feeOurs.result.rate, 1e-9),
+  `${P(feeTheirs.result.rate)} vs ${P(feeOurs.result.rate)}`);
 
 console.log('\nAND IT CAN BE TURNED BACK ON');
 await api(admin, `/funds/${feeFund.id}`, { method: 'PUT', body: {

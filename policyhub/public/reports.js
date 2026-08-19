@@ -9,7 +9,7 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
-import { fmtIrr } from './irr.js';
+import { fmtRate } from './irr.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
@@ -158,12 +158,12 @@ const REPORTS = {
   },
   'return-active': {
     name: 'Return — policies in force',
-    blurb: 'IRR on every live policy as if it matured today, ranked, with owner-entity subtotals. The unrealized picture.',
+    blurb: 'Return on every live policy as if it matured today, ranked, with owner-entity subtotals. The unrealized picture.',
     landscape: true,
   },
   'return-realized': {
     name: 'Return — realized',
-    blurb: 'IRR on every matured policy from the cheque that actually arrived. What the book has actually returned.',
+    blurb: 'Return on every matured policy from the cheque that actually arrived. What the book has actually returned.',
     landscape: true,
   },
   investor: {
@@ -402,7 +402,7 @@ function buildForecast(d, o) {
  * two documents differ only in what the terminal cash flow is — an assumed
  * death benefit dated today, or the cheque that actually cleared.
  *
- * Rates are capital-weighted throughout: an entity's IRR is solved from the
+ * Rates are capital-weighted throughout: an entity's return is solved from the
  * combined flows of its policies, not averaged across them. The simple mean
  * is printed beside it precisely so the gap between the two is visible —
  * when a few small positions carry outsized rates, the mean flatters the
@@ -419,7 +419,7 @@ function buildReturn(d, o, { realized }) {
       ${note ? `<div class="rpt-tile-note">${note}</div>` : ''}</div>`;
 
   const flag = (r) => {
-    if (r.irr === null) return '';
+    if (r.rate === null) return '';
     const why = [];
     if (realized && !r.settled) why.push('claim outstanding, assumed collected today');
     if (r.short_period) why.push('held under 90 days');
@@ -432,8 +432,8 @@ function buildReturn(d, o, { realized }) {
   const settledCount = rows.filter((r) => r.settled).length;
   const cashReceived = rows.reduce((s, r) => s + (r.settled ? Number(r.proceeds_amount) || 0 : 0), 0);
   const assumed = Math.max(0, Number(p.returned) - cashReceived);
-  const weightedNote = d.mean_irr === null ? ''
-    : `Simple average of the ${d.rated_count} policy rates is ${fmtIrr(d.mean_irr)}`;
+  const weightedNote = d.mean_rate === null ? ''
+    : `Simple average of the ${d.rated_count} policy rates is ${fmtRate(d.mean_rate)}`;
 
   const fundTable = d.byFund.length > 1 ? `
     <div class="rpt-block avoid-break">
@@ -443,7 +443,7 @@ function buildReturn(d, o, { realized }) {
           ${o.showBasis ? '<th class="num">Capital invested</th>' : ''}
           <th class="num">${realized ? 'Proceeds' : 'Death benefit'}</th>
           ${o.showBasis ? '<th class="num">Profit</th><th class="num">Multiple</th>' : ''}
-          <th class="num">IRR</th></tr></thead>
+          <th class="num">Return</th></tr></thead>
         <tbody>${d.byFund.map((f) => `<tr>
           <td class="strong">${esc(f.fund_code)}</td>
           <td class="num">${f.n}</td>
@@ -451,14 +451,14 @@ function buildReturn(d, o, { realized }) {
           <td class="num">${fmtExact(f.returned)}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(f.profit)}</td>
             <td class="num">${f.multiple ? `${f.multiple.toFixed(2)}×` : '—'}</td>` : ''}
-          <td class="num strong">${fmtIrr(f.irr)}</td>
+          <td class="num strong">${fmtRate(f.rate)}</td>
         </tr>`).join('')}</tbody>
         <tfoot><tr><td>Whole book</td><td class="num">${rows.length}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(p.invested)}</td>` : ''}
           <td class="num">${fmtExact(p.returned)}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(p.profit)}</td>
             <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
-          <td class="num">${fmtIrr(p.irr)}</td></tr></tfoot>
+          <td class="num">${fmtRate(p.rate)}</td></tr></tfoot>
       </table>
     </div>` : '';
 
@@ -467,7 +467,7 @@ function buildReturn(d, o, { realized }) {
     ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
-      ${tile(realized ? 'Realized IRR' : 'IRR if matured today', fmtIrr(p.irr), weightedNote)}
+      ${tile(realized ? 'Realized return' : 'Return if matured today', fmtRate(p.rate), weightedNote)}
       ${tile(realized ? 'Proceeds' : 'Death benefit', fmtExact(p.returned),
         realized
           ? (assumed > 0
@@ -484,7 +484,7 @@ function buildReturn(d, o, { realized }) {
 
     ${rows.length ? `
     <div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">IRR by policy${rows.length > 12 ? ' — top 12' : ''}</h3>
+      <h3 class="rpt-h3">Return by policy${rows.length > 12 ? ' — top 12' : ''}</h3>
       <div id="rptReturnChart"></div>
       <p class="rpt-note">
         ${rows.length > 12 ? `Showing the 12 highest of ${rows.length}; the full ranking is in the table below. ` : ''}
@@ -503,7 +503,7 @@ function buildReturn(d, o, { realized }) {
           ${realized ? '<th>Matured</th><th>Paid</th>' : ''}
           <th class="num">${realized ? 'Proceeds' : 'Death benefit'}</th>
           ${o.showBasis ? '<th class="num">Invested</th><th class="num">Profit</th><th class="num">Multiple</th>' : ''}
-          <th class="num">Days</th><th class="num">IRR</th>
+          <th class="num">Days</th><th class="num">Return</th>
         </tr></thead>
         <tbody>${rows.length === 0
           ? `<tr><td colspan="14">No ${realized ? 'matured' : 'in-force'} policies to report.</td></tr>`
@@ -522,7 +522,7 @@ function buildReturn(d, o, { realized }) {
               <td class="num">${fmtExact(r.profit)}</td>
               <td class="num">${r.multiple ? `${r.multiple.toFixed(2)}×` : '—'}</td>` : ''}
             <td class="num">${r.days.toLocaleString('en-US')}</td>
-            <td class="num strong">${fmtIrr(r.irr)}${flag(r)}</td>
+            <td class="num strong">${fmtRate(r.rate)}${flag(r)}</td>
           </tr>`).join('')}</tbody>
         ${rows.length ? `<tfoot><tr>
           <td colspan="${6 + (realized ? 2 : 0)}">Totals — ${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>
@@ -531,7 +531,7 @@ function buildReturn(d, o, { realized }) {
             <td class="num">${fmtExact(p.profit)}</td>
             <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
           <td class="num">${p.days.toLocaleString('en-US')}</td>
-          <td class="num">${fmtIrr(p.irr)}</td>
+          <td class="num">${fmtRate(p.rate)}</td>
         </tr></tfoot>` : ''}
       </table>
     </div>
@@ -555,8 +555,9 @@ function buildReturn(d, o, { realized }) {
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">Basis of calculation</h3>
       <p class="rpt-note">
-        IRR is solved on the actual date of every cash flow over a 365-day year — the
-        same convention as Excel's XIRR, so these figures reconcile against a
+        The return is simple interest over actual days — every dollar earns the rate for
+        exactly as long as it is outstanding and the interest earns nothing — which is the
+        convention the operating agreements use, so these figures reconcile against a
         spreadsheet. Money out is acquisition cost, premium payments, fees, servicing
         and commissions as recorded in the ledger. Policy loans are excluded: a loan is
         repaid out of the death benefit, so treating it as income would count it twice.
@@ -576,8 +577,8 @@ function buildReturn(d, o, { realized }) {
       <p class="rpt-note">
         Entity and portfolio rates are solved from combined cash flows, not averaged
         across policies — a large position contributes more to a rate than a small one.
-        ${d.mean_irr !== null ? `The simple average of the individual rates is ${fmtIrr(d.mean_irr)},
-        against a capital-weighted ${fmtIrr(p.irr)}.` : ''}
+        ${d.mean_rate !== null ? `The simple average of the individual rates is ${fmtRate(d.mean_rate)},
+        against a capital-weighted ${fmtRate(p.rate)}.` : ''}
         ${anyFlagged ? `A * marks a figure that needs reading with care: ${realized ? 'a claim not yet paid, whose death benefit is shown and assumed collected today; ' : ''}a holding period under 90 days; or cash flows that change direction more than once, where more than one rate can satisfy the equation.` : ''}
         ${p.ambiguous ? ' The combined series changes direction more than once, which is normal for a book of many policies but means the portfolio rate is one of several mathematically valid roots.' : ''}
       </p>
@@ -641,8 +642,8 @@ function buildInvestorReport(d, o) {
         <div class="rpt-tile"><div class="rpt-tile-label">Premiums a year</div>
           <div class="rpt-tile-value">${fmtExact(t.annual_premium)}</div>
           <div class="rpt-tile-note">${fmtExact(row.upcoming_12mo)} due in the next 12 months</div></div>
-        <div class="rpt-tile"><div class="rpt-tile-label">Portfolio IRR</div>
-          <div class="rpt-tile-value">${fmtIrr(t.irr)}</div>
+        <div class="rpt-tile"><div class="rpt-tile-label">Portfolio return</div>
+          <div class="rpt-tile-value">${fmtRate(t.rate)}</div>
           <div class="rpt-tile-note">${t.short_period
             ? 'short holding period' : 'if every policy matured today'}</div></div>
       </div>
@@ -656,7 +657,7 @@ function buildInvestorReport(d, o) {
             <th class="num">Share</th><th class="num">Death benefit</th>
             ${o.showBasis ? '<th class="num">Paid in</th>' : ''}
             <th class="num">Premium</th><th>Next due</th>
-            <th class="num">IRR</th>
+            <th class="num">Return</th>
           </tr></thead>
           <tbody>${live.length === 0
             ? `<tr><td colspan="11">No policies in force.</td></tr>`
@@ -671,14 +672,14 @@ function buildInvestorReport(d, o) {
                 ${o.showBasis ? `<td class="num">${money(p.invested)}</td>` : ''}
                 <td class="num">${money(p.premium_required)}</td>
                 <td class="rpt-nowrap">${fmtDate(p.next_premium_due)}</td>
-                <td class="num strong">${fmtIrr(p.irr)}</td>
+                <td class="num strong">${fmtRate(p.rate)}</td>
               </tr>`).join('')}</tbody>
           ${live.length ? `<tfoot><tr>
             <td colspan="${o.fund ? 5 : 6}">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
             <td class="num">${money(t.live_death_benefit)}</td>
             ${o.showBasis ? `<td class="num">${money(live.reduce((s, p) => s + p.invested, 0))}</td>` : ''}
             <td class="num">${money(t.annual_premium)}</td>
-            <td></td><td class="num">${fmtIrr(t.irr)}</td>
+            <td></td><td class="num">${fmtRate(t.rate)}</td>
           </tr></tfoot>` : ''}
         </table>
       </div>
@@ -725,7 +726,7 @@ function buildInvestorReport(d, o) {
           <thead><tr><th>Insured</th><th>Policy no.</th><th>Matured</th><th>Paid</th>
             <th class="num">Their proceeds</th>
             ${o.showBasis ? '<th class="num">Paid in</th><th class="num">Gain</th>' : ''}
-            <th class="num">IRR</th></tr></thead>
+            <th class="num">Return</th></tr></thead>
           <tbody>${done.map((p) => `<tr>
             <td class="strong">${esc(p.insured || '—')}</td>
             <td class="rpt-nowrap">${esc(p.policy_number)}</td>
@@ -734,7 +735,7 @@ function buildInvestorReport(d, o) {
             <td class="num">${p.proceeds_amount == null ? '—' : money(p.proceeds_amount)}</td>
             ${o.showBasis ? `<td class="num">${money(p.invested)}</td>
               <td class="num">${money(p.profit)}</td>` : ''}
-            <td class="num strong">${fmtIrr(p.irr)}</td>
+            <td class="num strong">${fmtRate(p.rate)}</td>
           </tr>`).join('')}</tbody>
           <tfoot><tr><td colspan="4">Total received</td>
             <td class="num">${money(t.proceeds)}</td>
@@ -907,7 +908,7 @@ function buildFactSheets(sheets, o) {
  * The document that goes out to an investor before they commit. It has to
  * do two things at once: make the case, and be honest about the risk in
  * the same breath — a life settlement's return is decided by a date
- * nobody knows, and a sheet that leads with a single IRR is selling a
+ * nobody knows, and a sheet that leads with a single rate is selling a
  * certainty that does not exist. So the headline rate is always printed
  * with the two-years-either-side rates beside it.
  *
@@ -1018,7 +1019,7 @@ export function buildOpportunitySheet(o, opts = {}) {
     ? `${o.le_provider_2 || 'second report'} ${o.le_months_2} mo` : null;
 
   const scen = (a.scenarios || []);
-  const irrHead = base ? fmtIrr(base.irr) : '—';
+  const irrHead = base ? fmtRate(base.rate) : '—';
 
   const runningRows = (() => {
     let cum = 0;
@@ -1065,7 +1066,7 @@ export function buildOpportunitySheet(o, opts = {}) {
         <thead><tr><th>Maturity</th><th class="num">Premiums paid</th>
           <th class="num">Total invested</th><th class="num">Death benefit</th>
           <th class="num">Profit</th><th class="num">Multiple</th>
-          <th class="num">Years</th><th class="num">IRR</th></tr></thead>
+          <th class="num">Years</th><th class="num">Return</th></tr></thead>
         <tbody>${scen.map((s) => `<tr class="${s.offset_months === 0 ? 'at-le' : ''}">
           <td>${esc(SCENARIO_LABEL[String(s.offset_months)] || `${s.offset_months} mo`)}
             <span class="rpt-dim">${fmtDate(s.matures_on)}</span></td>
@@ -1075,13 +1076,13 @@ export function buildOpportunitySheet(o, opts = {}) {
           <td class="num">${fmtExact(s.profit * f)}</td>
           <td class="num">${s.multiple ? `${s.multiple.toFixed(2)}×` : '—'}</td>
           <td class="num">${Number(s.years).toFixed(1)}</td>
-          <td class="num strong">${fmtIrr(s.irr)}</td></tr>`).join('')
+          <td class="num strong">${fmtRate(s.rate)}</td></tr>`).join('')
           || '<tr><td colspan="8">Not priced — an asking price and a death benefit are needed.</td></tr>'}</tbody>
       </table>
       <p class="rpt-note">Life expectancy is a median, not a promise — around half of insureds
         outlive it, and every extra month is another premium paid. The late row is the case worth
         underwriting against. Rates are solved on the actual date of every cash flow over a
-        365-day year (Excel’s XIRR convention) and are identical at any participation percentage.</p>
+        actual days as simple interest, not compounded, and are identical at any participation percentage.</p>
     </div>
 
     <div class="rpt-cols">
@@ -1353,10 +1354,10 @@ export async function reportsView(api, state) {
                 // Rates, not amounts: the axis is anchored at zero so a loss
                 // reads as a loss rather than as an equally long win.
                 signed: true,
-                rows: d.rows.filter((x) => x.irr !== null).slice(0, 12).map((x) => ({
-                  label: insuredOf(x), value: x.irr * 100,
+                rows: d.rows.filter((x) => x.rate !== null).slice(0, 12).map((x) => ({
+                  label: insuredOf(x), value: x.rate * 100,
                   note: `${x.policy_number} · ${x.days.toLocaleString('en-US')} days`,
-                  seriesName: 'IRR' })),
+                  seriesName: 'Return' })),
                 valueFmt: (v) => `${v >= 0 ? '' : '−'}${Math.abs(v).toFixed(1)}%`,
               });
             };

@@ -224,8 +224,8 @@ check('and more premiums paid',
   an.scenarios[0].premiums_paid < an.scenarios[1].premiums_paid
   && an.scenarios[1].premiums_paid < an.scenarios[2].premiums_paid);
 check('so a lower return — which is the whole point',
-  an.scenarios[0].irr > an.scenarios[1].irr && an.scenarios[1].irr > an.scenarios[2].irr,
-  an.scenarios.map((s) => `${(s.irr * 100).toFixed(2)}%`).join(' > '));
+  an.scenarios[0].rate > an.scenarios[1].rate && an.scenarios[1].rate > an.scenarios[2].rate,
+  an.scenarios.map((s) => `${(s.rate * 100).toFixed(2)}%`).join(' > '));
 check('life expectancy runs from the LE report date, not today',
   an.le_from === '2026-01-15', an.le_from);
 check('84 months from that date is the base maturity',
@@ -235,8 +235,8 @@ check('the purchase price is counted as invested',
 check('and the death benefit as returned', near(an.base.returned, 2000000));
 
 const listed = ((await json(await api(admin, '/opportunities'))) || []).find((x) => x.id === o6.id);
-check('the list and the detail agree on the rate', near(listed.irr_at_le, an.base.irr, 1e-9),
-  `${listed.irr_at_le} vs ${an.base.irr}`);
+check('the list and the detail agree on the rate', near(listed.rate_at_le, an.base.rate, 1e-9),
+  `${listed.rate_at_le} vs ${an.base.rate}`);
 
 /* ------------------------------------------------------------------ *
  * The schedule entered a year at a time
@@ -466,7 +466,7 @@ const irr30 = await json(await api(inv1, `/policies/${dealPolicyId}/irr`));
 // which the solver reports rather than inventing a number for.
 check('the IRR calculator opens on it for them',
   irr30?.result !== undefined && Array.isArray(irr30.ledger),
-  `irr ${JSON.stringify(irr30?.result?.irr)}`);
+  `irr ${JSON.stringify(irr30?.result?.rate)}`);
 check('and is solved on their 40%, not the whole policy',
   near(irr30.my_pct, 40) && near(irr30.result.invested, 600000 * 0.4, 0.01),
   `${irr30.my_pct}% · invested ${irr30.result?.invested}`);
