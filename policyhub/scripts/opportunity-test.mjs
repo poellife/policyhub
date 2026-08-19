@@ -470,8 +470,17 @@ check('the IRR calculator opens on it for them',
 check('and is solved on their 40%, not the whole policy',
   near(irr30.my_pct, 40) && near(irr30.result.invested, 600000 * 0.4, 0.01),
   `${irr30.my_pct}% · invested ${irr30.result?.invested}`);
-check('with their share of the death benefit as the inflow',
-  near(irr30.result.returned, 4000000 * 0.4, 0.01), String(irr30.result?.returned));
+/* Their 40% of the benefit, less the managing partner's ten per cent of the
+   profit on it — which is what they would actually receive, and therefore
+   what the rate beside it has to be solved on. */
+const gross30 = 4000000 * 0.4;
+const basis30 = 600000 * 0.4;
+check('with their share of the death benefit as the inflow, after the carry',
+  near(irr30.result.returned, gross30 - 0.1 * (gross30 - basis30), 0.01),
+  `${irr30.result?.returned} · gross ${gross30} on a basis of ${basis30}`);
+check('and we are shown the whole of it',
+  near((await json(await api(admin, `/policies/${dealPolicyId}/irr`))).result.returned,
+    4000000, 0.01));
 
 await api(admin, `/policies/${dealPolicyId}`, { method: 'DELETE', body: { confirm: `${PREFIX}-30` } });
 

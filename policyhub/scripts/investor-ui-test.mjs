@@ -232,11 +232,16 @@ check('it states the basis on the page', /Every figure in this report is your sh
 check('naming the percentage', /\d+(\.\d+)?%/.test(
   await inv.locator('.rpt-basis').textContent()),
   await inv.locator('.rpt-basis').textContent());
+/* The death-benefit column, which is what the schedule totals. Read from the
+   API rather than assumed, so this stays a check that the report is scoped to
+   their share and does not quietly become a check on how the figure is
+   arrived at. */
 const schedFace = await inv.evaluate(async () => {
   const ps = await fetch('/api/policies?fund=&status=').then((r) => r.json());
+  const db = (p) => Number(p.death_benefit ?? p.face_amount) || 0;
   return {
-    whole: ps.reduce((s, p) => s + (Number(p.face_amount) || 0), 0),
-    mine: ps.reduce((s, p) => s + (Number(p.face_amount) || 0) * (Number(p.my_pct) || 0) / 100, 0),
+    whole: ps.reduce((s, p) => s + db(p), 0),
+    mine: ps.reduce((s, p) => s + db(p) * (Number(p.my_pct) || 0) / 100, 0),
   };
 });
 check('the totals are their share', anyMoney(sched, schedFace.mine),

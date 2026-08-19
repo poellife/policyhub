@@ -155,6 +155,85 @@ export function analyzeFlows(rawFlows) {
   };
 }
 
+/* ==================================================================== *
+ * Carried interest
+ *
+ * The managing partner takes a share of the profit on each case. The
+ * investor's capital comes back first — acquisition cost, premiums, fees,
+ * servicing, commissions, every dollar that went out — and only what is
+ * left over is split.
+ *
+ * Three properties this has to hold, and each of them is a way of getting
+ * it wrong:
+ *
+ *   - it is taken from the profit, never from the basis. An investor who
+ *     put in $600,000 and gets $700,000 back pays carry on $100,000, not
+ *     on $700,000.
+ *   - a case that loses money pays nothing. Ten per cent of a negative
+ *     number would hand the investor MORE than they lost, which is not a
+ *     fee arrangement, it is a subsidy.
+ *   - it is per case. A loss on one policy does not reduce the carry on
+ *     another, so a policy's own figures never move because something
+ *     else in the book matured.
+ *
+ * It is linear in the size of the holding — carry on half a policy is half
+ * the carry — so it makes no difference whether a figure is share-weighted
+ * before or after this is applied. That is what lets it be done in SQL on
+ * whole-policy columns in one place and in JavaScript on an investor's own
+ * cash flows in another, and still agree.
+ * ==================================================================== */
+
+/** The managing partner's share of the profit, in per cent. */
+export const CARRY_PCT = 10;
+
+/** What the managing partner takes. Never negative. */
+export function carryOn(gross, basis, pct = CARRY_PCT) {
+  const profit = (Number(gross) || 0) - (Number(basis) || 0);
+  return profit > 0 ? profit * (pct / 100) : 0;
+}
+
+/** What the investor is left with. */
+export function netOfCarry(gross, basis, pct = CARRY_PCT) {
+  return (Number(gross) || 0) - carryOn(gross, basis, pct);
+}
+
+/**
+ * The same deduction applied to a policy's cash flows.
+ *
+ * Everything that came back is counted — a withdrawal taken years before
+ * the claim is still money returned — and the whole deduction comes off
+ * the final inflow, because that is the payment it is actually withheld
+ * from. Taking it off an earlier flow would change the dates the rate is
+ * solved over and quietly move the IRR.
+ *
+ * Returns a new array; the input is not touched.
+ */
+export function flowsAfterCarry(flows, pct = CARRY_PCT) {
+  const list = (flows || []).filter((f) => f && f.date && Number(f.amount));
+  if (!list.length) return flows || [];
+  const out = list.reduce((s, f) => s + (Number(f.amount) < 0 ? -Number(f.amount) : 0), 0);
+  const inn = list.reduce((s, f) => s + (Number(f.amount) > 0 ? Number(f.amount) : 0), 0);
+  const carry = carryOn(inn, out, pct);
+  if (!carry) return flows;
+
+  // The last inflow by date, which is the claim on a matured policy and the
+  // assumed benefit on one still running.
+  let target = -1;
+  for (let i = 0; i < (flows || []).length; i++) {
+    const f = flows[i];
+    if (!f || !f.date || !(Number(f.amount) > 0)) continue;
+    if (target < 0 || String(f.date) >= String(flows[target].date)) target = i;
+  }
+  if (target < 0) return flows;
+  /* Only the amount changes. No marker is left on the flow: these arrays are
+     sent to the browser, and a field named after the deduction would announce
+     on the investor's own screen the very thing the operating agreement is
+     there to explain. */
+  return flows.map((f, i) => (i === target
+    ? { ...f, amount: Number(f.amount) - carry }
+    : f));
+}
+
 /** Transaction types that represent capital going out of the fund. */
 export const OUTFLOW_TYPES = [
   'Acquisition Cost', 'Premium Payment', 'Fee', 'Servicing', 'Commission',

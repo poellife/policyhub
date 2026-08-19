@@ -101,6 +101,64 @@ An investor login gets the same register as **Realized**, weighted to their
 percentage, so their lifetime picture stays complete without inflating the
 active book.
 
+## The managing partner's ten per cent
+
+Carried interest, on every case. The investor's capital comes back first —
+every dollar of acquisition cost, premium, fee, servicing and commission — and
+what is left over is split **90/10** between the investor and the managing
+partner. `CARRY_PCT` in `public/irr.js` is the whole configuration.
+
+**Investors are shown their figures net; staff see the book gross.** Nothing in
+the portal names the deduction, annotates a figure with it, or labels a column
+"before fees" — an investor knows the terms from the operating agreement, and a
+screen that keeps pointing at them is not stating a position, it is arguing a
+case. `scripts/carry-test.mjs` scans every investor-facing payload for the words
+and asserts they are absent.
+
+Three properties, each of them a way of getting it wrong:
+
+- **It comes off the profit, never the basis.** An investor who put in $320,000
+  and whose share of the claim is $500,000 pays carry on $180,000, not on
+  $500,000, and is shown $482,000.
+- **A case that lost money pays nothing.** Ten per cent of a negative profit
+  would hand the investor *more* than they lost, which is not a fee arrangement.
+  A losing case reads identically to them and to us.
+- **It is per case.** A loss on one policy does not shelter the gain on another,
+  so a policy's own figures never move because something else in the book
+  matured.
+
+### Where it is applied
+
+Two chokepoints, which is what keeps a dozen screens consistent:
+
+- `flowsAfterCarry()` in `public/irr.js` takes the whole deduction off the final
+  inflow of a policy's cash flows. Every IRR, profit and multiple in the
+  application is solved from those flows, so the rate an investor is quoted is
+  the rate on the money they receive. It comes off the last inflow rather than
+  being spread, because that is the payment it is actually withheld from —
+  moving it earlier would change the dates the rate is solved over.
+- `afterCarry()` in `src/api.js` is the same arithmetic in SQL, for the figures
+  that are summed in the database rather than solved from flows: a death benefit
+  and a claim paid, on the policies grid, the policy page, the Portfolio totals,
+  the Maturities register and the statements.
+
+Carry is linear in the size of a holding, so it makes no difference whether the
+share weighting happens before or after. That is what lets the same rule be
+applied in SQL on whole-policy columns in one place and in JavaScript on an
+investor's own flows in another, and still agree to the cent — which
+`carry-test.mjs` checks by comparing the two against arithmetic worked out by
+hand, and the rate against an independently written XIRR solver.
+
+**Nothing they pay in is touched.** Capital invested, premiums due and the
+servicing calendar are the same numbers for everybody. Carry never reduces a
+bill.
+
+**Opportunities are quoted the way they will pay.** The scenario table an
+investor weighs up before committing is net, so the deal they agree to is the
+deal they get.
+
+---
+
 ## Return and IRR
 
 Every policy has a **Return / IRR** tab. It solves the internal rate of return
@@ -842,6 +900,8 @@ reach those rules correctly.
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
+| `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `premium-dues-test.mjs` | that the Portfolio card and the Premiums page show the same dates and the same money |
 | `bulk-delete-test.mjs` | who may clear a shelf, what it refuses, and that a refused batch removes nothing |
 | `bulk-delete-ui-test.mjs` | the tick column, a selection surviving a search, and what the dialog says first |
 | `realized-irr-test.mjs` | the realized rate over paid claims only, against an independent XIRR solver |

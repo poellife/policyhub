@@ -365,6 +365,43 @@ const MANAGER_NAV = STAFF_NAV.map(([r, label]) =>
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
 const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?.role);
+
+/**
+ * Every premium an investor is going to be asked for, as one list.
+ *
+ * There are two sources and they are equally real: a next-due date the
+ * carrier put on the policy, and a premium somebody here posted to the
+ * schedule. Whoever has to fund it does not care which table it came out
+ * of, so they are merged and sorted by date.
+ *
+ * Shared rather than written twice. The Portfolio page used to read only the
+ * carrier dates, so a book funded entirely from posted schedules — which is
+ * what an import without a next-due column produces — showed "no premium
+ * dates are scheduled" on the dashboard and a full list one click away.
+ * Two cards with the same title disagreeing is worse than either being wrong.
+ */
+function premiumDues(svc) {
+  const name = (r) => r.display_name
+    || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
+  return [
+    ...(svc.upcoming || []).filter((r) => r.next_premium_due).map((r) => ({
+      date: String(r.next_premium_due).slice(0, 10),
+      policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+      insured: name(r), sex: sexAndAge(r.insured_gender, r.insured_dob),
+      amount: Number(r.premium_required) || 0,
+      amount_full: Number(r.premium_required_full) || 0,
+      source: r.premium_mode || 'carrier',
+    })),
+    ...(svc.scheduled || []).filter((r) => r.kind === 'Premium').map((r) => ({
+      date: String(r.due_date).slice(0, 10),
+      policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+      insured: name(r), sex: sexAndAge(r.insured_gender, r.insured_dob),
+      amount: Number(r.amount) || 0, amount_full: Number(r.amount_full) || 0,
+      source: 'scheduled', note: r.note,
+    })),
+  ].sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
 const isAdminUser    = () => state.user?.role === 'admin';
 const navItems = () =>
   isInvestorUser() ? INVESTOR_NAV : isManagerUser() ? MANAGER_NAV : STAFF_NAV;
@@ -646,9 +683,9 @@ async function dashboardView() {
   // What an investor is shown instead of servicing alerts: what is coming and
   // what their part of it costs.
   const todayIso = today();
-  const upcomingMine = (svc.upcoming || [])
-    .filter((r) => r.next_premium_due && String(r.next_premium_due).slice(0, 10) >= todayIso)
-    .sort((a, b) => String(a.next_premium_due).localeCompare(String(b.next_premium_due)));
+  /* The same list the Premiums page builds, so the card on the dashboard and
+     the page it links to can never disagree about what is owed. */
+  const upcomingMine = premiumDues(svc).filter((d) => d.date >= todayIso);
   const nextDue = upcomingMine[0] || null;
   // What an investor is shown where the carrier mechanics used to be: the
   // spread between what they have put in and what the policies would pay.
@@ -718,8 +755,8 @@ async function dashboardView() {
       ${isInvestorUser() ? `
       <div class="stat">
         <div class="label">Next premium due</div>
-        <div class="value">${nextDue ? fmtDate(nextDue.next_premium_due) : '—'}</div>
-        <div class="note">${nextDue ? `${fmtExact(nextDue.premium_required)} · your share` : 'nothing scheduled'}</div>
+        <div class="value">${nextDue ? fmtDate(nextDue.date) : '—'}</div>
+        <div class="note">${nextDue ? `${money(nextDue.amount)} · your share` : 'nothing scheduled'}</div>
       </div>` : `
       <div class="stat">
         <div class="label">Needs attention</div>
@@ -750,13 +787,11 @@ async function dashboardView() {
         <thead><tr><th>Due</th><th>Insured</th><th>Policy</th><th class="num">Your share</th></tr></thead>
         <tbody>${upcomingMine.length === 0
           ? '<tr><td colspan="4"><div class="empty">No premium dates are scheduled on your policies.</div></td></tr>'
-          : upcomingMine.slice(0, 8).map((r) => `<tr class="clickable" data-id="${r.id}">
-              <td class="strong">${fmtDate(r.next_premium_due)}</td>
-              <td>${esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim())}
-                ${sexAndAge(r.insured_gender, r.insured_dob)
-                  ? `<span class="muted">· ${sexAndAge(r.insured_gender, r.insured_dob)}</span>` : ''}</td>
-              <td class="secondary">${esc(r.carrier_name)} ${esc(r.policy_number)}</td>
-              <td class="num">${fmtExact(r.premium_required)}</td>
+          : upcomingMine.slice(0, 8).map((r) => `<tr class="clickable" data-id="${r.policy_id}">
+              <td class="strong">${fmtDate(r.date)}</td>
+              <td>${esc(r.insured)}${r.sex ? ` <span class="muted">· ${esc(r.sex)}</span>` : ''}</td>
+              <td class="secondary">${esc(r.carrier_name || '')} ${esc(r.policy_number || '')}</td>
+              <td class="num">${money(r.amount)}</td>
             </tr>`).join('')}</tbody>
       </table></div>
     </div>` : `
@@ -1859,19 +1894,44 @@ function wireReturnTab(p, d) {
 
   $('#calcSave').addEventListener('click', async (e) => {
     const msg = $('#calcMsg');
+    /* Compared against what the box was filled with, not against whether it
+       has anything in it now. Emptying the field is the whole way back out
+       of Maturities — a date typed into the wrong policy has to be
+       removable, and testing the new value for truthiness silently ignored
+       exactly that edit. */
+    const was = dateInput(d.matured_on) || '';
+    const now = dodEl.value || '';
+    const clearing = was && !now;
+
+    if (clearing && !confirm(
+      'Clear the date of death?\n\n'
+      + 'This policy returns to the active book, and any proceeds recorded '
+      + 'against the claim are discarded. If this person is insured on other '
+      + 'policies, those come back too.')) return;
+
     e.target.disabled = true;
     try {
       // The date of death has to land first: it is what matures the policy,
       // and proceeds are refused on one that has not.
-      if (dodEl.value && dodEl.value !== dateInput(d.matured_on)) {
+      if (now !== was) {
         if (!p.insured_id) throw new Error('This policy has no insured on file to record a death against.');
-        await api(`/insureds/${p.insured_id}`, { method: 'PUT', body: { date_of_death: dodEl.value } });
+        await api(`/insureds/${p.insured_id}`, { method: 'PUT', body: { date_of_death: now || null } });
       }
-      if (amountEl.value !== '' || paidEl.value) {
+      /* Nothing to settle on a policy that is no longer matured, and the
+         proceeds route rightly refuses one — so it is not called rather
+         than called and apologised for. The database has already discarded
+         the old figures. */
+      if (!clearing && (amountEl.value !== '' || paidEl.value)) {
         await api(`/policies/${p.id}/proceeds`, { method: 'PUT', body: {
           proceeds_amount: amountEl.value === '' ? null : amountEl.value,
           proceeds_received_on: paidEl.value || null,
         } });
+      }
+      if (clearing) {
+        toast('Date of death cleared');
+        location.hash = `#/policy/${p.id}`;
+        render();
+        return;
       }
       msg.innerHTML = '<div class="ok-box">Settlement saved.</div>';
       toast('Settlement saved');
@@ -2397,13 +2457,18 @@ function openInsuredDialog(ins, onSaved) {
       await api('/insureds', { method: 'POST', body: v });
       toast('Insured created');
     } else {
+      const cleared = !!dateInput(ins?.date_of_death) && !v.date_of_death;
       const saved = await api(`/insureds/${ins.id}`, { method: 'PUT', body: v });
-      // Say plainly what recording a death did, rather than leaving someone to
-      // wonder why a policy vanished from the grid.
-      const matured = (saved.policies || []).filter((p) => p.matured);
-      toast(matured.length
-        ? `Insured updated — ${matured.map((p) => p.policy_number).join(', ')} moved to Maturities`
-        : 'Insured updated');
+      /* Say plainly what the date did — in both directions. A policy
+         vanishing from the grid needs explaining, and so does one
+         reappearing in it. */
+      const moved = (saved.policies || []).filter((p) => p.matured);
+      const back = (saved.policies || []).filter((p) => !p.matured);
+      toast(moved.length
+        ? `Insured updated — ${moved.map((p) => p.policy_number).join(', ')} moved to Maturities`
+        : cleared && back.length
+          ? `Date of death cleared — ${back.map((p) => p.policy_number).join(', ')} back in the active book`
+          : 'Insured updated');
     }
     onSaved?.();
   });
@@ -2549,31 +2614,7 @@ async function servicingView() {
     (grouped[key] ||= []).push(r);
   }
 
-  /* One list, the same as the policy's own Premiums tab.
-     A carrier's next-due date and a premium put on the schedule by hand are
-     the same thing to whoever has to fund it, so they belong in one column
-     of dates rather than in two places the reader has to reconcile. */
-  const duesForInvestor = investor ? [
-    ...upcoming.map((r) => ({
-      date: String(r.next_premium_due).slice(0, 10),
-      policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
-      insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
-      sex: sexAndAge(r.insured_gender, r.insured_dob),
-      amount: Number(r.premium_required) || 0,
-      amount_full: Number(r.premium_required_full) || 0,
-      source: r.premium_mode || 'carrier',
-    })),
-    ...(svc.scheduled || [])
-      .filter((r) => r.kind === 'Premium')
-      .map((r) => ({
-        date: String(r.due_date).slice(0, 10),
-        policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
-        insured: r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim(),
-        sex: sexAndAge(r.insured_gender, r.insured_dob),
-        amount: Number(r.amount) || 0, amount_full: Number(r.amount_full) || 0,
-        source: 'scheduled', note: r.note,
-      })),
-  ].sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
+  const duesForInvestor = investor ? premiumDues(svc) : [];
   /* Every dated row above, added up — the total is of what is on the page
      rather than of an arbitrary window, so the footer and the list agree. */
   const dueTotal = duesForInvestor.reduce((sum, d) => sum + d.amount, 0);

@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 // The IRR engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
-import { analyzeFlows, ledgerFlows, today, OUTFLOW_TYPES } from '../public/irr.js';
+import { analyzeFlows, ledgerFlows, flowsAfterCarry, netOfCarry, CARRY_PCT,
+         today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 // The agreement template is under public/ for the same reason the IRR engine
 // is: the browser renders it for preview, and a second copy of the clauses
@@ -98,6 +99,35 @@ const ownedBy = (policyCol, iP, fP = null, fundCol = null) =>
 const shareOf = (policyCol, paramIndex) =>
   `COALESCE((SELECT pix.pct FROM policy_investors pix
               WHERE pix.policy_id = ${policyCol} AND pix.investor_id = $${paramIndex}), 100)`;
+
+/* ------------------------------------------------------------------ *
+ * Carried interest, in SQL
+ *
+ * The managing partner takes CARRY_PCT of the profit on each case, and an
+ * investor is shown what is left. Every figure that represents money coming
+ * BACK to them passes through this; nothing they have paid in is touched.
+ *
+ * Staff see the gross figures. `scopeParam` is the investor id, which is
+ * NULL for everybody else, so the same query serves both without a second
+ * code path — and an investor can never be served the staff branch by
+ * accident, because the parameter that decides it is the same one that
+ * decides what they are allowed to see at all.
+ *
+ * Carry is linear in the size of a holding, so it does not matter whether
+ * the share weighting is applied before or after. These fragments work on
+ * whole-policy columns and are multiplied by the share afterwards.
+ * ------------------------------------------------------------------ */
+
+/**
+ * @param gross  what comes back — a death benefit, or a claim actually paid
+ * @param basis  every dollar that went out on that policy
+ * @param scopeParam  $n holding the investor id, NULL for staff
+ */
+const afterCarry = (gross, basis, scopeParam) => `
+  CASE WHEN $${scopeParam}::int IS NULL THEN (${gross})
+       ELSE (${gross}) - (${CARRY_PCT} / 100.0)
+            * GREATEST(0, COALESCE(${gross}, 0) - COALESCE(${basis}, 0))
+  END`;
 
 /** Blocks investors from routes meant for internal users. */
 function blockInvestors(req, res, next) {
@@ -784,7 +814,15 @@ router.get('/policies', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
   const { rows } = await q(
-    `SELECT pl.*, ${shareOf('pl.id', 4)} AS my_pct
+    /* `pl.*` first, then the two money-back columns written over it: a
+       death benefit and a claim paid are what the investor receives, so
+       they read net of the managing partner's share. The client multiplies
+       by the share afterwards, which carry is indifferent to. */
+    `SELECT pl.*,
+            ${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)', 'pl.total_invested', 4)}
+                                                     AS death_benefit,
+            ${afterCarry('pl.proceeds_amount', 'pl.total_invested', 4)} AS proceeds_amount,
+            ${shareOf('pl.id', 4)} AS my_pct
        FROM policy_latest pl
       WHERE ($1 = '' OR pl.policy_number ILIKE '%'||$1||'%'
              OR pl.carrier_name ILIKE '%'||$1||'%'
@@ -807,7 +845,12 @@ router.get('/policies/:id', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
   const { rows } = await q(
-    `SELECT pl.*, ${shareOf('pl.id', 2)} AS my_pct
+    // Same rule as the grid: what comes back reads net for an investor.
+    `SELECT pl.*,
+            ${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)', 'pl.total_invested', 2)}
+                                                     AS death_benefit,
+            ${afterCarry('pl.proceeds_amount', 'pl.total_invested', 2)} AS proceeds_amount,
+            ${shareOf('pl.id', 2)} AS my_pct
        FROM policy_latest pl
       WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
     [req.params.id, scope, funds]
@@ -1457,7 +1500,8 @@ router.get('/analytics/summary', wrap(async (req, res) => {
          COUNT(*)::int                                            AS policy_count,
          COUNT(*) FILTER (WHERE pl.status = 'Inforce')::int        AS inforce_count,
          COALESCE(SUM(pl.face_amount * ${w}),0)                    AS total_face,
-         COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS total_death_benefit,
+         COALESCE(SUM(${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)',
+           'pl.total_invested', 1)} * ${w}),0)                      AS total_death_benefit,
          COALESCE(SUM(pl.cash_surrender_value * ${w}),0)           AS total_csv,
          COALESCE(SUM(pl.account_value * ${w}),0)                  AS total_av,
          COALESCE(SUM(pl.total_invested * ${w}),0)                 AS total_invested,
@@ -1695,9 +1739,12 @@ async function loadOpportunity(req, id) {
     o.remaining_pct + (Number(o.my_commitment?.pct) || 0));
 
   const share = me === null ? 1 : (Number(o.my_commitment?.pct) || 0) / 100;
-  o.analysis = analyseOpportunity(o, 1);
+  /* Net for an investor: they are weighing up what they would actually
+     receive, and every figure on that page has to be the same money. */
+  const netTo = me !== null;
+  o.analysis = analyseOpportunity(o, 1, netTo);
   // Alongside the whole-policy figures, what their own slice would cost.
-  o.my_analysis = share > 0 ? analyseOpportunity(o, share) : null;
+  o.my_analysis = share > 0 ? analyseOpportunity(o, share, netTo) : null;
   return o;
 }
 
@@ -1747,7 +1794,7 @@ router.get('/opportunities', wrap(async (req, res) => {
   const list = rows.map((o) => {
     const taken = Number(o.taken_pct) || 0;
     const withPremiums = { ...o, premiums: schedules.get(o.id) || [] };
-    const a = analyseOpportunity(withPremiums, 1);
+    const a = analyseOpportunity(withPremiums, 1, me !== null);
     return {
       ...o,
       taken_pct: taken,
@@ -2349,11 +2396,16 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
   const combined = [];
   for (const p of policies) {
     const factor = Number(p.factor) || 0;
-    const flows = ledgerFlows(ledger.get(p.id) || [], factor);
-    const lastOut = flows.reduce(
+    const raw = ledgerFlows(ledger.get(p.id) || [], factor);
+    const lastOut = raw.reduce(
       (d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
     const terminal = terminalFlow(p, asOf, lastOut);
-    if (terminal) flows.push({ ...terminal, amount: terminal.amount * factor });
+    if (terminal) raw.push({ ...terminal, amount: terminal.amount * factor });
+    /* An investor is shown their return after the managing partner's share
+       of the profit, per case. Done here rather than at each of the dozen
+       places a rate is displayed, so no screen can be missed — every IRR,
+       profit and multiple in the application is solved from these flows. */
+    const flows = scope === null ? raw : flowsAfterCarry(raw);
     byPolicy.set(p.id, flows);
     combined.push(...flows);
   }
@@ -2391,18 +2443,28 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
   const lastOutflow = base.reduce(
     (d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
   const terminal = terminalFlow(p, asOf, lastOutflow);
-  const withTerminal = terminal
+  const gross = terminal
     ? [...base, { ...terminal, amount: terminal.amount * factor }]
     : base;
+  const withTerminal = scope === null ? gross : flowsAfterCarry(gross);
+
+  /* The dollar figures beside the rate have to be the same money the rate
+     was solved on. `basis` is every dollar that went out on this policy at
+     this investor's share — the same denominator the flows use — so the
+     death benefit and any claim paid read net for them and gross for us. */
+  const basis = base.reduce((sum, f) => sum + (f.amount < 0 ? -f.amount : 0), 0);
+  const net = (v) => (v == null ? null
+    : scope === null ? Number(v) : netOfCarry(Number(v), basis));
 
   res.json({
     policy_id: p.id,
     policy_number: p.policy_number,
     status: p.status,
     matured_on: p.matured_on,
-    proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
+    proceeds_amount: p.proceeds_amount == null ? null
+      : net(Number(p.proceeds_amount) * factor),
     proceeds_received_on: p.proceeds_received_on,
-    death_benefit: Number(p.benefit || 0) * factor,
+    death_benefit: net(Number(p.benefit || 0) * factor),
     cash_surrender_value: Number(p.cash_surrender_value || 0) * factor,
     my_pct: scope === null ? null : Number(p.my_pct),
     as_of: asOf,
@@ -2434,13 +2496,19 @@ router.get('/maturities', wrap(async (req, res) => {
   // Death benefit at maturity is the carrier's last reported figure, falling
   // back to the face amount when no snapshot was ever taken.
   const benefit = 'COALESCE(pl.death_benefit, pl.face_amount)';
+  /* Money coming back, after the managing partner's share of the profit —
+     gross for staff, net for an investor. The basis is that policy's own
+     ledger, which is what the carry is calculated against. */
+  const netBenefit = afterCarry(benefit, 'pl.total_invested', 1);
+  const netProceeds = afterCarry('pl.proceeds_amount', 'pl.total_invested', 1);
 
   const [rows, totals] = await Promise.all([
     q(`SELECT pl.id, pl.policy_number, pl.carrier_name, pl.product_type,
               pl.fund_code, pl.display_name, pl.insured_first, pl.insured_last,
               pl.insured_dob, pl.insured_gender, pl.status,
-              pl.matured_on, pl.proceeds_amount, pl.proceeds_received_on,
-              pl.face_amount, ${benefit}          AS death_benefit,
+              pl.matured_on, ${netProceeds}       AS proceeds_amount,
+              pl.proceeds_received_on,
+              pl.face_amount, ${netBenefit}       AS death_benefit,
               pl.total_invested, pl.total_acquisition, pl.total_premiums,
               ${shareOf('pl.id', 1)}              AS my_pct,
               (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
@@ -2451,11 +2519,12 @@ router.get('/maturities', wrap(async (req, res) => {
       [scope, funds, fund]),
     q(`SELECT COUNT(*)::int                                     AS policy_count,
               COUNT(pl.proceeds_amount)::int                    AS paid_count,
-              COALESCE(SUM(${benefit} * ${w}), 0)               AS total_death_benefit,
-              COALESCE(SUM(pl.proceeds_amount * ${w}), 0)       AS total_proceeds,
+              COALESCE(SUM(${netBenefit} * ${w}), 0)            AS total_death_benefit,
+              COALESCE(SUM(${netProceeds} * ${w}), 0)           AS total_proceeds,
               COALESCE(SUM(pl.total_invested * ${w}), 0)        AS total_invested,
               COALESCE(SUM(pl.total_acquisition * ${w}), 0)     AS total_acquisition,
-              COALESCE(SUM(CASE WHEN pl.proceeds_amount IS NULL THEN ${benefit} * ${w} END), 0)
+              COALESCE(SUM(CASE WHEN pl.proceeds_amount IS NULL
+                                THEN ${netBenefit} * ${w} END), 0)
                                                                 AS outstanding_benefit
          FROM policy_latest pl
         WHERE pl.status = 'Matured' AND ${vis}`, [scope, funds, fund]),
@@ -2947,9 +3016,15 @@ router.get('/reports/returns', wrap(async (req, res) => {
 
   const { policies, byPolicy, combined, asOf } = await portfolioFlows(req, { basis, fund });
 
+  const scoped = scopeId(req) !== null;
   const rows = policies.map((p) => {
+    /* The rate already carries the deduction — `portfolioFlows` applied it
+       to the flows — so the dollars beside it have to as well, or the table
+       would show a profit that its own IRR disagrees with. */
     const a = analyzeFlows(byPolicy.get(p.id) || []);
     const factor = Number(p.factor) || 0;
+    const basisOf = a.invested;
+    const net = (v) => (v == null ? null : scoped ? netOfCarry(Number(v), basisOf) : Number(v));
     return {
       id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
       product_type: p.product_type, fund_code: p.fund_code, status: p.status,
@@ -2957,9 +3032,10 @@ router.get('/reports/returns', wrap(async (req, res) => {
       insured_last: p.insured_last, insured_dob: p.insured_dob,
       my_pct: scopeId(req) === null ? null : Number(p.my_pct),
       face_amount: Number(p.face_amount || 0) * factor,
-      death_benefit: Number(p.benefit || 0) * factor,
+      death_benefit: net(Number(p.benefit || 0) * factor),
       matured_on: p.matured_on,
-      proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
+      proceeds_amount: p.proceeds_amount == null ? null
+        : net(Number(p.proceeds_amount) * factor),
       proceeds_received_on: p.proceeds_received_on,
       settled: p.proceeds_amount != null,
       irr: a.irr, invested: a.invested, returned: a.returned, profit: a.profit,
@@ -3285,7 +3361,8 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
   const [totals, byCarrier, byProduct, byFund, ages] = await Promise.all([
     q(`SELECT COUNT(*)::int AS policy_count,
               COALESCE(SUM(pl.face_amount * ${w}),0) AS total_face,
-              COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS total_death_benefit,
+              COALESCE(SUM(${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)',
+                'pl.total_invested', 2)} * ${w}),0) AS total_death_benefit,
               COALESCE(SUM(pl.cash_surrender_value * ${w}),0) AS total_csv,
               COALESCE(SUM(pl.account_value * ${w}),0) AS total_av,
               COALESCE(SUM(pl.total_invested * ${w}),0) AS total_invested,

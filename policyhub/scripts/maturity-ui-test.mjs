@@ -146,6 +146,46 @@ check('clearing the date removes it from the register',
 check('and puts it back on the active grid',
   (await (await searchGrid('Screentest')).count()) === 1);
 
+console.log('\nREVERSAL FROM THE SETTLEMENT PANEL');
+/* The other way out, and the one that was broken: emptying the date in the
+   Settle the claim panel. The save only fired when the box had something in
+   it, so the single edit that undoes a maturity was the single edit it
+   ignored — a date typed against the wrong policy could not be taken off. */
+const insuredId = await p.evaluate(async () => {
+  const r = await fetch('/api/insureds?search=Screentest', { credentials: 'same-origin' });
+  const rows = await r.json();
+  return (rows.rows || rows)[0]?.id ?? null;
+});
+await p.evaluate(async (id) => {
+  await fetch(`/api/insureds/${id}`, {
+    method: 'PUT', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date_of_death: '2026-08-01' }) });
+}, insuredId);
+
+await p.goto(`${BASE}/#/policy/${policy.id}`);
+await p.waitForSelector('.tabs', { timeout: 12000 });
+await p.click('.tabs button[data-tab="return"]');
+await p.waitForSelector('#calcDod', { timeout: 12000 });
+await p.waitForTimeout(500);
+check('the panel opens with the date it matured on',
+  (await p.locator('#calcDod').inputValue()) === '2026-08-01',
+  await p.locator('#calcDod').inputValue());
+await p.fill('#calcDod', '');
+await p.click('#calcSave');
+await p.waitForTimeout(2200);
+await p.goto(`${BASE}/#/maturities`); await p.waitForTimeout(1000);
+check('emptying the box there takes it off the register too',
+  (await p.locator('table.data tbody tr', { hasText: `${PREFIX}-1` }).count()) === 0);
+check('and it is back on the active grid',
+  (await (await searchGrid('Screentest')).count()) === 1);
+const stillClear = await p.evaluate(async (id) => {
+  const r = await fetch(`/api/insureds/${id}`, { credentials: 'same-origin' });
+  return (await r.json()).date_of_death;
+}, insuredId);
+check('with the date of death actually gone from the person',
+  !stillClear, String(stillClear));
+
 console.log('\nINVESTOR VIEW');
 const ictx = await br.newContext({ viewport: { width: 1400, height: 950 } });
 const ip = await ictx.newPage();

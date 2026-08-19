@@ -18,7 +18,7 @@
    the app uses, so an opportunity's IRR and a held policy's IRR mean the
    same thing and can be compared directly.
    ===================================================================== */
-import { analyzeFlows, today } from '../public/irr.js';
+import { analyzeFlows, flowsAfterCarry, today } from '../public/irr.js';
 
 /** Months added to a YYYY-MM-DD date, clamped to the end of the month. */
 export function addMonths(iso, months) {
@@ -98,8 +98,14 @@ function annualRate(scheduled) {
   return window.reduce((s, p) => s + p.amount, 0);
 }
 
-/** One scenario: buy at the close, pay the premiums, collect at maturity. */
-export function scenario(opp, offsetMonths, share = 1) {
+/**
+ * One scenario: buy at the close, pay the premiums, collect at maturity.
+ *
+ * `net` is what an investor is shown: the managing partner's share of the
+ * profit comes off the claim, so the figures somebody weighs up before
+ * committing are the ones they would actually receive. Staff see it gross.
+ */
+export function scenario(opp, offsetMonths, share = 1, net = false) {
   const price = Number(opp.asking_price) || 0;
   const benefit = Number(opp.face_amount) || 0;
   const close = iso(opp.expected_close) || today();
@@ -116,7 +122,7 @@ export function scenario(opp, offsetMonths, share = 1) {
     { date: matures, amount: benefit * share, label: 'Death benefit' },
   ];
 
-  const a = analyzeFlows(flows);
+  const a = analyzeFlows(net ? flowsAfterCarry(flows) : flows);
   return {
     offset_months: offsetMonths,
     matures_on: matures,
@@ -137,9 +143,9 @@ export function scenario(opp, offsetMonths, share = 1) {
 /** Two years early, at life expectancy, two years late. */
 export const SCENARIO_OFFSETS = [-24, 0, 24];
 
-export function analyseOpportunity(opp, share = 1) {
+export function analyseOpportunity(opp, share = 1, net = false) {
   const scenarios = SCENARIO_OFFSETS
-    .map((m) => scenario(opp, m, share))
+    .map((m) => scenario(opp, m, share, net))
     .filter(Boolean);
   const atLe = scenarios.find((s) => s.offset_months === 0) || null;
   return {
