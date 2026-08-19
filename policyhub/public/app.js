@@ -5794,11 +5794,44 @@ async function render() {
     const result = typeof out === 'string' ? { html: out } : out;
     $('#main').innerHTML = result.html;
     result.after?.();
+    fitStatValues();
   } catch (err) {
     if (!state.user) return;
     $('#main').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
   }
 }
+
+/**
+ * A headline figure that will not fit its tile.
+ *
+ * The KPI numbers are deliberately set on one line — a death benefit broken
+ * across two lines at a comma reads as two numbers. But "one line" and "always
+ * fits" are not the same promise, and a book with a $5,262,941,081 face amount
+ * in it silently lost its last three digits off the right-hand edge, which is
+ * the one failure a number on a dashboard must never have. So anything too wide
+ * is stepped down until it fits, and only then.
+ */
+function fitStatValues() {
+  for (const el of document.querySelectorAll('.stat .value')) {
+    el.style.fontSize = '';
+    const room = el.parentElement.clientWidth
+      - parseFloat(getComputedStyle(el.parentElement).paddingLeft || 0)
+      - parseFloat(getComputedStyle(el.parentElement).paddingRight || 0);
+    if (!room) continue;
+    let size = parseFloat(getComputedStyle(el).fontSize);
+    // 13px is where the figure stops being a headline; below that it should
+    // look wrong, because a number that long in a tile this size is wrong.
+    while (el.scrollWidth > el.clientWidth + 1 && size > 13) {
+      size -= 1;
+      el.style.fontSize = `${size}px`;
+    }
+  }
+}
+
+/* The tiles are flexible, so the room a figure has changes with the window.
+   Refitting on resize keeps the promise at every width, not just the one the
+   page happened to load at. */
+window.addEventListener('resize', fitStatValues);
 
 function wireShell() {
   $('#logoutBtn').addEventListener('click', async () => {

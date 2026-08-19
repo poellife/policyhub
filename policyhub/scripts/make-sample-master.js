@@ -117,7 +117,7 @@ const COLUMNS = [
   'Plan Name', 'Issue Date', 'Issue Age', 'Basic Face', 'Owner', 'Premium Required',
   'Premium Mode', 'Next Premium Due', 'Acquisition Date', 'Acquisition Cost', 'Status',
   'As Of Date', 'AV', 'CSV', 'COI', 'Death Benefit', 'Loan Balance',
-  'Transaction Date', 'Transaction Type', 'Amount', 'Remarks',
+  'Transaction Date', 'Transaction Type', 'Amount', 'Remarks', 'Notes',
   'Due Date', 'Estimated Amount', 'Note',
   'Proceeds Amount', 'Proceeds Received On',
   // Left blank on purpose: paste the case's Dropbox folder here and every
@@ -161,7 +161,7 @@ for (const p of BOOK) {
     add({
       'Record Type': 'Insured', 'Last Name': p.last, 'First Name': p.first, DOB: p.dob,
       'LE Months': p.le, 'Date Of Death': us(at(p.diedOff)),
-      Remarks: 'Death certificate received',
+      Notes: 'Death certificate received',
     });
   }
 

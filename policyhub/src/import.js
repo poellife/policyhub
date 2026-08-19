@@ -80,7 +80,7 @@ const ALIASES = {
   duedate: 'due_date', premiumduedate: 'due_date', scheduleddate: 'due_date',
   estimatedamount: 'est_amount', estimatedpremium: 'est_amount',
   scheduledamount: 'est_amount', premiumamount: 'est_amount',
-  note: 'note', notes: 'note',
+  note: 'note',
 
   // master file
   recordtype: 'record_type', rowtype: 'record_type', record: 'record_type',
@@ -233,7 +233,7 @@ async function importPolicies(rows, opts, user) {
         proceeds_amount: num(row.proceeds_amount),
         proceeds_received_on: date(row.proceeds_received_on),
         documents_url: link(row.documents_url),
-        notes: str(row.notes),
+        notes: str(row.notes || row.note),
       };
 
       let policyId;
@@ -346,7 +346,7 @@ async function importValues(rows, opts) {
         [policyId, asOf, num(row.account_value), num(row.cash_surrender_value),
          num(row.cost_of_insurance), num(row.death_benefit), num(row.premium_paid_to_date),
          num(row.monthly_deduction), num(row.loan_balance), date(row.date_of_last_withdrawal),
-         str(row.notes)]
+         str(row.notes || row.note)]
       );
       result.values++;
     } catch (e) {
@@ -597,7 +597,7 @@ async function importInsuredRow(row) {
     le_provider: str(row.le_provider) || null,
     le_date: date(row.le_date),
     date_of_death: date(row.date_of_death),
-    notes: str(row.notes) || null,
+    notes: str(row.notes || row.note) || null,
   };
   delete fields.issue_state;
   const sets = [], vals = [];
@@ -626,7 +626,7 @@ async function importLifeRow(row, allowedFunds) {
   await q(
     `INSERT INTO policy_insureds (policy_id, insured_id, role, notes)
      VALUES ($1,$2,$3,$4) ON CONFLICT (policy_id, insured_id) DO UPDATE SET role = EXCLUDED.role`,
-    [policyId, insuredId, str(row.role) || 'Survivorship', str(row.notes)]
+    [policyId, insuredId, str(row.role) || 'Survivorship', str(row.notes || row.note)]
   );
   return policyId;
 }
@@ -744,13 +744,13 @@ async function importPremiums(rows, opts = {}) {
         [policyId, due]);
       if (existing.rows.length) {
         await q('UPDATE policy_reminders SET amount = $1, note = $2 WHERE id = $3',
-          [amount, str(row.note), existing.rows[0].id]);
+          [amount, str(row.note || row.notes), existing.rows[0].id]);
         result.updated++;
       } else {
         await q(
           `INSERT INTO policy_reminders (policy_id, due_date, kind, amount, note, created_by)
            VALUES ($1,$2,'Premium',$3,$4,$5)`,
-          [policyId, due, amount, str(row.note), opts.userId || null]);
+          [policyId, due, amount, str(row.note || row.notes), opts.userId || null]);
         result.created++;
       }
     } catch (e) {
@@ -785,7 +785,7 @@ export function previewUpload(files, type) {
   }
 
   const known = new Set([...Object.values(ALIASES),
-    'policy_number', 'insured_name', 'carrier_name', 'as_of_date']);
+    'policy_number', 'insured_name', 'carrier_name', 'as_of_date', 'notes']);
   const recognised = new Set(), unrecognised = new Set();
   for (const { row } of entries.slice(0, 400))
     for (const k of Object.keys(row)) (known.has(k) ? recognised : unrecognised).add(k);

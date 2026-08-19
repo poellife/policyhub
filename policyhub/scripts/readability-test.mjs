@@ -120,7 +120,28 @@ const badge = await p.evaluate(() => {
 check('a status badge carries its own word', !!badge?.text, badge?.text);
 check('with a mark beside it, not instead of it', badge?.dots === 1);
 
+console.log('\nA HEADLINE FIGURE IS NEVER CUT OFF');
+await p.goto(`${BASE}/#/dashboard`);
+await p.waitForSelector('.kpi-row .stat .value', { timeout: 12000 });
+/* Clipping the last digits off a death benefit is the one failure a number on a
+   dashboard must not have, and it only shows up on a figure long enough to
+   overflow — so one is planted rather than waited for. */
+const fitted = await p.evaluate(() => {
+  const el = document.querySelector('.stat .value');
+  if (!el) return null;
+  const was = el.textContent;
+  el.textContent = '$5,262,941,081.00';
+  window.dispatchEvent(new Event('resize'));      // the same path a narrower window takes
+  const out = { over: el.scrollWidth - el.clientWidth, size: getComputedStyle(el).fontSize };
+  el.textContent = was;
+  return out;
+});
+check('a figure too wide for its tile is stepped down, not clipped',
+  fitted && fitted.over <= 1, fitted ? `${fitted.over}px over at ${fitted.size}` : 'no stat tile');
+
 console.log('\nKEYBOARD FOCUS IS VISIBLE');
+await p.goto(`${BASE}/#/policies`);
+await p.waitForSelector('table.data tbody tr', { timeout: 12000 });
 await p.keyboard.press('Tab');
 const focus = await p.evaluate(() => {
   const el = document.activeElement;
