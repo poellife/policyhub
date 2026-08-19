@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto';
 // The rate engine lives under public/ because the browser loads it too: the
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
-import { analyzeFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carryOn, CARRY_PCT,
+import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carryOn, CARRY_PCT,
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
+import { cleanArrangement } from '../public/policy-fields.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -504,6 +505,65 @@ router.put('/me/tax-id', authenticate, wrap(async (req, res) => {
     `investor supplied their own tax number · ending ${digits.slice(-4)}`);
   res.json({ ok: true, tax_id_last4: digits.slice(-4) });
 }));
+/* ------------------------------------------------------------------ *
+ * Preferences
+ *
+ * How somebody has arranged a screen — at present, which columns they
+ * want on the policies grid and in what order. Personal, not shared: two
+ * people reading the same book lay it out differently, and neither should
+ * be able to move the other's furniture.
+ *
+ * Three rules, and they are the whole of the security story here:
+ *
+ *   - it is always the caller's own row. There is no user id in the path
+ *     and no way to write anybody else's, so an administrator cannot
+ *     rearrange an investor's screen by accident or otherwise.
+ *   - only names this file knows are accepted, so the table cannot be
+ *     used as a general-purpose store for whatever a client posts.
+ *   - the value is rebuilt from the field catalogue rather than stored as
+ *     it arrived. What comes back out is a list of known column keys, so
+ *     nothing that reaches the grid can carry anything else with it.
+ * ------------------------------------------------------------------ */
+
+const PREF_CLEANERS = { policy_columns: cleanArrangement };
+
+router.get('/me/prefs', authenticate, wrap(async (req, res) => {
+  const { rows } = await q(
+    'SELECT name, value FROM user_prefs WHERE user_id = $1', [req.user.uid]);
+  const out = {};
+  for (const r of rows) {
+    const clean = PREF_CLEANERS[r.name];
+    if (!clean) continue;                       // a name we no longer use
+    const value = clean(r.value);
+    if (value) out[r.name] = value;
+  }
+  res.json(out);
+}));
+
+router.put('/me/prefs/:name', authenticate, wrap(async (req, res) => {
+  const clean = PREF_CLEANERS[req.params.name];
+  if (!clean) return res.status(404).json({ error: 'Unknown preference' });
+  const value = clean(req.body);
+  if (!value)
+    return res.status(400).json({ error: 'That is not an arrangement this screen understands.' });
+  await q(
+    `INSERT INTO user_prefs (user_id, name, value) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, name)
+     DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [req.user.uid, req.params.name, JSON.stringify(value)]
+  );
+  res.json(value);
+}));
+
+/** Back to the catalogue's own idea of the screen. */
+router.delete('/me/prefs/:name', authenticate, wrap(async (req, res) => {
+  if (!PREF_CLEANERS[req.params.name])
+    return res.status(404).json({ error: 'Unknown preference' });
+  await q('DELETE FROM user_prefs WHERE user_id = $1 AND name = $2',
+    [req.user.uid, req.params.name]);
+  res.json({ ok: true });
+}));
+
 router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
@@ -1638,8 +1698,11 @@ router.get('/analytics/summary', wrap(async (req, res) => {
   // returned if every remaining insured died this morning". Realized
   // policies contribute the cheque that actually arrived, on the day it
   // arrived, so this converges on the true number as the book runs off.
-  const { combined } = await portfolioFlows(req, { fund });
-  const returnOnBook = analyzeFlows(combined);
+  const { byPolicy: bookFlows } = await portfolioFlows(req, { fund });
+  /* Pooled per policy, not poured into one series: simple interest measures
+     each dollar against one end date, and a book has one per policy. See
+     `poolFlows` in public/irr.js. */
+  const returnOnBook = poolFlows([...bookFlows.values()]);
 
   /* Carry is totalled over the LIVE book only. What a matured policy has
      produced belongs to the Maturities register, which splits it into earned
@@ -2472,7 +2535,7 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
       WHERE ${filter} AND ($3 = '' OR pl.fund_code = $3) AND ${vis}`,
     [scope, funds, fund]
   );
-  if (!policies.length) return { policies: [], byPolicy: new Map(), combined: [] };
+  if (!policies.length) return { policies: [], byPolicy: new Map(), asOf };
 
   const { rows: txns } = await q(
     `SELECT policy_id, txn_date, txn_type, amount FROM transactions
@@ -2486,7 +2549,6 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
   }
 
   const byPolicy = new Map();
-  const combined = [];
   for (const p of policies) {
     const factor = Number(p.factor) || 0;
     const raw = ledgerFlows(ledger.get(p.id) || [], factor);
@@ -2501,9 +2563,11 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
     const pct = Number(p.carry_pct) || 0;
     const flows = scope === null || !pct ? raw : flowsAfterCarry(raw, pct);
     byPolicy.set(p.id, flows);
-    combined.push(...flows);
   }
-  return { policies, byPolicy, combined, asOf };
+  /* Deliberately no single combined series: every rate above this is pooled
+     per policy by `poolFlows`, because simple interest needs one end date
+     per policy and a book has more than one. */
+  return { policies, byPolicy, asOf };
 }
 
 /** The policy's own cash-flow schedule, with both scenarios spelled out. */
@@ -2709,7 +2773,7 @@ router.get('/maturities', wrap(async (req, res) => {
   ]);
 
   // Return on each matured policy, and one rate across all of them together.
-  const { policies, byPolicy, combined } = await portfolioFlows(req, { onlyMatured: true, fund });
+  const { policies, byPolicy } = await portfolioFlows(req, { onlyMatured: true, fund });
   const withReturn = rows.rows.map((r) => {
     const a = analyzeFlows(byPolicy.get(r.id) || []);
     return { ...r, rate: a.rate, rate_days: a.days, rate_short: a.short_period,
@@ -2733,8 +2797,7 @@ router.get('/maturities', wrap(async (req, res) => {
    * label it honestly. Neither is an average of the per-policy rates — that
    * would weight a $50k position the same as a $5m one. */
   const paidIds = new Set(policies.filter((p) => p.proceeds_amount != null).map((p) => p.id));
-  const paidFlows = [];
-  for (const id of paidIds) paidFlows.push(...(byPolicy.get(id) || []));
+  const paidFlows = [...paidIds].map((id) => byPolicy.get(id) || []);
 
   /* Carried interest on the maturities — ours, and only ever ours. Split the
      way the register itself splits: earned on claims the carrier has paid,
@@ -2773,8 +2836,8 @@ router.get('/maturities', wrap(async (req, res) => {
     totals: totals.rows[0],
     /* Kept under its old name so nothing reading this endpoint breaks, and
        it remains the right figure for "what if everything landed today". */
-    portfolio: analyzeFlows(combined),
-    realized: { ...analyzeFlows(paidFlows), policy_count: paidIds.size },
+    portfolio: poolFlows([...byPolicy.values()]),
+    realized: { ...poolFlows(paidFlows), policy_count: paidIds.size },
     ...(carrySummary ? { carry: carrySummary } : {}),
     scopedToInvestor: scope !== null,
   });
@@ -3217,15 +3280,16 @@ router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (
  *              the day it arrived (or the benefit assumed collected today
  *              where the claim is still outstanding)
  *
- * Owner entities get their own rate computed from their own combined flows,
- * not by averaging the policies inside them — a $5m position and a $50k one
- * do not contribute equally to a rate, and averaging pretends they do.
+ * Owner entities get their own rate pooled from the policies inside them —
+ * total profit over total dollar-years — not by averaging their rates. A $5m
+ * position and a $50k one do not contribute equally, and averaging pretends
+ * they do.
  */
 router.get('/reports/returns', wrap(async (req, res) => {
   const basis = req.query.basis === 'realized' ? 'realized' : 'active';
   const fund = str(req.query.fund);
 
-  const { policies, byPolicy, combined, asOf } = await portfolioFlows(req, { basis, fund });
+  const { policies, byPolicy, asOf } = await portfolioFlows(req, { basis, fund });
 
   const scoped = scopeId(req) !== null;
   const rows = policies.map((p) => {
@@ -3271,8 +3335,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
     groups.get(key).push(p.id);
   }
   const byFund = [...groups.entries()].map(([fund_code, ids]) => {
-    const flows = ids.flatMap((id) => byPolicy.get(id) || []);
-    const a = analyzeFlows(flows);
+    const a = poolFlows(ids.map((id) => byPolicy.get(id) || []));
     return { fund_code, n: ids.length, rate: a.rate, invested: a.invested,
              returned: a.returned, profit: a.profit, multiple: a.multiple, days: a.days };
   }).sort((x, y) => (y.rate ?? -Infinity) - (x.rate ?? -Infinity));
@@ -3291,7 +3354,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
     [scope, funds, fund]
   );
 
-  const portfolio = analyzeFlows(combined);
+  const portfolio = poolFlows([...byPolicy.values()]);
   // The simple mean is reported alongside, because the gap between it and the
   // capital-weighted rate is itself worth seeing.
   const rated = rows.filter((r) => r.rate !== null);

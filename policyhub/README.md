@@ -14,7 +14,7 @@ leaves your database.
 | Area | What it does |
 |---|---|
 | **Dashboard** | Total death benefit, capital invested, cash surrender value, monthly cost-of-insurance run rate, open alerts. Cumulative capital-deployed trend and death benefit by carrier. |
-| **Policies** | Sortable, filterable grid mirroring your existing CRM columns — policy #, insured, DOB, age, carrier, issue date, face, death benefit, owner, premium, AV, CSV, COI, invested, last withdrawal, values-as-of, status. Column totals in the footer. CSV export. |
+| **Policies** | Sortable, filterable grid. **Every field a policy has is available as a column** — forty-odd of them — and each person chooses which they see and in what order, by ticking them in a dialog or dragging a heading. Column totals in the footer. CSV export. |
 | **Policy detail** | Overview with **all lives insured** (survivorship / second-to-die policies carry two or more), **value history** (AV/CSV, COI and death benefit charts + full snapshot table), **transactions** (premium/acquisition ledger with totals by type and a cost-basis-vs-death-benefit comparison), **servicing** (premium schedule, one-click premium logging, next-due advance). |
 | **Servicing** | Alerts ranked by severity, and upcoming premiums grouped by month with monthly totals. |
 | **Maturities** | Policies that have paid out or are waiting to. Death benefit matured, proceeds received, capital invested, realized gain and return, with a per-policy claim record. Insured surname and forename sit in columns of their own and every heading sorts, either way. |
@@ -33,6 +33,46 @@ from a dropdown on the policy form, which also offers inline creation so a new
 entity can be added without leaving the dialog. Renaming an entity updates every
 policy pointing at it; deleting one is refused while any policy still references
 it, so policies can't be orphaned.
+
+## Arranging the policies grid
+
+The grid opens on the twenty columns it has always opened on. Everything past
+that is the reader's business, so **Columns** on the Policies page offers every
+field a policy carries — the case ID, the plan, the beneficiary, the issue
+state, the loan balance, premium paid to date, life expectancy, date of death,
+the proceeds and when they were funded, notes, when the record was added — as
+a column that can be switched on.
+
+Order is set the same way. Drag a row in the dialog, or press the arrows beside
+it, or drag a column heading on the grid itself and drop it where you want it.
+The order in the dialog is the order left to right.
+
+Three things this gets right that are easy to get wrong:
+
+- **It follows the login, not the browser.** The arrangement is stored against
+  the user, so it is there on another machine, and somebody else signing in on
+  this one gets their own — or the default, if they have never touched it.
+- **The footer stays in step.** The totals row is built from the same column
+  list as the head, and totals whichever money columns are on the grid, so
+  hiding or moving one can never leave a figure under the wrong heading.
+- **An investor is offered only their own fields.** Account value, cash
+  surrender value, cost of insurance and the statement dates they come from are
+  not on their picker at all, and their share column is not on staff's.
+
+`policy-fields.js` is the single catalogue — what each field is called, what
+type it is and whether it shows by default — loaded by the browser to build
+the grid and imported by the server to check an arrangement before storing it.
+Nothing arbitrary can be parked in the preferences table: what comes back out
+is a list of known column keys or nothing.
+
+A saved arrangement survives the catalogue changing under it. A field that no
+longer exists is dropped rather than being fatal, and a field added later is
+appended rather than inserted — sliding a new column into the middle of a
+layout somebody arranged by hand moves their work for them.
+
+The CSV export is deliberately not filtered to the visible columns: a
+spreadsheet outlives the screen it came from, and a column somebody hid to read
+the grid more easily is not one they meant to delete from their data.
 
 ## Maturities
 
@@ -297,9 +337,12 @@ Three things they do deliberately:
   printed beside it, because the gap between the two is itself information — on
   the sample book the mean reads 29.6% against a weighted 17.6%, which is what a
   few small positions with outsized rates do to an average.
-- **Nothing is silently dropped.** A "Not in this report" table names every
-  policy the basis excludes, with its status and capital, so the ranking is never
-  mistaken for the whole book.
+- **Each answers one question, and only that one.** The realized report covers
+  cases that have matured and nothing else; the in-force report covers cases
+  still running. Neither prints a table of what it leaves out — a list of
+  everything outside the report, underneath the report, invites the reader to
+  add the two together. What each covers is stated in words in the basis note,
+  which is where somebody looks for it.
 - **Assumptions are marked on the figure, not buried.** An unpaid claim shows the
   death benefit with a `*` and is counted as collected today; the tile splits
   cash received from cash assumed.
@@ -307,6 +350,37 @@ Three things they do deliberately:
 The return-by-policy chart is anchored at zero, so a losing position runs left of
 the line in the status colour with a signed label — direction, colour and number
 all carry the sign, never colour alone.
+
+### A book is not one long cash-flow series
+
+Simple interest measures every dollar against **one** end date. A policy has
+one — the day the claim was funded. A book has as many as it has policies, and
+pouring them all into a single series quietly assumes otherwise: a claim
+collected in 2015 is then treated as capital handed back and sitting idle for
+the ten years to the end of the book, so its dollar-years come out large and
+negative. Add enough settled cases and the denominator crosses zero, and the
+screen shows a dash where the book's return belongs.
+
+So every figure that covers more than one policy — the dashboard, the top of
+the Maturities register, the entity subtotals and the book rate on both return
+reports — is pooled instead:
+
+```
+book rate  =  Σ profit over every policy  /  Σ dollar-years over every policy
+```
+
+each policy measured against its own settlement date and then added. That is
+the same formula one level up, it is capital- *and* time-weighted, and it is
+emphatically not an average of the per-policy rates — a $5m position held eight
+years counts for far more than a $50k one held eight months. With one policy it
+reduces to exactly that policy's own figure. `poolFlows()` in `public/irr.js`
+does it; `scripts/pooled-rate-test.mjs` demonstrates the flattened version going
+negative on the same flows, so the failure it prevents is on the record rather
+than described.
+
+The plain average of the rates is printed beside the book rate on the register
+and in both return reports, because the gap between the two is itself
+information — it is what a few small cases with outsized rates do to an average.
 
 ### Where else it appears
 
@@ -664,6 +738,10 @@ browser and imported by the server, so the two can never drift apart. It holds
 the simple-interest solver, an XIRR solver kept for reference, and
 `flowsAfterCarry()`.
 
+`user_prefs` holds how each person has arranged a screen, keyed to the user and
+dropped with the account. It is a name/value pair rather than a column per
+setting, and the value is rebuilt from the field catalogue before it is stored.
+
 `policy_maturity_date(policy_id)` is the maturity rule as a SQL function, and
 `apply_policy_maturity(policy_id)` applies it. Triggers on `insureds`,
 `policy_insureds` and `policies` call it whenever a death date, a life or a
@@ -1002,6 +1080,9 @@ reach those rules correctly.
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
 | `carry-page-test.mjs` | the Carried interest page: refused to a manager, an editor and an investor, earned kept apart from projected, and each filter built from the rows it claims |
+| `policy-columns-test.mjs` | the field catalogue, what may be stored, that an arrangement is personal, and that one saved before a field existed still opens |
+| `policy-columns-ui-test.mjs` | the picker, both ways of moving a column, the footer staying in step, and the arrangement following the login |
+| `pooled-rate-test.mjs` | why a book is not one cash-flow series, and that every screen that totals one pools per policy instead |
 | `carry-page-ui-test.mjs` | the screen itself: the button an admin sees and a manager does not, the filters, and that nothing is left behind on the policy page or the register — plus the register's sorting |
 | `premium-dues-test.mjs` | that the Portfolio card and the Premiums page show the same dates and the same money |
 | `bulk-delete-test.mjs` | who may clear a shelf, what it refuses, and that a refused batch removes nothing |

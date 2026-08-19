@@ -352,6 +352,46 @@ table.data th {
 table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--text-primary); }
 table.data th .arrow { color: var(--text-primary); margin-left: 3px; }
+/* Dragging a heading to move its column. The one being carried fades; the
+   one it would land in front of shows a line, so the drop is not a guess. */
+table.data th.dragging { opacity: .4; }
+table.data th.drop-here { box-shadow: inset 3px 0 0 var(--accent); color: var(--text-primary); }
+
+/* ------------------------- the column picker ------------------------- */
+.col-pick-list {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 46vh; overflow-y: auto;
+  border: 1px solid var(--grid); border-radius: 8px;
+}
+li.col-pick {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-bottom: 1px solid var(--grid);
+  background: var(--surface); cursor: grab;
+}
+li.col-pick:last-child { border-bottom: 0; }
+li.col-pick:hover { background: var(--hover); }
+li.col-pick.dragging { opacity: .45; }
+li.col-pick .grip {
+  color: var(--text-secondary); font-size: 12px; letter-spacing: -3px;
+  cursor: grab; flex: none; width: 12px; opacity: .55;
+}
+/* A row here is a field name, not a form label — so it opts out of the
+   uppercase mono micro-label treatment the dialogs use everywhere else. */
+.col-pick-label {
+  display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0;
+  cursor: pointer; margin: 0;
+  font-family: inherit; font-size: 13px; font-weight: 500;
+  text-transform: none; letter-spacing: 0; color: var(--text-primary);
+}
+/* Inputs are full-width by default in this sheet, which for a tick box in a
+   flex row means it eats the row and squeezes the name to nothing. */
+.col-pick-label input[type=checkbox] { flex: none; width: 15px; height: 15px; margin: 0; }
+.col-pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.col-pick-group {
+  font-size: 10.5px; font-family: var(--mono); text-transform: uppercase;
+  letter-spacing: .04em; flex: none; padding-right: 6px;
+}
+li.col-pick .btn-sm { padding: 1px 7px; line-height: 1.4; }
 table.data td {
   padding: 11px 12px; border-bottom: 1px solid var(--grid);
   white-space: nowrap; vertical-align: middle;

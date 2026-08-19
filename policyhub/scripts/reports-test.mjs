@@ -88,14 +88,12 @@ check('headline is the hypothetical rate', /RETURN IF MATURED TODAY/i.test(s5));
 check('names it as unrealized', /have not been realized/i.test(s5));
 check('ranks policies by return', /POLICIES, RANKED BY RETURN/i.test(s5));
 check('breaks out owner entities', /BY OWNER ENTITY/i.test(s5));
-// The section only exists when something is genuinely excluded — a policy
-// with no cash flows to solve. Assert it appears exactly when it should,
-// rather than assuming the fixture always has one.
-const activeExcluded = (await p.evaluate(
-  () => fetch('/api/reports/returns?realized=false').then((r) => r.json()))).excluded || [];
-check('lists what it leaves out, when there is anything to leave out',
-  activeExcluded.length ? /NOT IN THIS REPORT/i.test(s5) : !/NOT IN THIS REPORT/i.test(s5),
-  `${activeExcluded.length} excluded`);
+/* No table of what the report leaves out. Each return report answers one
+   question, and a list of everything outside it printed underneath invites
+   the reader to add the two together. What the report covers is stated in
+   words in the basis note instead. */
+check('does not print a table of what it leaves out',
+  !/NOT IN THIS REPORT/i.test(s5));
 check('states that it is simple interest, not compounded',
   /simple interest/i.test(s5) && /interest earns nothing/i.test(s5));
 check('shows cost basis when ticked', /CAPITAL INVESTED/i.test(s5));
@@ -119,7 +117,8 @@ check('has a matured and a paid column', /matured/i.test(s6) && /paid/i.test(s6)
 const oneEntity = (s6.match(/LCG\d/g) || []).filter((v, i, a) => a.indexOf(v) === i).length < 2;
 check('breaks out owner entities when there is more than one',
   oneEntity || /BY OWNER ENTITY/i.test(s6), oneEntity ? 'single entity — table omitted' : '');
-check('names the in-force policies it excludes', /Inforce/i.test(s6));
+check('reports only what has matured — nothing about the live book',
+  !/NOT IN THIS REPORT/i.test(s6) && !/Inforce/i.test(s6));
 
 // The two documents must not be the same document.
 check('the two reports cover different policies', s5 !== s6);

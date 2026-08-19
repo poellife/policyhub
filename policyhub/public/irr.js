@@ -214,6 +214,71 @@ export function analyzeFlows(rawFlows) {
   };
 }
 
+/**
+ * The rate across several policies at once.
+ *
+ * A book cannot be measured by pouring every policy's flows into one series
+ * and running `simpleRate` over the result. Simple interest measures each
+ * dollar against ONE end date, and a book has as many end dates as it has
+ * policies: a claim collected in 2015 would be counted as capital handed
+ * back and therefore idle for the ten years to the end of the book, so its
+ * dollar-years come out large and negative. Add enough settled cases and
+ * the denominator goes through zero — the arithmetic stops meaning anything
+ * long before that, and the screen shows a dash where the book's return
+ * belongs. That is not a book with no return; it is the wrong question.
+ *
+ * The right one measures every policy against its own end and then adds:
+ *
+ *     rate  =  Σ profit_i  /  Σ dollar-years_i
+ *
+ * which is the same formula one level up. It is capital- AND time-weighted,
+ * so a $5m position held eight years counts for more than a $50k one held
+ * eight months, and it is emphatically not an average of the per-policy
+ * rates — that would let a tiny case with a spectacular rate drag the book.
+ * With one policy it reduces to exactly that policy's own figure.
+ *
+ * `groups` is an array of flow arrays, one per policy.
+ */
+export function poolFlows(groups) {
+  const parts = (groups || []).map((g) => analyzeFlows(g)).filter((a) => a.flows.length);
+  const all = parts.flatMap((a) => a.flows).sort(
+    (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (!all.length) return analyzeFlows([]);
+
+  const profit = parts.reduce((s, a) => s + a.profit, 0);
+  const dollarYears = parts.reduce((s, a) => s + a.dollar_years, 0);
+  const rate = dollarYears > 0 ? profit / dollarYears : null;
+  const first = all[0].date;
+  const last = all[all.length - 1].date;
+  const days = daysBetween(first, last);
+
+  return {
+    rate,
+    dollar_years: dollarYears,
+    /* The compounding equivalent genuinely is one series — discounting has
+       no end date to disagree about — so it is solved over the lot. */
+    compound_rate: xirr(all),
+    flows: all,
+    invested: parts.reduce((s, a) => s + a.invested, 0),
+    returned: parts.reduce((s, a) => s + a.returned, 0),
+    profit,
+    multiple: (() => {
+      const out = parts.reduce((s, a) => s + a.invested, 0);
+      return out > 0 ? parts.reduce((s, a) => s + a.returned, 0) / out : null;
+    })(),
+    first_flow: first,
+    last_flow: last,
+    days,
+    years: days / 365,
+    short_period: days > 0 && days < 90,
+    extreme: rate !== null && Math.abs(rate) > 2,
+    /* Read per policy, not over the pile: several policies interleaved will
+       always change sign repeatedly, which says nothing about any of them. */
+    ambiguous: parts.some((a) => a.ambiguous),
+    policy_count: parts.length,
+  };
+}
+
 /* ==================================================================== *
  * Carried interest
  *

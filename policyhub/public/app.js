@@ -8,6 +8,8 @@ import { reportsView, buildOpportunitySheet } from './reports.js';
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
 import { analyzeFlows, fmtRate, today as irrToday } from './irr.js';
+import { POLICY_FIELDS, POLICY_GROUPS, arrangeFields, packArrangement }
+  from './policy-fields.js';
 
 /* ------------------------------- api --------------------------------- */
 
@@ -50,7 +52,28 @@ const state = {
      row, so a selection survives sorting, searching and filtering — you can
      pick three from a carrier search, change the search, and pick two more. */
   selected: new Set(),
+  /* How this person has arranged the policies grid: which columns, in what
+     order. Loaded once at sign-in and saved back whenever it changes, so it
+     follows them from one machine to the next rather than living in this
+     browser. Null means they have never arranged it — the catalogue's
+     defaults. */
+  policyCols: null,
 };
+
+/**
+ * How this person has arranged their screens, fetched once at sign-in.
+ *
+ * A failure here is not a failure to sign in — they get the default grid,
+ * which is what they had before there was such a thing as an arrangement.
+ */
+async function loadPrefs() {
+  try {
+    const prefs = await api('/me/prefs');
+    state.policyCols = prefs?.policy_columns || null;
+  } catch {
+    state.policyCols = null;
+  }
+}
 
 /**
  * Refresh the opportunity count behind the menu badge.
@@ -511,6 +534,7 @@ function wireLogin() {
       // The login response is minimal; /auth/me carries the scope details the
       // interface needs (investor name, manager entities).
       state.user = await api('/auth/me');
+      await loadPrefs();
       location.hash = '#/dashboard';
       await render();
     } catch (err) {
@@ -882,57 +906,199 @@ function alertRow(a) {
 
 /* ------------------------------ policies ----------------------------- */
 
-const POLICY_COLUMNS = [
-  { key: 'policy_number', header: 'Policy #', cell: (p) => `<span class="strong">${esc(p.policy_number)}</span>` },
-  { key: 'insured_last', header: 'Last name', cell: (p) => esc(p.insured_last || '—') },
-  { key: 'insured_first', header: 'First name', cell: (p) => esc(p.insured_first || '—') },
-  { key: 'insured_dob', header: 'DOB', cell: (p) => fmtDate(p.insured_dob) },
-  { key: 'age', header: 'Age', cls: 'num', value: (p) => ageFrom(p.insured_dob), cell: (p) => ageFrom(p.insured_dob) ?? '—' },
-  /* Sex belongs on the screen for the same reason age does: mortality is
-     the whole asset, and men and women of the same age do not have the
-     same one. */
-  { key: 'insured_gender', header: 'Sex', cell: (p) => sexLabel(p.insured_gender) },
-  { key: 'carrier_name', header: 'Carrier', cell: (p) => esc(p.carrier_name) },
-  { key: 'product_type', header: 'Type', cell: (p) =>
-      p.product_type ? `<span title="${esc(PRODUCT_LABELS[p.product_type] || p.product_type)}">${esc(p.product_type)}</span>` : '<span class="muted">—</span>' },
-  { key: 'issue_date', header: 'Issued', cell: (p) => fmtDate(p.issue_date) },
-  { key: 'face_amount', header: 'Face', cls: 'num', cell: (p) => money(scaled(p.face_amount, p), 2) },
-  { key: 'death_benefit', header: 'Death benefit', cls: 'num',
-    cell: (p) => money(scaled(p.death_benefit ?? p.face_amount, p), 2) },
-  { key: 'fund_code', header: 'Owner', cell: (p) => esc(p.fund_code || p.owner_account || '—') },
-  { key: 'premium_required', header: 'Premium', cls: 'num', cell: (p) => money(scaled(p.premium_required, p), 2) },
-  { key: 'account_value', header: 'AV', cls: 'num', cell: (p) => money(scaled(p.account_value, p), 2) },
-  { key: 'cash_surrender_value', header: 'CSV', cls: 'num', cell: (p) => money(scaled(p.cash_surrender_value, p), 2) },
-  { key: 'cost_of_insurance', header: 'COI', cls: 'num', cell: (p) => money(scaled(p.cost_of_insurance, p), 2) },
-  { key: 'total_invested', header: 'Invested', cls: 'num', cell: (p) => money(scaled(p.total_invested, p), 2) },
-  { key: 'date_of_last_withdrawal', header: 'Last w/d', cell: (p) => fmtDate(p.date_of_last_withdrawal) },
-  { key: 'value_as_of', header: 'Values as of', cell: (p) => fmtDate(p.value_as_of) },
-  { key: 'status', header: 'Status', cell: (p) => statusBadge(p.status) },
-];
-
-/** Investors get an extra column showing what proportion of each policy is theirs. */
-const MY_SHARE_COLUMN = {
-  key: 'my_pct', header: 'My share', cls: 'num',
-  value: (p) => Number(p.my_pct),
-  cell: (p) => `<span class="strong">${Number(p.my_pct).toFixed(Number(p.my_pct) % 1 ? 4 : 0)}%</span>`,
+/* The cells, one renderer per TYPE rather than one per field.
+ *
+ * The catalogue in `policy-fields.js` says what each field IS; this says
+ * what that looks like in a table cell. Adding a field is a line there and
+ * nothing here — which is the point, because the grid now offers every
+ * column a policy has rather than the twenty somebody chose in advance.
+ *
+ * Money is share-weighted for an investor by `scaled`, dates are formatted
+ * once, and a few fields that are genuinely their own thing — status,
+ * product type, the share percentage — keep a renderer of their own. */
+const CELL = {
+  text: (p, f) => (p[f.key] === null || p[f.key] === undefined || p[f.key] === ''
+    ? dash : esc(String(p[f.key]))),
+  strong: (p, f) => `<span class="strong">${esc(p[f.key] ?? '')}</span>`,
+  date: (p, f) => (p[f.key] ? fmtDate(p[f.key]) : dash),
+  money: (p, f) => money(scaled(p[f.key], p), 2),
+  int: (p, f) => (p[f.key] === null || p[f.key] === undefined || p[f.key] === ''
+    ? dash : Number(p[f.key]).toLocaleString('en-US')),
+  age: (p) => ageFrom(p.insured_dob) ?? dash,
+  sex: (p) => sexLabel(p.insured_gender),
+  owner: (p) => esc(p.fund_code || p.owner_account || '—'),
+  product: (p) => (p.product_type
+    ? `<span title="${esc(PRODUCT_LABELS[p.product_type] || p.product_type)}">${
+        esc(p.product_type)}</span>`
+    : dash),
+  status: (p) => statusBadge(p.status),
+  pct: (p, f) => `<span class="strong">${Number(p[f.key] || 0).toFixed(
+    Number(p[f.key]) % 1 ? 4 : 0)}%</span>`,
 };
-/* Account value, cash surrender value and cost of insurance are how a policy
-   is administered, not how an investment performs. An investor is not going to
-   surrender the policy — they hold a percentage of a death benefit — so these
-   invite a question nobody can act on, and a cash value quoted next to a
-   purchase price reads like a valuation, which it is not. They are staff
-   columns. */
-const CARRIER_MECHANICS = [
-  'account_value', 'cash_surrender_value', 'cost_of_insurance',
-  // Dated by the same carrier statements, and meaningless without them.
-  'value_as_of', 'date_of_last_withdrawal',
-];
+/** Numbers line up right; everything else reads left. */
+const NUM_TYPES = new Set(['money', 'int', 'age', 'pct']);
+/** Sorting needs the value, not the markup — and for money, the share of it. */
+const SORT_VALUE = {
+  age: (p) => ageFrom(p.insured_dob),
+  money: (p, f) => Number(scaled(p[f.key], p)) || 0,
+  int: (p, f) => (p[f.key] == null || p[f.key] === '' ? null : Number(p[f.key])),
+  pct: (p, f) => Number(p[f.key]),
+};
 
-const policyColumns = () =>
-  isInvestorUser()
-    ? [...POLICY_COLUMNS.slice(0, 1), MY_SHARE_COLUMN, ...POLICY_COLUMNS.slice(1)]
-        .filter((c) => !CARRIER_MECHANICS.includes(c.key))
-    : POLICY_COLUMNS;
+/** A catalogue entry, turned into a column the grid can draw. */
+const asColumn = (f) => ({
+  ...f,
+  cls: NUM_TYPES.has(f.type) ? 'num' : '',
+  value: (p) => (SORT_VALUE[f.type] ? SORT_VALUE[f.type](p, f) : p[f.key]),
+  cell: (p) => (CELL[f.type] || CELL.text)(p, f),
+});
+
+/** Every column this person may see, arranged the way they arranged it. */
+const policyFieldList = () =>
+  arrangeFields(state.policyCols, { investor: isInvestorUser() });
+
+/** The ones actually on the grid. */
+const policyColumns = () => policyFieldList().filter((f) => f.visible).map(asColumn);
+
+/** Store the arrangement and redraw. Saving is fire-and-forget: the screen
+    has already changed, and a failed save is worth a line in the console
+    rather than a modal in the way of the work. */
+async function savePolicyColumns(fields) {
+  state.policyCols = packArrangement(fields);
+  render();
+  try {
+    await api('/me/prefs/policy_columns', { method: 'PUT', body: state.policyCols });
+  } catch (e) {
+    console.warn('column arrangement not saved:', e.message);
+  }
+}
+
+async function resetPolicyColumns() {
+  state.policyCols = null;
+  render();
+  try {
+    await api('/me/prefs/policy_columns', { method: 'DELETE' });
+  } catch (e) {
+    console.warn('column arrangement not reset:', e.message);
+  }
+}
+
+/**
+ * Choose the columns, and their order.
+ *
+ * Two ways to move one, because they suit different hands: drag a row, or
+ * use the arrows. The arrows matter — dragging is awkward on a trackpad,
+ * impossible from a keyboard, and this list is forty rows long.
+ *
+ * The list is the order. Hiding a column does not move it, so switching one
+ * back on puts it back where it was rather than at the end.
+ */
+function openColumnsDialog() {
+  const fields = policyFieldList();
+  const row = (f, i) => `
+    <li class="col-pick" draggable="true" data-key="${f.key}" data-i="${i}">
+      <span class="grip" aria-hidden="true">⋮⋮</span>
+      <label class="col-pick-label">
+        <input type="checkbox" data-show="${f.key}" ${f.visible ? 'checked' : ''}>
+        <span class="col-pick-name">${esc(f.header)}</span>
+        <span class="muted col-pick-group">${esc(f.group)}</span>
+      </label>
+      <button type="button" class="btn-sm" data-move="up" data-key="${f.key}"
+        aria-label="Move ${esc(f.header)} left">↑</button>
+      <button type="button" class="btn-sm" data-move="down" data-key="${f.key}"
+        aria-label="Move ${esc(f.header)} right">↓</button>
+    </li>`;
+
+  const body = `
+    <p class="muted" style="font-size:12.5px;margin:0 0 10px">
+      Tick a field to put it on the grid. Drag a row, or use the arrows, to change
+      the order — the order here is the order left to right. Yours alone: it follows
+      your login, and nobody else's screen moves.
+    </p>
+    <div class="toolbar" style="margin-bottom:8px">
+      <input class="grow" id="colSearch" placeholder="Find a field…">
+      <button type="button" class="btn-sm" id="colAll">Show all</button>
+      <button type="button" class="btn-sm" id="colNone">Hide all</button>
+      <button type="button" class="btn-sm" id="colReset">Back to default</button>
+    </div>
+    <ul class="col-pick-list" id="colList">${fields.map(row).join('')}</ul>
+    <div class="muted" style="font-size:12px;margin-top:8px" id="colCount"></div>`;
+
+  const dlg = openDialog('Columns', body, async () => {
+    await savePolicyColumns(read());
+  }, 'Apply');
+
+  const list = $('#colList', dlg);
+  const keys = () => [...list.querySelectorAll('li')].map((li) => li.dataset.key);
+  const read = () => keys().map((k) => ({
+    ...fields.find((f) => f.key === k),
+    visible: $(`input[data-show="${k}"]`, dlg).checked,
+  }));
+  const tally = () => {
+    const on = read().filter((f) => f.visible).length;
+    $('#colCount', dlg).textContent =
+      `${on} of ${fields.length} ${on === 1 ? 'column' : 'columns'} on the grid`;
+  };
+  tally();
+
+  list.addEventListener('change', tally);
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-move]');
+    if (!btn) return;
+    const li = btn.closest('li');
+    if (btn.dataset.move === 'up') li.previousElementSibling?.before(li);
+    else li.nextElementSibling?.after(li);
+    li.scrollIntoView({ block: 'nearest' });
+  });
+
+  /* Drag to reorder. The row being dragged is marked rather than moved, and
+     the drop lands it before or after whichever row the pointer is over,
+     depending on which half it is in — dropping "on" a row is ambiguous. */
+  let dragging = null;
+  list.addEventListener('dragstart', (e) => {
+    dragging = e.target.closest('li');
+    dragging?.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox will not start a drag without something on the transfer.
+    e.dataTransfer.setData('text/plain', dragging?.dataset.key || '');
+  });
+  list.addEventListener('dragend', () => {
+    dragging?.classList.remove('dragging');
+    dragging = null;
+  });
+  list.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const over = e.target.closest('li');
+    if (!over || !dragging || over === dragging) return;
+    const box = over.getBoundingClientRect();
+    if (e.clientY < box.top + box.height / 2) over.before(dragging);
+    else over.after(dragging);
+  });
+
+  $('#colSearch', dlg).addEventListener('input', (e) => {
+    const term = e.target.value.trim().toLowerCase();
+    list.querySelectorAll('li').forEach((li) => {
+      const f = fields.find((x) => x.key === li.dataset.key);
+      const hit = !term || `${f.header} ${f.group} ${f.key}`.toLowerCase().includes(term);
+      li.style.display = hit ? '' : 'none';
+    });
+  });
+  const setAll = (on) => {
+    list.querySelectorAll('input[data-show]').forEach((box) => {
+      // Only what is in front of them — a search then "hide all" should not
+      // switch off forty fields they cannot see.
+      if (box.closest('li').style.display !== 'none') box.checked = on;
+    });
+    tally();
+  };
+  $('#colAll', dlg).addEventListener('click', () => setAll(true));
+  $('#colNone', dlg).addEventListener('click', () => setAll(false));
+  $('#colReset', dlg).addEventListener('click', async () => {
+    dlg.close(); dlg.remove();
+    await resetPolicyColumns();
+  });
+  return dlg;
+}
 
 function sortPolicies(rows) {
   const { key, dir } = state.sort;
@@ -968,17 +1134,13 @@ async function policiesView() {
   // Anything picked and then filtered away still counts, and is said so.
   const offScreen = state.selected.size - ticked.length;
 
-  const totals = rows.reduce((acc, p) => {
-    const f = shareFactor(p);
-    acc.face += (Number(p.face_amount) || 0) * f;
-    acc.db += (Number(p.death_benefit ?? p.face_amount) || 0) * f;
-    acc.av += (Number(p.account_value) || 0) * f;
-    acc.csv += (Number(p.cash_surrender_value) || 0) * f;
-    acc.coi += (Number(p.cost_of_insurance) || 0) * f;
-    acc.prem += (Number(p.premium_required) || 0) * f;
-    acc.inv += (Number(p.total_invested) || 0) * f;
-    return acc;
-  }, { face: 0, db: 0, av: 0, csv: 0, coi: 0, prem: 0, inv: 0 });
+  /* Totalled from whichever money columns are actually on the grid, rather
+     than from a list kept beside it — otherwise adding a column leaves the
+     footer a cell out of step with the figures above it. */
+  const cols = policyColumns();
+  const totals = {};
+  for (const c of cols.filter((x) => x.total))
+    totals[c.key] = rows.reduce((sum, p) => sum + (Number(scaled(p[c.key], p)) || 0), 0);
 
   const html = `
     <div class="page-head">
@@ -987,6 +1149,7 @@ async function policiesView() {
           isInvestorUser() ? ' · every figure is your share of each policy' : ''}</div></div>
       <div class="spacer"></div>
       ${shareToggle()}
+      <button id="columnsBtn">Columns</button>
       <button id="exportBtn">Export CSV</button>
       ${canEditData() ? '<button class="primary" id="newPolicyBtn">New policy</button>' : ''}
     </div>
@@ -1020,38 +1183,44 @@ async function policiesView() {
         <table class="data">
           <thead><tr>${canBulkDelete ? `<th class="tick">
             <input type="checkbox" id="tickAll" aria-label="Select every policy shown"
-              ${allShownTicked ? 'checked' : ''}></th>` : ''}${policyColumns().map((c) =>
-            `<th class="sortable ${c.cls || ''}" data-key="${c.key}">${c.header}${
+              ${allShownTicked ? 'checked' : ''}></th>` : ''}${cols.map((c) =>
+            `<th class="sortable ${c.cls || ''}" data-key="${c.key}" draggable="true"
+              title="Click to sort · drag to move">${c.header}${
               state.sort.key === c.key ? `<span class="arrow">${state.sort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`
           ).join('')}</tr></thead>
           <tbody>
-            ${rows.length === 0
-              ? `<tr><td colspan="${policyColumns().length + (canBulkDelete ? 1 : 0)}"><div class="empty">No policies yet. Import a CSV or add one manually.</div></td></tr>`
+            ${/* No columns is its own empty state, and it has to win over "no
+                  policies" — otherwise a grid with rows and no columns draws
+                  seventeen blank lines and looks broken rather than switched
+                  off. */''}
+            ${rows.length === 0 || cols.length === 0
+              ? `<tr><td colspan="${(cols.length || 1) + (canBulkDelete ? 1 : 0)}"><div class="empty">${
+                  cols.length === 0
+                    ? 'Every column is switched off. Use <strong>Columns</strong>, above, to bring some back.'
+                    : 'No policies yet. Import a CSV or add one manually.'
+                }</div></td></tr>`
               : rows.map((p) => `<tr class="clickable ${
                   state.selected.has(p.id) ? 'ticked' : ''}" data-id="${p.id}">${
                   canBulkDelete ? `<td class="tick"><input type="checkbox" data-tick="${p.id}"
                     aria-label="Select ${esc(p.policy_number)}"
                     ${state.selected.has(p.id) ? 'checked' : ''}></td>` : ''}${
-                  policyColumns().map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
+                  cols.map((c) => `<td class="${c.cls || ''}">${c.cell(p)}</td>`).join('')
                 }</tr>`).join('')}
           </tbody>
-          ${rows.length ? `<tfoot><tr>${(() => {
-            /* The totals row is built from the same column list as the head,
-               so adding or hiding a column can never leave it one cell out of
-               step with the figures above it. */
-            const totalOf = {
-              face_amount: totals.face, death_benefit: totals.db,
-              premium_required: totals.prem, account_value: totals.av,
-              cash_surrender_value: totals.csv, cost_of_insurance: totals.coi,
-              total_invested: totals.inv,
-            };
-            const cols = policyColumns();
-            const first = cols.findIndex((c) => c.key in totalOf);
+          ${rows.length && cols.length ? `<tfoot><tr>${(() => {
+            /* Built from the same column list as the head, so hiding or
+               moving a column can never leave the footer one cell out of step
+               with the figures above it. */
+            const first = cols.findIndex((c) => c.key in totals);
+            if (first === -1)
+              return `<td colspan="${cols.length + (canBulkDelete ? 1 : 0)}">Totals — ${
+                rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>`;
             return cols.map((c, i) => {
-              if (i === 0) return `<td colspan="${first + (canBulkDelete ? 1 : 0)}">Totals — ${rows.length} policies</td>`;
+              if (i === 0) return `<td colspan="${first + (canBulkDelete ? 1 : 0)}">Totals — ${
+                rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>`;
               if (i < first) return '';
-              return c.key in totalOf
-                ? `<td class="num">${fmtExact(totalOf[c.key])}</td>`
+              return c.key in totals
+                ? `<td class="num">${fmtExact(totals[c.key])}</td>`
                 : '<td></td>';
             }).join('');
           })()}</tr></tfoot>` : ''}
@@ -1069,12 +1238,51 @@ async function policiesView() {
       });
       $('#statusFilter').addEventListener('change', (e) => { state.filters.status = e.target.value; render(); });
       $('#fundFilter')?.addEventListener('change', (e) => { state.filters.fund = e.target.value; render(); });
-      document.querySelectorAll('th.sortable').forEach((th) =>
+      $('#columnsBtn').addEventListener('click', () => openColumnsDialog());
+
+      /* A heading does two jobs: click it to sort, drag it to move the column.
+         `moved` keeps the drop from also registering as a click, which would
+         re-sort the grid the moment you finished rearranging it. */
+      let dragKey = null;
+      let moved = false;
+      document.querySelectorAll('th.sortable').forEach((th) => {
         th.addEventListener('click', () => {
+          if (moved) { moved = false; return; }
           const key = th.dataset.key;
           state.sort = { key, dir: state.sort.key === key ? -state.sort.dir : 1 };
           render();
-        }));
+        });
+        th.addEventListener('dragstart', (e) => {
+          dragKey = th.dataset.key;
+          th.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', dragKey);
+        });
+        th.addEventListener('dragend', () => {
+          th.classList.remove('dragging');
+          document.querySelectorAll('th.drop-here').forEach((x) => x.classList.remove('drop-here'));
+          dragKey = null;
+        });
+        th.addEventListener('dragover', (e) => {
+          if (!dragKey || th.dataset.key === dragKey) return;
+          e.preventDefault();
+          th.classList.add('drop-here');
+        });
+        th.addEventListener('dragleave', () => th.classList.remove('drop-here'));
+        th.addEventListener('drop', (e) => {
+          e.preventDefault();
+          th.classList.remove('drop-here');
+          if (!dragKey || th.dataset.key === dragKey) return;
+          moved = true;
+          const fields = policyFieldList();
+          const from = fields.findIndex((f) => f.key === dragKey);
+          const to = fields.findIndex((f) => f.key === th.dataset.key);
+          if (from === -1 || to === -1) return;
+          const [lifted] = fields.splice(from, 1);
+          fields.splice(to, 0, lifted);
+          savePolicyColumns(fields);
+        });
+      });
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', (e) => {
           // A tick is not a navigation. Without this, choosing a policy to
@@ -4111,6 +4319,15 @@ async function maturitiesView() {
   const paidCount = collected.length;
   const unpaidCount = rows.length - paidCount;
 
+  /* The simple mean of the per-policy rates, shown beside the book rate
+     rather than instead of it. The book rate is total profit over total
+     dollar-years, so a large position counts for more than a small one; the
+     mean treats a $50k case and a $5m case alike. The gap between them is
+     itself worth seeing, which is why both are on the tile. */
+  const ratedRows = rows.filter((r) => r.rate != null);
+  const meanRate = ratedRows.length
+    ? ratedRows.reduce((s2, r) => s2 + r.rate, 0) / ratedRows.length : null;
+
   const nameOf = (r) =>
     esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() || '—');
 
@@ -4170,7 +4387,9 @@ async function maturitiesView() {
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
              received${unpaidCount ? ` · ${fmtRate(m.portfolio?.rate)} with the other ${unpaidCount}
              assumed collected today` : ''}`
-          : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}</div>
+          : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}${
+          meanRate != null ? ` · plain average of the ${ratedRows.length}
+            ${ratedRows.length === 1 ? 'rate' : 'rates'} ${fmtRate(meanRate)}` : ''}</div>
       </div>
     </div>
 
@@ -4221,10 +4440,13 @@ async function maturitiesView() {
         only once the claim has been paid. A policy returns to the active book if
         its date of death is removed.<br>
         The return is simple interest over actual days — every dollar earns for exactly
-        as long as it is outstanding, and the interest earns nothing. The portfolio figure
-        combines every matured policy's flows into one series rather than averaging the
-        rates, so a large
-        position counts for more than a small one. A <strong>*</strong> marks a rate
+        as long as it is outstanding, and the interest earns nothing. The figure at the
+        top is the whole book's <strong>total profit divided by its total dollar-years</strong>,
+        each policy measured against its own settlement date and then added together. That
+        weights by capital and by time, so a $5m position held eight years counts for far
+        more than a $50k one held eight months. The plain average of the rates is printed
+        beside it, and the gap between the two is itself information: it is what a few
+        small cases with outsized rates do to an average. A <strong>*</strong> marks a rate
         that needs reading with care — an unpaid claim assumed collected today, a
         holding period under 90 days, or flows that change direction more than once.
         Hover it for the reason.</span>
@@ -6429,6 +6651,7 @@ function wireShell() {
 
   try {
     state.user = await api('/auth/me');
+    await loadPrefs();
   } catch {
     state.user = null;
   }

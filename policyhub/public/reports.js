@@ -536,21 +536,11 @@ function buildReturn(d, o, { realized }) {
       </table>
     </div>
 
-    ${d.excluded.length ? `
-    <div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">Not in this report</h3>
-      <table class="rpt-table">
-        <thead><tr><th>Status</th><th class="num">Policies</th>
-          ${o.showBasis ? '<th class="num">Capital invested</th>' : ''}</tr></thead>
-        <tbody>${d.excluded.map((e) => `<tr>
-          <td>${esc(e.status)}</td><td class="num">${e.n}</td>
-          ${o.showBasis ? `<td class="num">${fmtExact(e.invested)}</td>` : ''}
-        </tr>`).join('')}</tbody>
-      </table>
-      <p class="rpt-note">
-        Listed rather than dropped, so the table above is not mistaken for the whole book.
-      </p>
-    </div>` : ''}
+    ${/* No "Not in this report" table on either return report. Each answers one
+          question — what the settled cases returned, or what the live ones would
+          return — and a list of everything outside it printed underneath invites
+          the reader to add the two together. The basis is stated in words below
+          instead, which is where a reader looks for what a figure covers. */''}
 
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">Basis of calculation</h3>
@@ -575,12 +565,14 @@ function buildReturn(d, o, { realized }) {
             'premium is paid in the meantime.'}
       </p>
       <p class="rpt-note">
-        Entity and portfolio rates are solved from combined cash flows, not averaged
-        across policies — a large position contributes more to a rate than a small one.
+        Entity and portfolio rates are total profit over total dollar-years — each
+        policy measured against its own settlement date and then added — not averaged
+        across policies. A large position held a long time contributes more to a rate
+        than a small one held briefly.
         ${d.mean_rate !== null ? `The simple average of the individual rates is ${fmtRate(d.mean_rate)},
         against a capital-weighted ${fmtRate(p.rate)}.` : ''}
         ${anyFlagged ? `A * marks a figure that needs reading with care: ${realized ? 'a claim not yet paid, whose death benefit is shown and assumed collected today; ' : ''}a holding period under 90 days; or cash flows that change direction more than once, where more than one rate can satisfy the equation.` : ''}
-        ${p.ambiguous ? ' The combined series changes direction more than once, which is normal for a book of many policies but means the portfolio rate is one of several mathematically valid roots.' : ''}
+        ${p.ambiguous ? ' At least one policy\u2019s cash flows change direction more than once; its own rate is marked, and it is pooled into the book figure on its dollar-years like any other.' : ''}
       </p>
     </div>
     ${footer(title)}`;

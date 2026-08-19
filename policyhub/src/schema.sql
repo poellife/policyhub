@@ -873,3 +873,23 @@ ALTER TABLE policy_values ADD COLUMN IF NOT EXISTS next_premium_amount NUMERIC(1
    under, and showing an investor less than they are owed on the strength of
    an assumption is the wrong way to be wrong. */
 ALTER TABLE funds ADD COLUMN IF NOT EXISTS carry_pct NUMERIC(6,3) NOT NULL DEFAULT 10;
+
+/* ---------------------------------------------------------------------
+    How each person arranges a screen.
+
+    Preferences, not data: which columns somebody wants on the policies
+    grid and in what order. Keyed to the user, so two people looking at
+    the same book can lay it out differently, and dropped with the account.
+
+    Deliberately a name/value pair rather than a column per setting — a
+    layout is the user's business, and the shape of one changes as screens
+    do. The value is checked against the field catalogue before it is
+    stored, so nothing arbitrary can be parked here.
+   --------------------------------------------------------------------- */
+CREATE TABLE IF NOT EXISTS user_prefs (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, name)
+);
