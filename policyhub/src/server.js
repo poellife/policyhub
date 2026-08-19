@@ -98,6 +98,13 @@ app.post('/api/import/run', authenticate, canImport, oneAtATime, files,
       // A manager's import is confined to their own entities.
       { asOfDate: req.body.asOfDate,
         allowDuplicates: req.body.allowDuplicates === 'true' || req.body.allowDuplicates === true,
+        /* Clears the ledger on every policy the file touches before writing
+           its rows — for when the file is the record rather than an addition
+           to it. Administrators and editors only: a manager may import into
+           their own entities, but rewriting a book of record from a
+           spreadsheet is not the same act. */
+        replaceLedger: ['admin', 'editor'].includes(req.user.role)
+          && (req.body.replaceLedger === 'true' || req.body.replaceLedger === true),
         fundScope: req.user.role === 'manager' ? (req.user.fundIds || [-1]) : null },
       req.user
     );

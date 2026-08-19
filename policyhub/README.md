@@ -719,6 +719,18 @@ and names anything it could not classify. Every message carries the file, the ta
 and the line — "line 12" on its own would be useless once several files are in
 play.
 
+**The file can be made the record.** *Replace the ledger on every policy in
+this file* — administrators and editors only — clears the existing ledger on
+each policy the upload names before writing its rows, so the result says
+exactly what the file says. It is for when the spreadsheet is the authority
+rather than an addition: a premium calculation workbook the office actually
+runs on, against an export that turned out to be patchy, produce a total that
+matches neither source if you simply add one to the other. Policies the file
+does not name are untouched, and every clearance is written to the activity
+log with the number of rows removed and their total, because a ledger that
+vanished is a question somebody asks later. `scripts/replace-ledger-test.mjs`
+covers it.
+
 **Re-running the same file is safe.** A ledger row identical to one already on
 file — same policy, date, type and amount — is skipped and counted, so a second
 upload cannot double your capital invested and halve every IRR computed from it.
@@ -936,6 +948,7 @@ reach those rules correctly.
 | `irr-test.mjs` | the solver against Excel's documented example and an independently written secant solver, then the API |
 | `irr-ui-test.mjs` | the calculator, and that the browser and server produce the identical rate |
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
+| `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
 | `premium-dues-test.mjs` | that the Portfolio card and the Premiums page show the same dates and the same money |
 | `bulk-delete-test.mjs` | who may clear a shelf, what it refuses, and that a refused batch removes nothing |

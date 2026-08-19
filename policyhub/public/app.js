@@ -4729,6 +4729,21 @@ function importView() {
             genuinely took two identical payments on the same day.</span>
         </div>
 
+        ${state.user.role === 'admin' || state.user.role === 'editor' ? `
+        <div class="field" style="margin-top:14px">
+          <label style="display:flex;align-items:center;gap:8px;font-weight:600">
+            <input type="checkbox" id="replaceLedger" style="width:auto;margin:0">
+            Replace the ledger on every policy in this file
+          </label>
+          <span class="muted" style="font-size:12px">
+            For when the file <em>is</em> the record rather than an addition to it — a premium
+            workbook the office actually runs on, against an export that turned out to be
+            patchy. Every policy with a transaction row in the upload has its existing ledger
+            cleared first, so the result says exactly what the file says. Policies not named in
+            the file are untouched, and every clearance is written to the activity log with the
+            number of rows and their total. <strong>This deletes transactions.</strong></span>
+        </div>` : ''}
+
         <div class="dropzone" id="dropzone">
           <div style="font-weight:600;margin-bottom:4px">Drop files here, or click to choose</div>
           <div class="muted" style="font-size:12.5px">
@@ -4879,6 +4894,7 @@ async function handleFiles(files) {
       const fd2 = build();
       fd2.append('asOfDate', $('#asOfDate').value);
       fd2.append('allowDuplicates', $('#allowDupes').checked ? 'true' : 'false');
+      fd2.append('replaceLedger', $('#replaceLedger')?.checked ? 'true' : 'false');
       try {
         const res = await api('/import/run', { method: 'POST', body: fd2 });
         out.innerHTML = `
@@ -4889,6 +4905,7 @@ async function handleFiles(files) {
               <dt>Records updated</dt><dd>${res.updated}</dd>
               <dt>Value snapshots written</dt><dd>${res.values}</dd>
               ${res.skipped ? `<dt>Duplicate ledger rows skipped</dt><dd>${res.skipped}</dd>` : ''}
+              ${res.removed ? `<dt>Ledger rows replaced</dt><dd>${res.removed}</dd>` : ''}
               <dt>Rows with errors</dt><dd>${res.errors.length}</dd>
             </dl>
             ${res.byType ? `<div style="margin-top:12px">
@@ -4896,6 +4913,11 @@ async function handleFiles(files) {
               <span class="secondary">${Object.entries(res.byType)
                 .filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(' · ')}</span>
             </div>` : ''}
+            ${res.removed ? `<div class="muted" style="margin-top:10px;font-size:12.5px">
+              ${res.removed} existing ledger row${res.removed === 1 ? '' : 's'} on the policies
+              named in this file ${res.removed === 1 ? 'was' : 'were'} cleared before the file's
+              own rows were written, so those ledgers now say exactly what the file says. Every
+              clearance is in the activity log.</div>` : ''}
             ${res.skipped ? `<div class="muted" style="margin-top:10px;font-size:12.5px">
               ${res.skipped} ledger row${res.skipped === 1 ? ' was' : 's were'} already on file
               and skipped, so nothing was double-counted. Tick "Allow duplicate ledger rows"

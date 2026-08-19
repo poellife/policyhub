@@ -360,8 +360,39 @@ const TXN_TYPES = ['Acquisition Cost', 'Premium Payment', 'Withdrawal', 'Loan',
                    'Fee', 'Commission', 'Servicing', 'Other'];
 
 async function importTransactions(rows, opts = {}) {
-  const result = { created: 0, updated: 0, values: 0, skipped: 0, errors: [] };
+  const result = { created: 0, updated: 0, values: 0, skipped: 0, removed: 0, errors: [] };
   const allowedFunds = opts.fundScope || null;
+
+  /* Re-baselining a policy from a better record.
+   *
+   * A ledger is normally append-only and the file adds to it. But sometimes
+   * the file IS the record — a premium calculation workbook the office
+   * actually runs on, against a CRM export that turned out to be patchy —
+   * and then adding to what is there produces a total that matches neither
+   * source. `replaceLedger` clears each policy this file touches before
+   * writing its rows, so the ledger ends up saying exactly what the file
+   * says.
+   *
+   * Deliberately per policy, not per file: a file naming three policies
+   * does not touch the other seventy-six. Every clearance is written to the
+   * audit log with the number of rows and their total, because a ledger
+   * that vanished is a question somebody will ask later. */
+  const replacing = !!opts.replaceLedger;
+  const cleared = new Set();
+  const clearLedger = async (policyId) => {
+    if (cleared.has(policyId)) return;
+    cleared.add(policyId);
+    const { rows: gone } = await q(
+      `DELETE FROM transactions WHERE policy_id = $1
+       RETURNING amount, txn_type`, [policyId]);
+    result.removed += gone.length;
+    if (gone.length && opts.userId) {
+      const total = gone.reduce((s2, r) => s2 + Number(r.amount || 0), 0);
+      await audit(opts.userId, 'policy', policyId, 'update',
+        `ledger replaced on import · ${gone.length} row${gone.length === 1 ? '' : 's'} `
+        + `totalling ${total.toFixed(2)} removed`);
+    }
+  };
   // A ledger row is append-only, so re-uploading the same file would double
   // the capital invested and halve every IRR computed from it. An identical
   // row — same policy, date, type and amount — is therefore skipped and
@@ -384,7 +415,9 @@ async function importTransactions(rows, opts = {}) {
       const amount = num(row.amount);
       if (amount === null) { result.errors.push({ line, message: 'Missing or unreadable amount' }); continue; }
 
-      if (!allowDuplicates) {
+      if (replacing) await clearLedger(policyId);
+
+      if (!allowDuplicates && !replacing) {
         const { rows: dup } = await q(
           `SELECT 1 FROM transactions
             WHERE policy_id = $1 AND txn_date = $2 AND txn_type = $3 AND amount = $4 LIMIT 1`,
@@ -694,9 +727,11 @@ async function importMaster(entries, opts, user) {
 
   // 5. The ledger.
   if (buckets.transaction.length) {
-    const sub = await importTransactions(buckets.transaction.map((b) => b.row), opts);
+    const sub = await importTransactions(buckets.transaction.map((b) => b.row),
+      { ...opts, userId: user?.uid ?? null });
     result.created += sub.created;
     result.skipped += sub.skipped || 0;
+    result.removed = (result.removed || 0) + (sub.removed || 0);
     result.errors.push(...relocate(sub.errors, buckets.transaction));
   }
 
