@@ -3070,9 +3070,10 @@ function openTxnDialog(p, preset = {}) {
 /* ----------------------------- servicing ----------------------------- */
 
 async function servicingView() {
-  const [svc, funds] = await Promise.all([
+  const [svc, funds, calls] = await Promise.all([
     api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
     loadFunds(),
+    api('/capital-calls').catch(() => []),
   ]);
   const investor = isInvestorUser();
   // An investor is shown what is still to come. A date that has already
@@ -3104,7 +3105,46 @@ async function servicingView() {
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
+      ${!investor && ['admin', 'manager'].includes(state.user.role)
+        ? '<button class="primary" id="raiseCallBtn">Raise a capital call</button>' : ''}
     </div>
+
+    ${/* What has been asked for, and what has come back. A premium schedule
+          says when the carrier wants the money; a call says when the office
+          needs it in the account, which is the date an investor can act on. */''}
+    ${calls.length ? `
+    <div class="card">
+      <div class="card-head"><h2>Capital calls</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${
+          calls.filter((c) => c.status === 'Open').length} open</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Called</th><th>What for</th><th>Money in by</th>
+          ${investor ? '<th class="num">Your share</th><th>You</th>'
+            : '<th class="num">Asked</th><th class="num">Received</th><th>Parties</th>'}
+          <th></th></tr></thead>
+        <tbody>${calls.map((c) => `<tr>
+          <td class="muted">${fmtDate(c.created_at)}</td>
+          <td class="strong">${esc(c.title || 'Capital call')}${c.fund_code
+            ? ` <span class="muted">· ${esc(c.fund_code)}</span>` : ''}</td>
+          <td>${fmtDate(c.due_date)}${c.status !== 'Open'
+            ? ` <span class="badge">${esc(c.status)}</span>` : ''}</td>
+          ${investor ? `
+            <td class="num strong">${fmtExact(c.my_amount || 0)}</td>
+            <td>${c.my_confirmed_at
+              ? '<span class="badge inforce"><span class="dot"></span>Received</span>'
+              : c.my_marked_at
+                ? '<span class="badge grace"><span class="dot"></span>You said sent</span>'
+                : '<span class="badge lapsed"><span class="dot"></span>Outstanding</span>'}</td>`
+            : `
+            <td class="num">${fmtExact(c.total)}</td>
+            <td class="num">${fmtExact(c.collected)}${Number(c.collected) < Number(c.total)
+              ? `<span class="muted"> · ${Math.round(
+                  (Number(c.collected) / Number(c.total || 1)) * 100)}% in</span>` : ''}</td>
+            <td class="muted">${c.parties}</td>`}
+          <td><button class="btn-sm" data-call="${c.id}">Open</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>` : ''}
 
     ${investor ? '' : `
     <div class="card">
@@ -3175,8 +3215,165 @@ async function servicingView() {
       wireEntityPicker();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
+      $('#raiseCallBtn')?.addEventListener('click', () => openRaiseCallDialog());
+      document.querySelectorAll('[data-call]').forEach((b) =>
+        b.addEventListener('click', () => openCallDialog(Number(b.dataset.call))));
     },
   };
+}
+
+/**
+ * Raising one.
+ *
+ * The window decides which premiums are covered, and everything else follows
+ * from it: who holds those policies, and therefore who is asked for what. The
+ * figures are shown before anything is sent, because a capital call is the
+ * one message where being wrong costs somebody else money.
+ */
+async function openRaiseCallDialog() {
+  const soon = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+  let draft = await api(`/capital-calls/draft?days=30&fund=${encodeURIComponent(entityFilter())}`);
+
+  const summary = (d) => (d.items.length ? `
+    <div class="field-row">
+      <div class="field"><label>Premiums covered</label>
+        <div class="strong" style="padding:6px 0">${d.items.length} ·
+          ${fmtExact(d.total)}</div></div>
+      <div class="field"><label>To be called from investors</label>
+        <div class="strong" style="padding:6px 0">${fmtExact(
+          d.investors.reduce((n, i) => n + i.amount, 0))}</div></div>
+    </div>
+    ${d.unallocated > 0.005 ? `<div class="notice-box" style="margin-bottom:12px">
+      ${fmtExact(d.unallocated)} of this is on percentages nobody holds — the house's own
+      share. Nobody is asked for it.</div>` : ''}
+    <div class="dlg-scroll" style="max-height:190px">
+      <table class="data dlg-list"><tbody>${d.investors.map((i) => `<tr>
+        <td class="strong">${esc(i.name)}</td>
+        <td>${i.policies} ${i.policies === 1 ? 'policy' : 'policies'}</td>
+        <td class="dlg-amt">${fmtExact(i.amount)}</td>
+      </tr>`).join('')}</tbody></table>
+    </div>`
+    : `<div class="error-box">Nothing falls due in that window, so there is nothing to
+       call for. Widen it, or post the premiums to the schedule first.</div>`);
+
+  const dlg = openDialog('Raise a capital call', `
+    <p style="margin-top:0;font-size:14px">Everything falling due inside the window, split
+      by who holds each policy, with one date the money has to be in by.</p>
+    <div class="field-row">
+      <div class="field"><label>Premiums due within</label>
+        <select name="days" id="callDays">
+          ${[[14, 'the next 2 weeks'], [30, 'the next 30 days'], [60, 'the next 60 days'],
+             [90, 'the next 90 days'], [180, 'the next 6 months']]
+            .map(([v, label]) => `<option value="${v}" ${v === 30 ? 'selected' : ''}>${label}</option>`).join('')}
+        </select></div>
+      ${inputField('Money in by', 'due_date', soon(14), 'date', 'required')}
+    </div>
+    ${inputField('What to call it', 'title', 'Premium capital call', 'text', 'required')}
+    <div class="field"><label>Anything they should know</label>
+      <textarea name="note" rows="2" placeholder="Optional — goes in the notice"></textarea></div>
+    <div id="callSummary">${summary(draft)}</div>
+    <span class="muted" style="font-size:12px">Everybody asked is emailed their own figure
+      and this date. Nobody is told what anybody else was asked for.</span>
+  `, async (v) => {
+    if (!draft.items.length) throw new Error('Nothing to call for in that window.');
+    if (!v.due_date) throw new Error('Give the date the money has to be in by.');
+    const made = await api('/capital-calls', { method: 'POST', body: {
+      title: v.title, note: v.note, due_date: v.due_date,
+      items: draft.items } });
+    toast(`Called ${fmtExact(made.total)} from ${made.lines.length} ${
+      made.lines.length === 1 ? 'investor' : 'investors'}${
+      made.notified ? ` · ${made.notified} emailed` : ''}`);
+  }, 'Raise it');
+
+  $('#callDays', dlg).addEventListener('change', async (e) => {
+    $('#callSummary', dlg).innerHTML = '<div class="empty"><span class="spin"></span></div>';
+    draft = await api(`/capital-calls/draft?days=${e.target.value}`
+      + `&fund=${encodeURIComponent(entityFilter())}`);
+    $('#callSummary', dlg).innerHTML = summary(draft);
+  });
+  return dlg;
+}
+
+/** One call: what it covers, who owes what, and where each of them has got to. */
+async function openCallDialog(id) {
+  const c = await api(`/capital-calls/${id}`);
+  const investor = isInvestorUser();
+  const canConfirm = !investor && canEditData();
+
+  const body = `
+    <div class="field-row">
+      <div class="field"><label>Money in by</label>
+        <div class="strong" style="padding:6px 0">${fmtDate(c.due_date)}</div></div>
+      <div class="field"><label>${investor ? 'Your share' : 'Called'}</label>
+        <div class="strong" style="padding:6px 0">${fmtExact(
+          investor ? (c.me?.amount || 0) : c.total)}</div></div>
+      ${investor ? '' : `<div class="field"><label>Received</label>
+        <div class="strong" style="padding:6px 0">${fmtExact(c.collected)}</div></div>`}
+    </div>
+    ${c.note ? `<div class="notice-box" style="margin-bottom:14px">${esc(c.note)}</div>` : ''}
+
+    <div class="dlg-section">What it covers</div>
+    <div class="dlg-scroll" style="max-height:170px">
+      <table class="data dlg-list"><tbody>${c.items.map((i) => `<tr>
+        <td class="strong">${esc(i.insured_name || i.policy_number)}</td>
+        <td>${esc(i.carrier_name)} · ${fmtDate(i.due_date)}</td>
+        <td class="dlg-amt">${fmtExact(i.amount)}</td>
+      </tr>`).join('')}</tbody></table>
+    </div>
+
+    ${investor ? `
+      <div class="dlg-section">Your line</div>
+      ${c.me?.confirmed_at
+        ? `<div class="ok-box">Received ${fmtDateTime(c.me.confirmed_at)}. Nothing outstanding.</div>`
+        : c.me?.marked_paid_at
+          ? `<div class="notice-box">You told us on ${fmtDateTime(c.me.marked_paid_at)} that this
+             had been sent. The office will confirm it when it lands.</div>`
+          : `<p style="font-size:14px">Once you have sent it, say so here. It tells the office
+             to look for it; it is not a receipt until they confirm it.</p>
+             <div class="field"><label>Anything to note</label>
+               <input name="note" placeholder="Wired 20 August, ref …"></div>`}`
+      : `
+      <div class="dlg-section">Who was asked</div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Investor</th><th class="num">Share</th><th>Where it has got to</th>
+          ${canConfirm ? '<th></th>' : ''}</tr></thead>
+        <tbody>${c.lines.map((l) => `<tr>
+          <td class="strong">${esc(l.investor_name)}</td>
+          <td class="num">${fmtExact(l.amount)}</td>
+          <td>${l.confirmed_at
+            ? `<span class="badge inforce"><span class="dot"></span>Received</span>
+               <span class="muted"> ${fmtDateTime(l.confirmed_at)}</span>`
+            : l.waived_at ? '<span class="badge">Waived</span>'
+            : l.marked_paid_at
+              ? `<span class="badge grace"><span class="dot"></span>Says sent</span>
+                 <span class="muted"> ${fmtDateTime(l.marked_paid_at)}${
+                   l.marked_note ? ` · ${esc(l.marked_note)}` : ''}</span>`
+              : '<span class="badge lapsed"><span class="dot"></span>Outstanding</span>'}</td>
+          ${canConfirm ? `<td style="white-space:nowrap">
+            ${l.confirmed_at
+              ? `<button type="button" class="btn-sm" data-line="${l.id}" data-do="unconfirm">Undo</button>`
+              : `<button type="button" class="btn-sm" data-line="${l.id}" data-do="confirm">Received</button>
+                 <button type="button" class="btn-sm" data-line="${l.id}" data-do="waive">Waive</button>`}
+          </td>` : ''}
+        </tr>`).join('')}</tbody>
+      </table></div>`}`;
+
+  const dlg = openDialog(c.title || 'Capital call', body, async (v) => {
+    if (investor && !c.me?.marked_paid_at && !c.me?.confirmed_at)
+      await api(`/capital-calls/${id}/paid`, { method: 'POST', body: { note: v.note } });
+  }, investor && !c.me?.marked_paid_at && !c.me?.confirmed_at ? 'I have sent it' : 'Close');
+
+  dlg.querySelectorAll('[data-line]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await api(`/capital-calls/${id}/lines/${b.dataset.line}`,
+          { method: 'PUT', body: { action: b.dataset.do } });
+        dlg.close(); dlg.remove();
+        render();
+      } catch (err) { alert(err.message); b.disabled = false; }
+    }));
+  return dlg;
 }
 
 /* --------------------------- opportunities --------------------------- */
@@ -6050,7 +6247,8 @@ async function settingsView() {
              did not make is the person whose account it is. */''}
       <div class="card">
         <div class="card-head"><h2>Where you have signed in</h2><div class="spacer"></div>
-          <span class="muted" style="font-size:12px">last 50</span></div>
+          <span class="muted" style="font-size:12px">last 50</span>
+          ${myPlaces.length ? '<button class="btn-sm" id="forgetPlaces">Start this list again</button>' : ''}</div>
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Browser and network</th><th class="num">Sign-ins</th>
             <th>First</th><th>Most recent</th></tr></thead>
@@ -6069,7 +6267,11 @@ async function settingsView() {
             office from somewhere else, and not a record of where you are. A sign-in from
             a network this account has not used before puts a notice across the top of
             the screen. If you see one you did not make, change your password: it ends
-            every other session at once.</span>
+            every other session at once.<br><br>
+            If something in front of the application changes — a new office, or a service
+            in the way that answers from a different machine each time — every recorded
+            place can become the wrong shape at once. <strong>Start this list again</strong>
+            clears them: the next sign-in counts as a first one and raises nothing.</span>
         </div>
       </div>
 
@@ -6187,6 +6389,14 @@ async function settingsView() {
     html,
     after: () => {
       wireDocumentsCard(docs, funds, investors);
+
+      $('#forgetPlaces')?.addEventListener('click', async () => {
+        if (!confirm('Clear every recorded sign-in place for your account? The next sign-in '
+          + 'will be treated as your first and will not raise a notice.')) return;
+        await api('/security/locations', { method: 'DELETE' });
+        toast('Cleared');
+        render();
+      });
 
       $('#saveMailPrefs')?.addEventListener('click', async () => {
         const kinds = {};

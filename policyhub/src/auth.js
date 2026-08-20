@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { q, audit } from './db.js';
-import { noteSignIn } from './security.js';
+import { noteSignIn, clientIp } from './security.js';
 
 /**
  * The signing key. A session cookie asserts a user id and role, so anyone
@@ -361,7 +361,9 @@ const DECOY_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12);
 export async function login(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const ip = req.ip || 'unknown';
+  // Behind a CDN the socket address is the CDN's, and throttling every
+  // customer of that CDN as one address is not a throttle.
+  const ip = clientIp(req) || 'unknown';
 
   if (await tooManyAttempts(email, ip))
     return res

@@ -53,8 +53,33 @@ export function browserOf(userAgent) {
   return `${match(BROWSERS, ua)} on ${match(PLATFORMS, ua)}`;
 }
 
+/**
+ * The address the request actually came from.
+ *
+ * `req.ip` is the last hop Express is willing to trust, which behind a CDN is
+ * the CDN — and a CDN answers from whichever of its machines is nearest, so
+ * that address changes between sign-ins from the same desk. The first
+ * deployment of this alerted on every single sign-in, from 172.70.x one time
+ * and 172.71.x the next, which is worse than no alert at all: an alarm that
+ * always goes off is one nobody reads.
+ *
+ * So: the header the CDN sets for exactly this purpose, then the first entry
+ * of the forwarded chain, then whatever Express thinks. Client-set headers
+ * are only consulted when the app is running behind a proxy at all — which
+ * is the only situation where something in front of us is overwriting them.
+ */
+export function clientIp(req) {
+  if (req.app?.get?.('trust proxy')) {
+    const cdn = req.get?.('cf-connecting-ip') || req.get?.('true-client-ip');
+    if (cdn) return String(cdn).trim();
+    const chain = String(req.get?.('x-forwarded-for') || '').split(',')[0].trim();
+    if (chain) return chain;
+  }
+  return req.ip || '';
+}
+
 export const describeOrigin = (req) =>
-  `${browserOf(req.get?.('user-agent'))} · ${networkOf(req.ip)}`;
+  `${browserOf(req.get?.('user-agent'))} · ${networkOf(clientIp(req))}`;
 
 /* Hashed rather than stored plainly, for the same reason a password is: this
    table is the one an attacker would read to learn which networks look normal
@@ -88,6 +113,27 @@ export async function noteSignIn(req, user) {
   );
   const isNew = !firstEver && Number(seen[0].sign_ins) === 1;
   if (!isNew) return { isNew: false, label };
+
+  /* One more gate before crying wolf.
+   *
+   * If this account has already been seen from several different networks on
+   * the same browser in the past day, the address is not telling us anything
+   * — it is a phone moving between masts, an office behind a CDN, a VPN
+   * picking a different exit. Record the location, skip the alarm. Somebody
+   * signing in on an unfamiliar BROWSER is still worth a word, so this only
+   * suppresses when the browser is one they already use.
+   */
+  const browser = label.split(' · ')[0];
+  const { rows: churn } = await q(
+    `SELECT COUNT(*)::int AS n FROM login_locations
+      WHERE user_id = $1 AND label LIKE $2 AND last_seen > now() - INTERVAL '24 hours'`,
+    [user.id, `${browser} · %`]);
+  if (Number(churn[0].n) >= 3) {
+    await audit(user.id, 'user', user.id, 'login',
+      `signed in from ${label} — not flagged, this account has used ${churn[0].n} `
+      + `networks on ${browser} today`);
+    return { isNew: false, label, noisy: true };
+  }
 
   await q(
     `INSERT INTO security_notices (user_id, kind, detail, actor_id)

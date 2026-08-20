@@ -50,12 +50,21 @@ export const MAIL_KINDS = [
   { kind: 'agreement_out', label: 'An agreement is waiting for a signature',
     who: 'investor',
     note: 'Sent when an operating agreement goes out to them.' },
+  { kind: 'capital_call', label: 'A capital call',
+    who: 'investor',
+    note: 'Sent when money is called for premiums — your share and the date it is needed by.' },
   { kind: 'agreement_signed', label: 'An agreement was signed',
     who: 'staff',
     note: 'Sent to whoever issued it, as each party signs.' },
 ];
-const KIND_SET = new Set(MAIL_KINDS.map((k) => k.kind));
-const FORCED = new Set(MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind));
+/* Kinds that exist but are not something anybody subscribes to, so they are
+   not on the preferences screen. `test` is asked for explicitly by the person
+   who wants it; there is nothing to opt out of. They still have to be listed
+   HERE, or the queue refuses them — which is exactly what it did. */
+const INTERNAL_KINDS = ['test'];
+const KIND_SET = new Set([...MAIL_KINDS.map((k) => k.kind), ...INTERNAL_KINDS]);
+const FORCED = new Set([
+  ...MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind), ...INTERNAL_KINDS]);
 
 /** Has this person switched this off? Forced kinds ignore the answer. */
 async function wants(userId, kind) {
@@ -260,6 +269,19 @@ export const TEMPLATES = {
         ? `${outstanding} ${outstanding === 1 ? 'party has' : 'parties have'} still to sign.`
         : `Every party has now signed. The executed copy has been filed against the entity.`)
       + `\n\n${link('/#/agreements')}`,
+  }),
+
+  capital_call: ({ name, amount, due, title, policies, note }) => ({
+    subject: `Capital call — ${amount} by ${due}`,
+    text: `${name ? `${name},\n\n` : ''}${title}.\n\n`
+      + `Your share is ${amount}, and it needs to be in the account by ${due}.\n\n`
+      + `It covers ${policies} premium${policies === 1 ? '' : 's'} falling due. The policies `
+      + `and the dates are on your portal, and so is a button to tell us once you have sent `
+      + `it: ${link('/#/premiums')}\n\n`
+      + (note ? `${note}\n\n` : '')
+      + `Wiring instructions have not changed. If you are not sure, telephone the office `
+      + `rather than replying — an email asking you to send money to a new account is the `
+      + `oldest trick there is, and we will never send you one.`,
   }),
 
   test: ({ who }) => ({

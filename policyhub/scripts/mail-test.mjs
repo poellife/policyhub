@@ -73,6 +73,17 @@ check('a message goes to the outbox, not down the wire', !!queued.id && received
 check('and it is waiting', (await outbox())[0].status === 'Queued');
 check('a kind nobody defined is refused rather than sent',
   !!(await queueMail({ to: TO, kind: 'invented', subject: 'x', text: 'y' })).error);
+/* Every template must be a kind the queue will actually accept. These were
+   two lists, and `test` was on one of them — so the Send-me-a-test button
+   answered "unknown mail kind test" instead of sending anything. */
+const unqueueable = [];
+for (const kind of Object.keys(TEMPLATES)) {
+  const r = await queueMail({ to: TO, kind, subject: 'shape check', text: 'shape check' });
+  if (r.error) unqueueable.push(`${kind}: ${r.error}`);
+}
+check('every template is a kind the queue accepts', unqueueable.length === 0,
+  unqueueable.join(' · '));
+await q(`DELETE FROM email_outbox WHERE to_email = $1 AND subject = 'shape check'`, [TO]);
 check('and no address at all is simply skipped',
   (await queueMail({ to: '', kind: 'portal_open', subject: 'x', text: 'y' })).skipped === 'no address');
 
@@ -217,6 +228,51 @@ check('an administrator can see whether the post is going out',
   typeof health.configured === 'boolean' && typeof health.counts === 'object');
 check('and nothing in that report is the contents of a message',
   !JSON.stringify(health).match(/body_text|body_html/));
+
+console.log('\nTHE BUTTON THAT PROVES IT');
+/* The whole path, through a server of its own started with a key: sign in,
+   press the button, and see the message arrive at the provider. Worth the
+   trouble because this is the exact path that broke — every piece below it
+   was tested, and the route on top still answered "unknown mail kind test".
+   A 503 when no key is set is not the same as a 200 when one is. */
+const { spawn } = await import('node:child_process');
+const PORT = 3411 + (process.pid % 40);
+const server = spawn(process.execPath, ['src/server.js'], {
+  cwd: new URL('..', import.meta.url).pathname,
+  env: { ...process.env, PORT: String(PORT),
+    SESSION_SECRET: 'mail-test-secret-mail-test-secret-0123',
+    RESEND_API_KEY: 'test-key-not-real',
+    MAIL_API_URL: `http://127.0.0.1:${port}/emails`,
+    MAIL_FROM: 'PolicyHub <notices@example.test>',
+    APP_URL: 'https://portal.example.test' },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+const up = await new Promise((resolve) => {
+  const bail = setTimeout(() => resolve(false), 25000);
+  server.stdout.on('data', (d) => {
+    if (String(d).includes('running')) { clearTimeout(bail); resolve(true); }
+  });
+});
+check('a server with a key set starts', up);
+if (up) {
+  const own = `http://127.0.0.1:${PORT}`;
+  const cookie = await login(ADMIN.email, ADMIN.password, own);
+  const before = received.length;
+  const r = await fetch(`${own}/api/mail/test`, { method: 'POST', headers: { Cookie: cookie } });
+  const body = await r.json();
+  check('the test button works rather than refusing its own message',
+    r.status === 200, `${r.status} ${JSON.stringify(body)}`);
+  check('and it actually reached the provider', received.length > before,
+    `${received.length - before} arrived`);
+  const last = received[received.length - 1];
+  check('addressed to whoever pressed it', last?.body?.to?.[0] === ADMIN.email,
+    last?.body?.to?.[0]);
+  check('saying what it is for',
+    /test/i.test(last?.body?.subject || ''), last?.body?.subject);
+  check('the reply says where it went', body.to === ADMIN.email, body.to);
+  await q(`DELETE FROM email_outbox WHERE kind = 'test' AND to_email = $1`, [ADMIN.email]);
+}
+server.kill();
 
 await wipe(); await clearPrefs();
 stub.close();

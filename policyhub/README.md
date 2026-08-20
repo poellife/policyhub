@@ -502,6 +502,45 @@ Two warnings the dialog raises that the policy version has no equivalent for:
 it keeps the price and the medical file for next time, and only an
 administrator sees a passed deal.
 
+## Capital calls
+
+A premium schedule says when the **carrier** wants the money. A capital call
+says when the **office** needs it in the account, split by who holds what —
+which is the only version an investor can act on.
+
+**Raise a capital call** is on the Servicing calendar, for administrators and
+managers. Choose a window (2 weeks to 6 months), and everything falling due
+inside it — carrier next-due dates and premiums posted to the schedule by hand
+— is split across the investors who hold those policies. The figures are shown
+before anything is sent, because this is the one message where being wrong
+costs somebody else money. Then one date the money has to be in by, and each
+investor is emailed **their own figure and that date**, never anybody else's.
+
+Four properties, each of which is a way to get this wrong:
+
+- **A notice does not change after it is sent.** What the call covers is copied
+  onto it, not joined to. A premium that moves next week does not rewrite what
+  somebody was already asked for.
+- **Nobody is asked for a percentage they do not hold.** Where a policy is only
+  70% allocated, the remaining 30% is named as the house's own share rather
+  than quietly spread over the investors.
+- **A claim is not a receipt.** An investor pressing *I have sent it* records
+  what they said. The office confirming it records what they saw. The two are
+  separate columns and separate totals — "claimed" and "received" — because
+  collapsing them means either treating a claim as money in the bank or giving
+  the investor no way to say anything at all. Confirming the last outstanding
+  line closes the call on its own.
+- **An investor sees their own line.** They see the total of the call and what
+  it covers, since that is how they check their own figure, and nothing about
+  who else was asked or for how much.
+
+A call with money confirmed against it cannot be deleted — it is **cancelled**,
+which keeps the record of what was asked and what came in.
+
+The notice deliberately carries **no wiring details**, and says so: an email
+asking somebody to send money to a new account is the oldest trick there is, and
+one the portal will never send.
+
 ## Sessions, exports and sign-ins
 
 Three controls against the realistic threat here, which is not a clever attack
@@ -546,6 +585,22 @@ Every sign-in is fingerprinted, and an unfamiliar one puts a notice across the
 top of the application for the account holder: what browser, what network,
 when, and what to do about it — change the password, which ends every other
 session at once. It stays until they say they have seen it.
+
+**The address has to be the client's, not the CDN's.** Behind a proxy the
+socket address is the proxy, and a CDN answers from whichever of its machines
+is nearest — so the first deployment of this alerted on *every* sign-in, from
+`172.70.x` one time and `172.71.x` the next. An alarm that always goes off is
+one nobody reads. `clientIp()` prefers the header the CDN sets for exactly this
+purpose (`CF-Connecting-IP`), then the first entry of the forwarded chain, and
+only consults either when the application is running behind a proxy at all.
+
+There is a second guard behind that one: if an account has already been seen
+from three or more networks on the **same browser** in the past day, the
+address is not telling us anything — a phone moving between masts, a VPN
+picking a different exit — so the location is recorded and the alarm is not
+raised. An unfamiliar *browser* is still worth a word. And Settings has
+**Start this list again**, for when something in front of the application
+changes and every recorded place becomes the wrong shape at once.
 
 The fingerprint is deliberately coarse. The address is kept as a **network**
 (the last octet dropped, the last groups of an IPv6 address), and the browser
@@ -1328,6 +1383,7 @@ reach those rules correctly.
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `capital-call-test.mjs` | what would be asked before it is, that a raised call stops moving, that a claim is not a receipt, and that an investor sees their own line and nobody else's |
 | `mail-test.mjs` | the outbox: that queueing never throws, that failures are retried and then given up on, that a switched-off kind is not sent and a security alert is anyway, and that no password, tax number or insured's name survives a template |
 | `investor-login-test.mjs` | opening a login with the record: that it only ever makes an investor account, who may do it, and that a staff-set password opens nothing until it is replaced |
 | `investor-login-ui-test.mjs` | the form not leading with passwords, the suggestion, and where an investor's first sign-in lands |
