@@ -37,6 +37,29 @@ services:
       - key: PGSSLMODE
         value: no-verify
 
+      # ---------------------------------------------------------------
+      #  Email
+      #
+      #  The portal sends security alerts, portal invitations and
+      #  agreement notices. Without a key it queues them and sends
+      #  nothing, which is the right behaviour for a deployment that has
+      #  not been given one — not a reason to fail to start.
+      #
+      #  MAIL_FROM must be an address on a domain verified with the
+      #  provider, or every message bounces.
+      # ---------------------------------------------------------------
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # Where the links in those messages point. Without it they point at
+      # the default Render address, which works but reads like a stranger.
+      - key: APP_URL
+        sync: false
+      # Optional: where a reply goes, if not the sending address.
+      - key: MAIL_REPLY_TO
+        sync: false
+
 databases:
   - name: policyhub-db
     plan: basic-256mb

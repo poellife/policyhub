@@ -1125,6 +1125,55 @@ form that keeps resetting:
 One helper wires all three boxes — policies, insureds, investors — because they
 were three copies of the same four lines and had already drifted apart.
 
+## Email
+
+The portal sends five kinds of message: a sign-in from a new place, a bulk
+export, a portal account being opened, an agreement going out for signature,
+and a signature arriving. Each is queued **inside the request that causes it**
+and sent afterwards by a worker, so a provider being slow or down delays the
+post and nothing else. Queueing never throws: an investor who cannot be emailed
+is still an investor who was created.
+
+A message that fails is retried with a widening gap — one minute, five,
+twenty-five — up to five attempts. A failure that will not change (a bad
+address, an unverified domain: any 4xx that is not a rate limit) is given up on
+at once, because retrying it for a day only hides it. Everything that failed is
+on Settings → **The post**, with the provider's own words.
+
+**What is never in an email**: a password, a tax number, an insured's name, or
+a figure that identifies somebody else's position. Email is not a place we
+control. The message that tells an investor their account is ready says the
+address they sign in with and explicitly says the password is *not* in it — the
+office gives them that directly. `scripts/mail-test.mjs` hands every template a
+password, a tax number and an insured's name and checks that none of them comes
+out the other side.
+
+Each person chooses what they hear about, on Settings → **Email**. Two kinds
+cannot be switched off: a sign-in from somewhere new, and somebody exporting the
+book. An administrator does not get to stop hearing the alert that matters
+precisely when it was not them.
+
+### Setting it up
+
+Four environment variables, and the deployment runs without them — messages
+queue and wait rather than the service failing to start:
+
+| Variable | What it is |
+|---|---|
+| `RESEND_API_KEY` | The provider key. Without it the worker does not start. |
+| `MAIL_FROM` | `PolicyHub <notices@yourdomain.com>` — must be a **verified** domain, or everything bounces. |
+| `APP_URL` | Where the links point. Without it they point at the default Render address, which works but reads like a stranger. |
+| `MAIL_REPLY_TO` | Optional, where a reply goes if not the sending address. |
+
+Settings → Email has **Send me a test**, which queues a message, sends it
+immediately rather than waiting for the worker, and reports what the provider
+said. It is the fastest way to tell a DNS problem from a key problem.
+
+`MAIL_API_URL` overrides the provider endpoint. It exists so the test suite can
+point at a stub it controls rather than sending real mail to find out whether
+the queue works — and so that swapping providers is one variable plus whatever
+differs in the request shape.
+
 ## Number formatting
 
 Stat tiles, table totals and every money figure in the interface and reports show
@@ -1279,6 +1328,7 @@ reach those rules correctly.
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `mail-test.mjs` | the outbox: that queueing never throws, that failures are retried and then given up on, that a switched-off kind is not sent and a security alert is anyway, and that no password, tax number or insured's name survives a template |
 | `investor-login-test.mjs` | opening a login with the record: that it only ever makes an investor account, who may do it, and that a staff-set password opens nothing until it is replaced |
 | `investor-login-ui-test.mjs` | the form not leading with passwords, the suggestion, and where an investor's first sign-in lands |
 | `search-ui-test.mjs` | typing slowly without losing the caret, typing through a slow answer, a late answer not winning, and one request per search |
