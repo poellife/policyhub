@@ -1076,6 +1076,7 @@ dialog.wide { width: 760px; }
 }
 .doc-sig-rule { border-bottom: 1px solid var(--text-primary); }
 .doc-sig-name { font-family: var(--font); font-size: 12.5px; margin-top: 5px; }
+.doc-sig-by { font-family: var(--font); font-size: 12px; margin-top: 3px; }
 .doc-sig-note { font-family: var(--font); font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .doc-break { border-top: 1px dashed var(--grid); margin: 30px 0 22px; }
 
@@ -1207,3 +1208,34 @@ table.dlg-list td:nth-child(2) { width: 34%; overflow: hidden; text-overflow: el
    "$14,049,49" is a different number; starting the figure at a known left
    position means anything lost is trailing space. */
 table.dlg-list td.dlg-amt { width: 30%; text-align: left; }
+
+/* --------------------- security bar and notices ---------------------- */
+/* Across the top of the application, above everything, because a sign-in
+   somebody did not make is more urgent than whatever they came here to do. */
+.security-bar {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 22px; font-size: 13px; line-height: 1.5;
+  background: var(--critical-tint); color: var(--text-primary);
+  border-bottom: 1px solid var(--critical, #b4232a);
+}
+.security-bar.warn { background: var(--serious-tint); border-bottom-color: var(--axis); }
+.security-bar .security-mark {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  display: grid; place-items: center; margin-top: 1px;
+  background: var(--critical); color: #fff;
+  font-size: 12px; font-weight: 700;
+}
+.security-bar.warn .security-mark { background: var(--text-secondary); }
+.security-bar .security-text { flex: 1; min-width: 0; }
+.security-bar .btn-sm { flex: none; }
+@media print { .security-bar { display: none; } }
+
+.notice-box {
+  padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+  background: var(--sunken); border: 1px solid var(--axis); margin-bottom: 14px;
+}
+
+/* A tick on an opportunity card. Sits in the head rather than floating over
+   the corner, so it cannot land on top of the insured's name at any width. */
+.opp-tick { display: flex; align-items: flex-start; padding: 2px 10px 0 0; cursor: pointer; }
+.opp-tick input { width: 16px; height: 16px; margin: 0; cursor: pointer; }

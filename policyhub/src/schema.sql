@@ -893,3 +893,69 @@ CREATE TABLE IF NOT EXISTS user_prefs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, name)
 );
+
+/* ---------------------------------------------------------------------
+    Where somebody signs in from, and what they should be told about it.
+
+    The realistic breach here is not a clever attack on the application; it
+    is a password that has been phished or reused. The one signal that
+    produces is a sign-in from somewhere the account has never been used
+    before — so every sign-in is fingerprinted and, when the fingerprint is
+    new, the account holder is told the next time they look at a screen.
+
+    Deliberately coarse. The address is kept as a network prefix (the last
+    octet dropped, or the last 80 bits of an IPv6 address), which is enough
+    to tell "your usual office" from "somewhere else entirely" and is not a
+    log of where an employee physically is. The browser is recorded as a
+    family — Chrome on macOS — not as the full user-agent string.
+   --------------------------------------------------------------------- */
+CREATE TABLE IF NOT EXISTS login_locations (
+  id          SERIAL PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  fingerprint TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sign_ins    INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (user_id, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_login_locations_user ON login_locations (user_id);
+
+/* Things somebody needs to be told, rather than things the system needs to
+   remember — which is why these are separate from the audit log. A notice is
+   addressed to one person, it is shown to them until they have seen it, and
+   it says what to do about it. */
+CREATE TABLE IF NOT EXISTS security_notices (
+  id         SERIAL PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL,            -- new_location | bulk_export
+  detail     TEXT NOT NULL DEFAULT '',
+  actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  seen_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_security_notices_user
+  ON security_notices (user_id, seen_at, created_at DESC);
+
+/* ---------------------------------------------------------------------
+    Signing on behalf of an entity.
+
+    A company, trust or IRA cannot hold a pen. When the party to an
+    agreement is one, two things have to be on the signature line: the
+    entity, which is the party, and the human being signing for it, in the
+    capacity that gives them the authority to. "Kestrel Holdings LLC" alone
+    is not a signature; "Ellen Ward, Managing Member" alone binds Ellen.
+
+    `party_type` is copied from the investor record when the party is put
+    on the agreement, and then left alone. The requirement has to be fixed
+    at the moment the document is drawn, not re-read from a record somebody
+    might edit while it is out for signature.
+   --------------------------------------------------------------------- */
+ALTER TABLE agreement_signers ADD COLUMN IF NOT EXISTS party_type TEXT NOT NULL DEFAULT 'Individual';
+ALTER TABLE agreement_signers ADD COLUMN IF NOT EXISTS signed_by_name  TEXT NOT NULL DEFAULT '';
+ALTER TABLE agreement_signers ADD COLUMN IF NOT EXISTS signed_by_title TEXT NOT NULL DEFAULT '';
+
+/* The manager is the firm, which is itself an entity — so an agreement drawn
+   before this existed gets the same treatment as one drawn after it. */
+UPDATE agreement_signers SET party_type = 'Entity'
+ WHERE role = 'Manager' AND party_type = 'Individual';

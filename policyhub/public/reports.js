@@ -427,18 +427,11 @@ function buildForecastWindow(d, o) {
       </table>
     </div>`}
 
-    ${d.noSchedule.length ? `<div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">Not included — incomplete schedule</h3>
-      <p class="rpt-note">These policies are in force but could not be projected. Their premiums
-        are <strong>not</strong> in the totals above.</p>
-      <table class="rpt-table">
-        <thead><tr><th>Insured</th><th>Carrier</th><th>Policy no.</th><th>Reason</th></tr></thead>
-        <tbody>${d.noSchedule.map((p) => `<tr>
-          <td class="strong">${esc(p.insured)}</td><td>${esc(p.carrier_name)}</td>
-          <td>${esc(p.policy_number)}</td><td>${esc(p.reason)}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>` : ''}
+    ${/* No table of policies that could not be projected. The report answers
+          what has to be funded; a list of records with a field missing is a
+          data-entry job, not a capital requirement, and printing it under the
+          totals invites somebody to read it as money. It is on screen under
+          Servicing, where the fixing happens. */''}
 
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">Basis of this window</h3>
@@ -516,18 +509,11 @@ function buildForecast(d, o) {
       </table>
     </div>` : ''}
 
-    ${d.noSchedule.length ? `<div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">Not included — incomplete schedule</h3>
-      <p class="rpt-note">These policies are in force but could not be projected. Their premiums
-        are <strong>not</strong> in the totals above.</p>
-      <table class="rpt-table">
-        <thead><tr><th>Insured</th><th>Carrier</th><th>Policy no.</th><th>Reason</th></tr></thead>
-        <tbody>${d.noSchedule.map((p) => `<tr>
-          <td class="strong">${esc(p.insured)}</td><td>${esc(p.carrier_name)}</td>
-          <td>${esc(p.policy_number)}</td><td>${esc(p.reason)}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>` : ''}
+    ${/* No table of policies that could not be projected. The report answers
+          what has to be funded; a list of records with a field missing is a
+          data-entry job, not a capital requirement, and printing it under the
+          totals invites somebody to read it as money. It is on screen under
+          Servicing, where the fixing happens. */''}
 
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">Basis of projection</h3>

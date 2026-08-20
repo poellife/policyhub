@@ -52,6 +52,10 @@ const state = {
      row, so a selection survives sorting, searching and filtering — you can
      pick three from a carrier search, change the search, and pick two more. */
   selected: new Set(),
+  /* Opportunities ticked for deletion, on the same principle as `selected`
+     above: a Set of ids, so a selection survives showing and hiding the
+     closed ones. */
+  oppSelected: new Set(),
   /* How this person has arranged the policies grid: which columns, in what
      order. Loaded once at sign-in and saved back whenever it changes, so it
      follows them from one machine to the next rather than living in this
@@ -305,8 +309,38 @@ const csvCell = (value) => {
   return `"${s.replace(/"/g, '""')}"`;
 };
 
-/** Download an array of objects as CSV. */
-function exportCsv(filename, rows, columns) {
+/**
+ * Download an array of objects as CSV — an administrator's act.
+ *
+ * The likeliest way this data leaves the building is not a stolen database;
+ * it is one signed-in person pressing Export and walking off with the book.
+ * So the server is asked first, and it records what was taken and tells every
+ * other administrator. If it says no, no file is written.
+ *
+ * What this does not do is make copying impossible — anybody who can read a
+ * screen can retype it, and anybody who can call the API can page through it.
+ * It makes the easy path privileged, and it makes the record exist.
+ */
+async function exportCsv(filename, rows, columns, kind) {
+  try {
+    await api('/exports', { method: 'POST', body: {
+      kind: kind || filename.replace(/\.csv$/, ''),
+      rows: rows.length,
+      scope: [state.filters?.fund, state.filters?.status, state.filters?.search]
+        .filter(Boolean).join(' · '),
+    } });
+  } catch (err) {
+    alert(err.message === 'You do not have permission to do that'
+      ? 'Exporting the book is an administrator’s job. Everything here is on '
+        + 'screen, and a report can be printed from Reports.'
+      : `That export was not recorded, so nothing was downloaded: ${err.message}`);
+    return;
+  }
+  writeCsv(filename, rows, columns);
+}
+
+/** The file itself. Separated so that nothing can write one without asking. */
+function writeCsv(filename, rows, columns) {
   const head = columns.map((c) => csvCell(c.header)).join(',');
   const body = rows.map((r) =>
     columns.map((c) => csvCell(typeof c.get === 'function' ? c.get(r) : r[c.key])).join(',')
@@ -318,6 +352,34 @@ function exportCsv(filename, rows, columns) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+/**
+ * Wire a search box.
+ *
+ * One helper for all of them, because they were three copies of the same four
+ * lines and had already drifted apart: how long to wait, whether an unchanged
+ * term refetches, and whether the page is redrawn whole or under the menu.
+ *
+ * 300ms is long enough that an ordinary typist finishes a word before anything
+ * is fetched, and short enough that a pause feels like an answer.
+ */
+function wireSearch(selector, apply) {
+  const el = $(selector);
+  if (!el) return;
+  let timer;
+  let last = el.value;
+  el.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const term = el.value;
+      // Backspacing to where you already were is not a new search.
+      if (term === last) return;
+      last = term;
+      apply(term);
+      render({ soft: true });
+    }, 300);
+  });
 }
 
 /* ------------------------------ router ------------------------------- */
@@ -486,7 +548,70 @@ function shell(inner) {
         <button class="btn-sm" id="logoutBtn">Sign out</button>
       </div>
     </div>
+    <div id="securityBanner"></div>
     <div class="main" id="main">${inner}</div>`;
+}
+
+/**
+ * "You signed in from somewhere new."
+ *
+ * The one thing a phished password reliably produces is a sign-in from a
+ * place the account has never been used. Telling the account holder is the
+ * whole control — so it is a banner across the top of the application, not a
+ * line in a log nobody opens, and it names the browser and the network so
+ * they can tell at a glance whether it was them on their phone or somebody
+ * else entirely.
+ *
+ * An administrator additionally hears when anybody exports the book.
+ */
+async function showSecurityNotices() {
+  if (!$('#securityBanner')) return;
+  let data;
+  try {
+    data = await api('/me/notices');
+  } catch {
+    return;                        // never let this get in the way of the work
+  }
+  /* Re-read the slot after the await. A navigation during the round trip
+     replaces the shell, and writing into the old one puts a banner on a node
+     that is no longer on the page — with handlers bound to nothing. */
+  const bar = $('#securityBanner');
+  if (!bar) return;
+  if (!data.unseen?.length) { bar.innerHTML = ''; return; }
+
+  const wording = (n) => (n.kind === 'new_location'
+    ? `<strong>New sign-in from a place this account has not been used before.</strong>
+       ${esc(n.detail)} · ${fmtDateTime(n.created_at)}.
+       If that was not you, change your password now — doing so signs out every
+       other browser at once.`
+    : `<strong>${esc(n.detail)}</strong> · ${fmtDateTime(n.created_at)}.`);
+
+  bar.innerHTML = `
+    <div class="security-bar">
+      <span class="security-mark" aria-hidden="true">!</span>
+      <div class="security-text">
+        ${data.unseen.map((n) => `<div>${wording(n)}</div>`).join('')}
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          You are on ${esc(data.here)} right now.</div>
+      </div>
+      <div class="spacer"></div>
+      ${data.unseen.some((n) => n.kind === 'new_location')
+        ? '<button class="btn-sm" id="secPassword">Change password</button>' : ''}
+      <button class="btn-sm" id="secSeen">That was expected</button>
+    </div>`;
+
+  /* Straight to the form rather than a dialog of its own: changing a password
+     is the recommended action here, and it lives on one page already. */
+  $('#secPassword', bar)?.addEventListener('click', () => {
+    go('#/settings');
+    setTimeout(() => $('#pwForm')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 400);
+  });
+  $('#secSeen', bar)?.addEventListener('click', async () => {
+    bar.innerHTML = '';
+    try {
+      await api('/me/notices/seen', { method: 'POST', body: { ids: data.unseen.map((n) => n.id) } });
+    } catch { /* it will simply be shown again next time */ }
+  });
 }
 
 /* ------------------------------- login ------------------------------- */
@@ -499,7 +624,8 @@ function loginView() {
         <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
         <div class="login-head">Policy<br><span class="dim">Portfolio.</span></div>
         <div class="login-sub">Life Settlements</div>
-        <div id="loginError"></div>
+        <div id="loginError">${state.signedOutReason
+          ? `<div class="notice-box">${esc(state.signedOutReason)}</div>` : ''}</div>
         <form id="loginForm">
           <div class="field">
             <label for="email">Email</label>
@@ -534,6 +660,8 @@ function wireLogin() {
       // The login response is minimal; /auth/me carries the scope details the
       // interface needs (investor name, manager entities).
       state.user = await api('/auth/me');
+      state.signedOutReason = null;
+      noteActivity();
       await loadPrefs();
       location.hash = '#/dashboard';
       await render();
@@ -1150,7 +1278,7 @@ async function policiesView() {
       <div class="spacer"></div>
       ${shareToggle()}
       <button id="columnsBtn">Columns</button>
-      <button id="exportBtn">Export CSV</button>
+      ${isAdminUser() ? '<button id="exportBtn">Export CSV</button>' : ''}
       ${canEditData() ? '<button class="primary" id="newPolicyBtn">New policy</button>' : ''}
     </div>
 
@@ -1231,13 +1359,11 @@ async function policiesView() {
   return {
     html,
     after: () => {
-      let timer;
-      $('#searchInput').addEventListener('input', (e) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => { state.filters.search = e.target.value; render(); }, 250);
-      });
-      $('#statusFilter').addEventListener('change', (e) => { state.filters.status = e.target.value; render(); });
-      $('#fundFilter')?.addEventListener('change', (e) => { state.filters.fund = e.target.value; render(); });
+      wireSearch('#searchInput', (term) => { state.filters.search = term; });
+      $('#statusFilter').addEventListener('change', (e) => {
+        state.filters.status = e.target.value; render({ soft: true }); });
+      $('#fundFilter')?.addEventListener('change', (e) => {
+        state.filters.fund = e.target.value; render({ soft: true }); });
       $('#columnsBtn').addEventListener('click', () => openColumnsDialog());
 
       /* A heading does two jobs: click it to sort, drag it to move the column.
@@ -1309,7 +1435,7 @@ async function policiesView() {
       $('#clearTicks')?.addEventListener('click', () => { state.selected.clear(); render(); });
       $('#bulkDeleteBtn')?.addEventListener('click', () => openBulkDeleteDialog());
 
-      $('#exportBtn').addEventListener('click', () => {
+      $('#exportBtn')?.addEventListener('click', () => {
         // The export has to obey the same two rules as the screen: an
         // investor's figures are their share, and the carrier mechanics are
         // not theirs to have. A spreadsheet outlives the page it came from.
@@ -1340,7 +1466,7 @@ async function policiesView() {
           { header: 'Total Invested', get: (r) => Number(r.total_invested || 0) * f(r) },
           ...(mine ? [] : [{ header: 'Date Of Last Withdrawal', key: 'date_of_last_withdrawal' }]),
           { header: 'Status', key: 'status' },
-        ]);
+        ], 'policies');
       });
       $('#newPolicyBtn')?.addEventListener('click', () => openPolicyDialog());
       wireShareToggle();
@@ -3048,6 +3174,10 @@ async function opportunitiesView() {
       o.status === 'Passed' ? 'passed' : ''}"
          data-opp="${o.id}">
       <div class="opp-head">
+        ${isAdminUser() ? `<label class="opp-tick" title="Choose for deletion">
+          <input type="checkbox" data-opp-tick="${o.id}"
+            aria-label="Select ${esc(oppName(o))}"
+            ${state.oppSelected.has(o.id) ? 'checked' : ''}></label>` : ''}
         <div>
           <div class="opp-title">${esc(oppName(o))}</div>
           <div class="opp-sub">${esc(o.carrier_name || '—')}
@@ -3112,6 +3242,26 @@ async function opportunitiesView() {
         ? '<button class="primary" id="newOppBtn">New opportunity</button>' : ''}
     </div>
 
+    ${/* Clearing a shelf is an administrator's act. A manager can still delete
+          one at a time from its own page, which is the deliberate act this is
+          not. */''}
+    ${isAdminUser() && state.oppSelected.size ? `
+    <div class="bulk-bar" id="oppBulkBar">
+      <strong>${state.oppSelected.size} ${
+        state.oppSelected.size === 1 ? 'opportunity' : 'opportunities'} selected</strong>
+      ${(() => {
+        const onScreen = [...live, ...(showAll ? [...rest, ...passed] : [])]
+          .filter((o) => state.oppSelected.has(o.id)).length;
+        const off = state.oppSelected.size - onScreen;
+        return off > 0 ? `<span class="muted">${off} of them not on screen — showing and
+          hiding the closed ones does not clear a selection</span>` : '';
+      })()}
+      <div class="spacer"></div>
+      <button class="btn-sm" id="oppClearTicks">Clear selection</button>
+      <button class="btn-danger" id="oppBulkDeleteBtn">Delete ${state.oppSelected.size} ${
+        state.oppSelected.size === 1 ? 'opportunity' : 'opportunities'}</button>
+    </div>` : ''}
+
     ${live.length === 0 ? `
       <div class="card"><div class="card-body"><div class="empty">
         ${isInvestorUser()
@@ -3148,9 +3298,25 @@ async function opportunitiesView() {
       });
       document.querySelectorAll('.opp-card').forEach((c) =>
         c.addEventListener('click', (e) => {
-          if (e.target.closest('a,button')) return;
+          // A tick is not a navigation. Without this, choosing a deal to
+          // delete opens it instead.
+          if (e.target.closest('a,button,.opp-tick')) return;
           go(`#/opportunity/${c.dataset.opp}`);
         }));
+      /* Ticking re-renders, because the bar and the cards read from the same
+         selection — patching one by hand is how it ends up saying something
+         the other disagrees with. */
+      document.querySelectorAll('[data-opp-tick]').forEach((box) =>
+        box.addEventListener('change', () => {
+          const id = Number(box.dataset.oppTick);
+          if (box.checked) state.oppSelected.add(id); else state.oppSelected.delete(id);
+          render();
+        }));
+      $('#oppClearTicks')?.addEventListener('click', () => {
+        state.oppSelected.clear();
+        render();
+      });
+      $('#oppBulkDeleteBtn')?.addEventListener('click', () => openBulkDeleteOppsDialog());
     },
   };
 }
@@ -3927,6 +4093,87 @@ function openPassDialog(o) {
   }, 'Pass on it');
 }
 
+/**
+ * Clearing a shelf of them.
+ *
+ * The same shape as the policy version, and deliberately so — the count
+ * typed out, what goes named before it goes, and the softer answer offered
+ * first. What differs is what is actually at stake: an opportunity carries
+ * no ledger and no cap table, so the thing worth warning about is the
+ * people. A deal shared with eleven investors, two of whom have asked for a
+ * piece, disappears from their screens with no explanation unless somebody
+ * gives them one.
+ */
+async function openBulkDeleteOppsDialog() {
+  const ids = [...state.oppSelected];
+  let tally;
+  try {
+    tally = await api('/opportunities/bulk-delete/preview', { method: 'POST', body: { ids } });
+  } catch (err) { alert(err.message); return; }
+
+  if (tally.missing?.length) {
+    // Somebody else has been working too. Drop them and say so.
+    for (const id of tally.missing) state.oppSelected.delete(id);
+    if (!tally.count) { toast('Those opportunities have already been deleted'); render(); return; }
+  }
+
+  /* Three columns, like the policy version: who, where from, how big. The
+     status rides with the carrier rather than taking a column of its own —
+     a fourth column costs the money its last digits at this width. */
+  const list = tally.opportunities.map((o) => `<tr>
+      <td class="strong">${esc([o.insured_last_name, o.insured_first_name]
+        .filter(Boolean).join(', ') || o.policy_number || '—')}</td>
+      <td>${esc(o.carrier_name || '—')}${o.status !== 'Open'
+        ? ` <span class="muted">· ${esc(o.status)}</span>` : ''}</td>
+      <td class="dlg-amt">${money(o.face_amount)}</td>
+    </tr>`).join('');
+
+  const body = `
+    <p style="margin:0 0 14px;font-size:14px">
+      This permanently deletes <strong>${tally.count}
+      ${tally.count === 1 ? 'opportunity' : 'opportunities'}</strong>, their premium schedules,
+      who they were shared with and any requests against them.
+    </p>
+    <div class="dlg-scroll">
+      <table class="data dlg-list"><tbody>${list}</tbody></table>
+    </div>
+    <table class="data" style="margin-bottom:16px"><tbody>
+      <tr><td>Shared with investors</td><td class="strong">${tally.shares}</td></tr>
+      <tr><td>Requests outstanding or confirmed</td><td class="strong">${tally.requests}</td></tr>
+      <tr><td>Premium schedule rows</td><td class="strong">${tally.premiums}</td></tr>
+    </tbody></table>
+    ${tally.requests ? `<div class="error-box" style="margin-bottom:16px">
+      ${tally.requests} investor ${tally.requests === 1 ? 'request has' : 'requests have'} been
+      made against ${tally.count === 1 ? 'this deal' : 'these deals'}. Deleting removes
+      ${tally.count === 1 ? 'it' : 'them'} from those investors' screens without a word — tell
+      them first, or use <strong>Pass</strong>, which keeps the record and the reason.
+    </div>` : ''}
+    ${tally.funded ? `<div class="error-box" style="margin-bottom:16px">
+      ${tally.funded === 1 ? 'One of these was funded' : `${tally.funded} of these were funded`}
+      and became ${tally.funded === 1 ? 'a policy' : 'policies'}. The
+      ${tally.funded === 1 ? 'policy stays' : 'policies stay'} in the portfolio, but the record of
+      where ${tally.funded === 1 ? 'it' : 'they'} came from — the asking price, the LE, who was
+      offered what — goes.
+    </div>` : ''}
+    <p style="margin:0 0 14px;font-size:13px" class="secondary">
+      If you are simply not doing these deals, <strong>Pass</strong> on each is the better answer:
+      it keeps the price and the medical file for next time, and only an administrator sees them.
+    </p>
+    ${inputField(`Type <b>${esc(tally.confirm_phrase)}</b> to confirm`, 'confirm', '', 'text',
+      'required autocomplete=off')}`;
+
+  openDialog(`Delete ${tally.count} ${tally.count === 1 ? 'opportunity' : 'opportunities'}`, body,
+    async (v) => {
+      if (String(v.confirm || '').trim() !== tally.confirm_phrase)
+        throw new Error(`Type ${tally.confirm_phrase} exactly to confirm.`);
+      const out = await api('/opportunities/bulk-delete', { method: 'POST', body: {
+        ids: tally.opportunities.map((o) => o.id), confirm: v.confirm.trim() } });
+      state.oppSelected.clear();
+      toast(`${out.deleted} deleted`);
+      refreshOppCount();
+    }, `Delete ${tally.count}`);
+}
+
 /** Deleting it outright — the record and everything hanging off it. */
 function openDeleteOppDialog(o) {
   const label = o.policy_number || o.insured_last_name || String(o.id);
@@ -4177,7 +4424,7 @@ async function carryView() {
             `<option value="${v}" ${status === v ? 'selected' : ''}>${label}</option>`).join('')}
       </select>
       ${entityPicker(funds)}
-      ${d.rows.length ? '<button id="exportCarryBtn">Export CSV</button>' : ''}
+      ${d.rows.length && isAdminUser() ? '<button id="exportCarryBtn">Export CSV</button>' : ''}
     </div>
 
     <div class="kpi-row">
@@ -4294,7 +4541,7 @@ async function carryView() {
           { header: 'Profit', key: 'gross_profit' },
           { header: 'Carried Interest', key: 'carry' },
           { header: 'To Investors', key: 'net_profit' },
-        ]));
+        ], 'carried-interest'));
     },
   };
 }
@@ -4340,7 +4587,7 @@ async function maturitiesView() {
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
-      ${rows.length ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
+      ${rows.length && isAdminUser() ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
     </div>
 
     ${rows.length === 0 ? `
@@ -4491,7 +4738,7 @@ async function maturitiesView() {
             : (Number(r.proceeds_amount) - Number(r.total_invested || 0)) * shareFactor(r)) },
           { header: 'Return %', get: (r) => (r.rate == null ? '' : (r.rate * 100).toFixed(4)) },
           { header: 'Days Held', key: 'rate_days' },
-        ]));
+        ], 'maturities'));
     },
   };
 }
@@ -4537,7 +4784,7 @@ async function insuredsView() {
           avgAge ? ` · average age ${avgAge}` : ''}</div></div>
       <div class="spacer"></div>
       ${entityPicker(funds)}
-      <button id="exportInsuredsBtn">Export CSV</button>
+      ${isAdminUser() ? '<button id="exportInsuredsBtn">Export CSV</button>' : ''}
       ${canEditData() ? '<button class="primary" id="newInsuredBtn">New insured</button>' : ''}
     </div>
 
@@ -4575,19 +4822,15 @@ async function insuredsView() {
   return {
     html,
     after: () => {
-      let timer;
       wireEntityPicker();
-      $('#insuredSearch').addEventListener('input', (e) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => { state.insuredSearch = e.target.value; render(); }, 250);
-      });
+      wireSearch('#insuredSearch', (term) => { state.insuredSearch = term; });
       $('#newInsuredBtn')?.addEventListener('click', () => openInsuredDialog(null));
       document.querySelectorAll('[data-edit-insured]').forEach((b) =>
         b.addEventListener('click', async () => {
           const ins = await api(`/insureds/${b.dataset.editInsured}`);
           openInsuredDialog(ins);
         }));
-      $('#exportInsuredsBtn').addEventListener('click', () =>
+      $('#exportInsuredsBtn')?.addEventListener('click', () =>
         exportCsv('insureds.csv', rows, [
           { header: 'Last Name', key: 'last_name' },
           { header: 'First Name', key: 'first_name' },
@@ -4600,7 +4843,7 @@ async function insuredsView() {
           { header: 'LE Provider', key: 'le_provider' },
           { header: 'Policies', key: 'policy_count' },
           { header: 'Date Of Death', key: 'date_of_death' },
-        ]));
+        ], 'insureds'));
     },
   };
 }
@@ -4798,11 +5041,7 @@ async function investorsView() {
   return {
     html,
     after: () => {
-      let timer;
-      $('#investorSearch').addEventListener('input', (e) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => { state.investorSearch = e.target.value; render(); }, 250);
-      });
+      wireSearch('#investorSearch', (term) => { state.investorSearch = term; });
       wireEntityPicker();
       $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
       $('#appShowAll')?.addEventListener('click', () => {
@@ -5473,7 +5712,7 @@ async function settingsView() {
   // Anything beyond the password panel is off-limits to scoped accounts.
   const accountOnly = isInvestorUser() || isManagerUser();
   const investorUser = accountOnly;
-  const [users, audit, funds, docs, investors] = await Promise.all([
+  const [users, audit, funds, docs, investors, myPlaces, firmNotices] = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
     accountOnly ? Promise.resolve([]) : api('/funds'),
@@ -5481,6 +5720,10 @@ async function settingsView() {
     // investor's own copies, on the one page they have for them.
     isInvestorUser() ? api('/documents').catch(() => []) : Promise.resolve([]),
     isInvestorUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
+    // Everybody can see where their own account has been used. Only an
+    // administrator sees the firm's.
+    api('/security/locations').catch(() => []),
+    isAdmin ? api('/security/notices').catch(() => []) : Promise.resolve([]),
   ]);
   state.funds = funds;
   const canPost = ['admin', 'editor', 'manager'].includes(state.user.role);
@@ -5549,6 +5792,60 @@ async function settingsView() {
           so it is safe to run twice.</span>
         </div>
       </div>`}
+
+      ${/* Where this account has been used. Shown to everybody, including
+             investors, because the person best placed to spot a sign-in they
+             did not make is the person whose account it is. */''}
+      <div class="card">
+        <div class="card-head"><h2>Where you have signed in</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">last 50</span></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Browser and network</th><th class="num">Sign-ins</th>
+            <th>First</th><th>Most recent</th></tr></thead>
+          <tbody>${myPlaces.length === 0
+            ? '<tr><td colspan="4"><div class="empty">Nothing recorded yet.</div></td></tr>'
+            : myPlaces.map((l) => `<tr>
+              <td class="strong">${esc(l.label)}</td>
+              <td class="num">${l.sign_ins}</td>
+              <td class="muted">${fmtDateTime(l.first_seen)}</td>
+              <td>${fmtDateTime(l.last_seen)}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+        <div class="card-body" style="border-top:1px solid var(--grid);padding-top:12px">
+          <span class="muted" style="font-size:12px">
+            The address is kept as a network, not a full address — enough to tell your
+            office from somewhere else, and not a record of where you are. A sign-in from
+            a network this account has not used before puts a notice across the top of
+            the screen. If you see one you did not make, change your password: it ends
+            every other session at once.</span>
+        </div>
+      </div>
+
+      ${isAdmin ? `
+      <div class="card">
+        <div class="card-head"><h2>Security notices</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">the firm · last 90 days</span></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>When</th><th>What</th><th>Account</th><th>Seen</th></tr></thead>
+          <tbody>${firmNotices.length === 0
+            ? '<tr><td colspan="4"><div class="empty">Nothing to report.</div></td></tr>'
+            : firmNotices.slice(0, 60).map((n) => `<tr>
+              <td class="strong">${fmtDateTime(n.created_at)}</td>
+              <td>${n.kind === 'new_location'
+                ? '<span class="badge grace"><span class="dot"></span>New location</span>'
+                : '<span class="badge inforce"><span class="dot"></span>Export</span>'}
+                <span class="muted"> ${esc(n.detail)}</span></td>
+              <td>${esc(n.user_name || n.user_email)}</td>
+              <td class="muted">${n.seen_at ? fmtDateTime(n.seen_at) : 'not yet'}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+        <div class="card-body" style="border-top:1px solid var(--grid);padding-top:12px">
+          <span class="muted" style="font-size:12px">
+            Exporting the book is an administrator's act: it is recorded with what it
+            contained and every other administrator is told. Nobody below admin has the
+            button, and the server refuses the request as well as hiding it.</span>
+        </div>
+      </div>` : ''}
 
       ${isAdmin ? `
       <div class="card">
@@ -6013,6 +6310,13 @@ function agreementSheet(blocks) {
           ? esc(b.signed.signed_name || b.caption) : ''}</div>
         <div class="doc-sig-rule"></div>
         <div class="doc-sig-name">${esc(b.caption)}</div>
+        ${/* An entity is bound by the person who signed for it, so the block
+              says both. Unsigned, these are the lines somebody would fill in
+              with a pen; signed, they are who did. */''}
+        ${b.entity ? `<div class="doc-sig-by">${b.signed
+          ? `By: ${esc(b.signed.signed_by_name || '—')}${b.signed.signed_by_title
+              ? ` · ${esc(b.signed.signed_by_title)}` : ''}`
+          : 'By: ____________________&nbsp;&nbsp;Title: ____________________'}</div>` : ''}
         <div class="doc-sig-note">${b.signed
           ? `Signed electronically ${fmtDateTime(b.signed.signed_at)} · IP ${
               esc(b.signed.signed_ip || 'not recorded')}`
@@ -6163,7 +6467,13 @@ async function agreementView() {
   const outstanding = a.signers.filter((s) => !s.signed_at);
 
   const partyRow = (s) => `<tr class="${s.signed_at ? '' : 'row-muted'}">
-    <td class="strong">${esc(s.name || '—')}${s.is_me ? ' <span class="muted">· you</span>' : ''}</td>
+    <td class="strong">${esc(s.name || '—')}${s.is_me ? ' <span class="muted">· you</span>' : ''}${
+      /* An entity is bound by whoever signed for it, so the register of
+         parties says who that was — or, before signing, that one is needed. */
+      s.party_type && s.party_type !== 'Individual' ? `<div class="muted" style="font-size:11.5px">${
+        s.signed_at
+          ? `by ${esc(s.signed_by_name || '—')}${s.signed_by_title ? `, ${esc(s.signed_by_title)}` : ''}`
+          : `${esc(s.party_type.toLowerCase())} · signs through a person`}</div>` : ''}</td>
     <td>${s.role === 'Manager' ? '<span class="badge">Manager</span>' : 'Member'}</td>
     <td class="num">${s.contribution == null ? dash : fmtExact(s.contribution)}</td>
     <td class="num">${s.pct == null ? dash : fmtPct(s.pct)}</td>
@@ -6364,6 +6674,15 @@ async function openPartiesDialog(a) {
       </select></td>
       <td><input type="text" class="party-name" value="${esc(m.name || '')}"
                  placeholder="As it should appear"></td>
+      ${/* A company, trust or IRA signs through a person, and the signature
+            line has to ask for one. Taken from the investor record, shown here
+            so it can be corrected — a legal name is not always recognisable as
+            one, and a signature that binds the wrong party is invisible until
+            somebody tries to enforce it. */''}
+      <td><select class="party-type">
+        ${['Individual', 'Entity', 'Trust', 'IRA', 'Other'].map((t) => `<option value="${t}" ${
+          (m.party_type || 'Individual') === t ? 'selected' : ''}>${t}</option>`).join('')}
+      </select></td>
       <td><input type="text" class="party-email" value="${esc(m.email || '')}" placeholder="email"></td>
       <td><input type="text" class="party-address" value="${esc(m.address || '')}"
                  placeholder="Notice address"></td>
@@ -6378,11 +6697,12 @@ async function openPartiesDialog(a) {
     <div class="prem-grid">
       <table class="data">
         <thead><tr><th style="width:180px">Investor</th><th>Name on the agreement</th>
+          <th style="width:110px">Signs as</th>
           <th style="width:150px">Email</th><th>Notice address</th>
           <th class="num" style="width:120px">Contribution</th>
           <th class="num" style="width:90px">Interest %</th><th style="width:44px"></th></tr></thead>
         <tbody id="partyRows">${seed.map(rowHtml).join('')}</tbody>
-        <tfoot><tr><td colspan="4" class="strong">Total</td>
+        <tfoot><tr><td colspan="5" class="strong">Total</td>
           <td class="num strong" id="partyCapital">—</td>
           <td class="num strong" id="partyPct">—</td><td></td></tr></tfoot>
       </table>
@@ -6395,6 +6715,9 @@ async function openPartiesDialog(a) {
     <span class="muted" style="font-size:12px">
       Membership interests should total 100%. Nothing here is enforced against the portfolio —
       the agreement is the agreement, and the cap table on the policy is set separately.
+      <strong>Signs as</strong> decides what the signature line asks for: anything other than
+      an individual has to be signed by a named person, in the capacity that gives them the
+      authority to bind it.
     </span>
   `, async () => {
     const rows = [...dlg.querySelectorAll('.party-row')].map((tr) => ({
@@ -6406,11 +6729,14 @@ async function openPartiesDialog(a) {
       address: tr.querySelector('.party-address').value.trim(),
       contribution: tr.querySelector('.party-contribution').value.replace(/,/g, ''),
       pct: tr.querySelector('.party-pct').value,
+      party_type: tr.querySelector('.party-type').value,
     })).filter((r) => r.name || r.investor_id);
     if (!rows.length) throw new Error('Add at least one member');
 
     // The Manager signs too, and their name comes from the agreement itself.
     const manager = String(a.terms?.manager_name || '').trim();
+    /* The manager's kind is left to the server to work out from the name —
+       "Poel Capital LLC" signs through a person, "Alan Spiegel" is one. */
     const signers = manager ? [{ role: 'Manager', name: manager }, ...rows] : rows;
     await api(`/agreements/${a.id}/signers`, { method: 'PUT', body: { signers } });
     toast(`${rows.length} member${rows.length === 1 ? '' : 's'} saved`);
@@ -6468,14 +6794,45 @@ function openIssueDialog(a) {
   }, 'Send it');
 }
 
+const CAPACITIES = {
+  Entity: ['Manager', 'Managing Member', 'Member', 'President', 'Vice President',
+           'Secretary', 'Treasurer', 'Partner', 'Attorney-in-fact'],
+  Trust: ['Trustee', 'Co-Trustee', 'Successor Trustee', 'Attorney-in-fact'],
+  IRA: ['Custodian', 'Account holder', 'Authorised signatory'],
+  Other: ['Authorised signatory', 'Attorney-in-fact'],
+};
+
 function openSignDialog(a) {
   const me = a.me || a.signers.find((s) => s.role === 'Manager');
+  /* A company, trust or IRA cannot hold a pen. Where the party is one, the
+     signature needs both halves — the entity, which is what is bound, and the
+     person signing for it in the capacity that gives them the authority. */
+  const entity = !!me?.party_type && me.party_type !== 'Individual';
+  const kind = me?.party_type === 'Trust' ? 'a trust'
+    : me?.party_type === 'IRA' ? 'an account' : 'an entity';
+  const capacities = CAPACITIES[me?.party_type] || CAPACITIES.Entity;
+
   openDialog('Sign this agreement', `
     <p style="margin-top:0">You are signing as <strong>${esc(me?.name || '')}</strong>${
       me?.pct != null ? `, holding ${fmtPct(me.pct)}` : ''}${
       me?.contribution != null ? ` for a contribution of ${fmtExact(me.contribution)}` : ''}.</p>
-    ${inputField('Type your full name', 'signed_name', '', 'text',
+    ${entity ? `<div class="notice-box">
+      ${esc(me?.name || '')} is ${kind}, so both go on the signature line: the name it is
+      drawn in, and you — the person signing for it, in the capacity that gives you the
+      authority to. Signing your own name alone would bind you rather than ${esc(me?.name || '')}.
+    </div>` : ''}
+    ${inputField(entity ? `Type the name of ${esc(me?.name || 'the party')}` : 'Type your full name',
+      'signed_name', '', 'text',
       `required autocomplete=off placeholder="${esc(me?.name || '')}"`)}
+    ${entity ? `
+      ${inputField('Your name — the person signing on its behalf', 'signed_by_name', '', 'text',
+        'required autocomplete=off placeholder="Ellen Ward"')}
+      <div class="field"><label>Your capacity</label>
+        <input name="signed_by_title" list="capacityList" required autocomplete="off"
+               placeholder="${esc(capacities[0])}">
+        <datalist id="capacityList">
+          ${capacities.map((c) => `<option value="${esc(c)}"></option>`).join('')}
+        </datalist></div>` : ''}
     <label class="dlg-check">
       <input type="checkbox" name="agreed" value="yes" required>
       <span>I have read this operating agreement in full and I intend this to be my signature.
@@ -6487,7 +6844,8 @@ function openSignDialog(a) {
       signed can be told apart from any other version later.</span>
   `, async (v) => {
     await api(`/agreements/${a.id}/sign`, { method: 'POST', body: {
-      signed_name: v.signed_name, agreed: v.agreed === 'yes', body_hash: a.body_hash } });
+      signed_name: v.signed_name, agreed: v.agreed === 'yes', body_hash: a.body_hash,
+      signed_by_name: v.signed_by_name, signed_by_title: v.signed_by_title } });
     toast('Signed');
   }, 'Sign');
 }
@@ -6555,7 +6913,55 @@ const VIEWS = {
   settings: settingsView,
 };
 
-async function render() {
+/* Which render is the current one.
+ *
+ * Typing produces a request per pause, and they do not necessarily come back
+ * in the order they were sent — a search for "a" can land after a search for
+ * "abc" and put the wrong rows on screen. Every render takes a number; when
+ * one finishes it checks whether it is still the newest, and if it is not it
+ * throws its own result away. */
+let renderToken = 0;
+
+/**
+ * Keep the caret where it was.
+ *
+ * A render replaces the contents of the page, which destroys whatever the
+ * person was typing in — the element goes, and with it the focus and the
+ * cursor position. Search boxes re-render as you type, so without this the
+ * first letter lands, the results arrive, and the box is no longer yours:
+ * exactly the "type one letter and it resets" that made searching unusable.
+ *
+ * Matched on the element's id, which every box that survives a render has.
+ */
+function rememberFocus() {
+  const el = document.activeElement;
+  if (!el || !el.id || !/^(INPUT|TEXTAREA)$/.test(el.tagName)) return null;
+  let start = null, end = null;
+  // Not every input type allows a selection to be read; a number box throws.
+  try { start = el.selectionStart; end = el.selectionEnd; } catch { /* no caret */ }
+  return { id: el.id, start, end, value: el.value };
+}
+
+function restoreFocus(f) {
+  if (!f) return;
+  const el = document.getElementById(f.id);
+  if (!el || el === document.activeElement) return;
+  /* Anything typed while the results were on their way belongs to the person,
+     not to the value the page was built from. */
+  if (f.value !== undefined && el.value !== f.value && document.hasFocus()) el.value = f.value;
+  el.focus({ preventScroll: true });
+  if (f.start !== null) { try { el.setSelectionRange(f.start, f.end); } catch { /* no caret */ } }
+}
+
+/**
+ * `soft` redraws the page under the menu without rebuilding the shell.
+ *
+ * Searching used to go through the full path: the whole frame torn down and
+ * rebuilt, the menu badges and the security notices refetched, and the search
+ * box replaced — three extra requests and a flicker for every letter typed.
+ * A filter changes what is in the table and nothing else, so it redraws that.
+ */
+async function render({ soft = false } = {}) {
   const app = $('#app');
 
   if (!state.user) {
@@ -6575,21 +6981,37 @@ async function render() {
   }
 
   const view = VIEWS[state.route] || dashboardView;
-  app.innerHTML = shell('<div class="empty"><span class="spin"></span></div>');
-  wireShell();
-  refreshOppCount();
-  refreshAgreementCount();
-  refreshApplicationCount();
+  const token = ++renderToken;
+  const focus = rememberFocus();
+
+  if (!soft || !$('#main')) {
+    app.innerHTML = shell('<div class="empty"><span class="spin"></span></div>');
+    wireShell();
+    showSecurityNotices();
+    refreshOppCount();
+    refreshAgreementCount();
+    refreshApplicationCount();
+  }
 
   try {
     const out = await view();
+    // A newer render started while this one was fetching: its answer wins.
+    if (token !== renderToken) return;
     const result = typeof out === 'string' ? { html: out } : out;
+    /* Read the caret again right before the swap rather than trusting what it
+       was when the request went out — anything typed while the results were on
+       their way is in the live box, and it is the newest thing the person
+       said. On a full render the box is already gone, so the earlier reading
+       stands. */
+    const focusNow = rememberFocus() || focus;
     $('#main').innerHTML = result.html;
     result.after?.();
+    restoreFocus(focusNow);
     fitStatValues();
   } catch (err) {
-    if (!state.user) return;
+    if (token !== renderToken || !state.user) return;
     $('#main').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    restoreFocus(focus);
   }
 }
 
@@ -6640,6 +7062,66 @@ function wireShell() {
 }
 
 /* ------------------------------- boot -------------------------------- */
+
+/* ------------------------------ idle ---------------------------------- *
+ * An hour without activity and the session is over.
+ *
+ * The server enforces this on its own — the session cookie carries an hour's
+ * expiry and is reissued as somebody works — so a browser that declines to
+ * run this timer is still signed out on its next request. This half exists so
+ * that a screen left open does not sit there looking signed in, and so the
+ * person is told why rather than meeting a bare login form.
+ *
+ * "Activity" is deliberately a real interaction. A page that merely happens to
+ * be open, or a chart animating, is not somebody at the desk.
+ * -------------------------------------------------------------------- */
+const IDLE_LIMIT_MS = 60 * 60 * 1000;
+const IDLE_WARN_MS = 5 * 60 * 1000;      // a warning five minutes before
+let lastActivity = Date.now();
+let idleWarned = false;
+
+function noteActivity() {
+  lastActivity = Date.now();
+  if (idleWarned) {
+    idleWarned = false;
+    $('#idleWarning')?.remove();
+  }
+}
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+  window.addEventListener(ev, noteActivity, { passive: true });
+
+async function signOutIdle() {
+  try { await api('/auth/logout', { method: 'POST' }); } catch { /* already gone */ }
+  state.user = null;
+  state.signedOutReason =
+    'Signed out after an hour without activity. Please sign in again.';
+  $('#idleWarning')?.remove();
+  render();
+}
+
+setInterval(() => {
+  if (!state.user) return;
+  const idle = Date.now() - lastActivity;
+  if (idle >= IDLE_LIMIT_MS) return void signOutIdle();
+  if (idle >= IDLE_LIMIT_MS - IDLE_WARN_MS && !idleWarned) {
+    idleWarned = true;
+    const bar = document.createElement('div');
+    bar.id = 'idleWarning';
+    bar.className = 'security-bar warn';
+    bar.innerHTML = `
+      <span class="security-mark" aria-hidden="true">!</span>
+      <div class="security-text">This session will close in about five minutes
+        without activity. Anything typed and not saved will be lost.</div>
+      <div class="spacer"></div>
+      <button class="btn-sm" id="idleStay">I am still here</button>`;
+    $('#securityBanner')?.after(bar);
+    $('#idleStay')?.addEventListener('click', () => {
+      noteActivity();
+      // Touch the server too, so its clock slides forward with ours.
+      api('/auth/me').catch(() => {});
+    });
+  }
+}, 30 * 1000);
 
 (async function boot() {
   const saved = localStorage.getItem('ph-theme');

@@ -441,6 +441,126 @@ Capped at 500 per call, which keeps one transaction bounded.
 may do it, what it refuses to be asked, the all-or-nothing rule, and that a
 selection survives a search.
 
+### Signing on behalf of an entity
+
+A company, a trust or an IRA cannot hold a pen. Where the party to an agreement
+is one, the signature line asks for **both** halves: the entity, which is what
+is bound, and the person signing for it, in the capacity that gives them the
+authority. Both are stored, both print on the document — `By: Ellen Ward,
+Managing Member` under `Kestrel Holdings LLC` — and both go in the audit line.
+
+The two ways round it are refused explicitly, because each produces a signature
+that looks fine until somebody tries to enforce it:
+
+- **the entity name alone** says nothing about who typed it or whether they
+  could;
+- **the person's name alone** binds the person rather than the entity they
+  meant to sign for. Typing your own name where the party is a company is
+  refused for the same reason it always was — sign as the name the agreement is
+  drawn in — and then the person is asked for separately.
+
+Repeating the entity name in the person's field is refused too. An individual
+signs exactly as they always have: their own name, nothing else to fill in.
+
+**What kind of party each one is** comes from three places, in order of how much
+it is worth trusting: what somebody chose on the Members form, then the investor
+record's type, then the legal suffix on the name as a default — `LLC`, `Inc`,
+`LP`, `Trust` and the rest. That last is a guess, but a narrow one: those are
+endings a name carries *because* it is an entity. "Ward Family Holdings" and
+"Ward Family" are not distinguishable by eye and this does not try. A manager
+called *Alan Spiegel* signs as a person; *Poel Capital LLC* signs through one.
+
+It is **frozen on the agreement** when the party is added, not re-read at
+signing time — a record edited while a document is out for signature must not
+change what the signature needs. And none of it touches the document hash: the
+canonical text covers the words the parties agreed to, and the shape of a
+signature line is not one of them, so a document already out for signature still
+matches itself.
+
+
+### And opportunities
+
+The same thing on the Opportunities list, and for the same reason: a shelf of
+deals goes stale faster than anything else here — offers nobody took,
+duplicates off a broker's list, a batch keyed in for a fund that never
+happened.
+
+Tick the cards, type the count, and they go with their premium schedules,
+their sharing and any requests against them. **Administrators only**; a manager
+keeps the one-at-a-time delete on a deal's own page, which is the deliberate
+act this is not.
+
+Two warnings the dialog raises that the policy version has no equivalent for:
+
+- **requests already made.** A deal eleven investors were shown, two of whom
+  have asked for a piece, disappears from their screens without a word.
+  Passing on it instead keeps the record and the reason.
+- **deals that were funded.** The policy stays in the portfolio, but the record
+  of where it came from — the asking price, the LE, who was offered what — goes.
+
+`Pass` is offered first in both cases, because it is usually the right answer:
+it keeps the price and the medical file for next time, and only an
+administrator sees a passed deal.
+
+## Sessions, exports and sign-ins
+
+Three controls against the realistic threat here, which is not a clever attack
+on the application but a password that has been phished, reused, or left on an
+unlocked screen.
+
+### A session ends after an hour of inactivity
+
+Two clocks, and they answer different questions. **Idle: one hour** without a
+request and the session is over — that is the one that matters for a screen
+left open in a meeting room or a laptop that walks off. **Absolute: twelve
+hours** from signing in, whatever happens; without it a sliding session never
+ends, and a stolen cookie kept warm by a script is a permanent one.
+
+The idle clock is the session cookie's own expiry, pushed forward as somebody
+works, so the **server** decides — a browser that declines to run our timer is
+still signed out on its next request. Sliding deliberately cannot move the
+absolute deadline: it rides in the token. The browser's own timer exists only
+so a screen left open does not sit there looking signed in, warns five minutes
+before, and says why rather than presenting a bare login form.
+
+### Exporting the book is an administrator's act
+
+The likeliest way this data leaves is not a stolen database; it is one
+signed-in person pressing **Export** and walking off with it. So the CSV
+exports on Policies, Insureds, Maturities and Carried interest are
+administrators only. The button is absent for everybody else *and* `POST
+/exports` refuses them — hiding a button protects nobody.
+
+An export is recorded with what it contained: how many rows, of what, under
+which filter, from which browser and network. Every **other** administrator is
+told; the one who did it is not, since they already know. An export nobody else
+sees is the one worth worrying about.
+
+The honest limit: anybody who can read a screen can copy what is on it, and
+anybody who can call the API can page through it. This does not make that
+impossible. It makes the easy path privileged and the record exist.
+
+### A sign-in from somewhere new says so
+
+Every sign-in is fingerprinted, and an unfamiliar one puts a notice across the
+top of the application for the account holder: what browser, what network,
+when, and what to do about it — change the password, which ends every other
+session at once. It stays until they say they have seen it.
+
+The fingerprint is deliberately coarse. The address is kept as a **network**
+(the last octet dropped, the last groups of an IPv6 address), and the browser
+as a **family** — "Chrome on macOS", not a version string. That is enough to
+tell the office from somewhere else entirely and is not a record of where an
+employee physically is. Settings shows everybody the places their own account
+has been used; an administrator can read anybody's, because "has somebody been
+signing in as Ellen" is a question only they can answer.
+
+**The first sign-in on an account never raises one.** Everywhere is new when
+nowhere is known yet, and an alert on the first use of an account teaches people
+to ignore the alerts. Recording the location is also best-effort in the strict
+sense: if it fails, the sign-in still succeeds. A security nicety that can lock
+the firm out of its own book is a worse problem than the one it solves.
+
 ## Roles
 
 | Role | Sees | Can change | Settings |
@@ -738,6 +858,11 @@ browser and imported by the server, so the two can never drift apart. It holds
 the simple-interest solver, an XIRR solver kept for reference, and
 `flowsAfterCarry()`.
 
+`login_locations` fingerprints where each account has been used — a network and
+a browser family, never a full address — and `security_notices` holds what a
+person needs to be *told*, as opposed to what the system needs to remember,
+which is why they are separate from the audit log.
+
 `user_prefs` holds how each person has arranged a screen, keyed to the user and
 dropped with the account. It is a name/value pair rather than a column per
 setting, and the value is rebuilt from the field catalogue before it is stored.
@@ -945,6 +1070,29 @@ carrier's next due date carried forward at the policy's payment mode, or a
 premium posted to the servicing schedule by hand — which is also exactly what a
 capital call is made of.
 
+## Searching without fighting the page
+
+Every search box waits 300ms after the last keystroke, then redraws **only the
+part of the page under the menu** — not the frame, not the menu badges, not the
+security notices. Three things make that feel like a search box rather than a
+form that keeps resetting:
+
+- **The caret stays where it is.** A redraw replaces the contents of the page,
+  which destroys the element being typed into. The focus and cursor position
+  are read back out immediately before the swap — so anything typed while an
+  answer was on its way is kept, not overwritten by the older term the page was
+  built from — and restored immediately after.
+- **Late answers lose.** Every redraw takes a number. A search for "han" that
+  comes back after a search for "hancock" finds it is no longer the newest and
+  throws its own rows away, rather than putting them on screen under a box that
+  says something else.
+- **A keystroke costs one request.** It used to cost five: the full redraw
+  refetched the opportunity count, the agreement count, the registration queue
+  and the security notices for every letter.
+
+One helper wires all three boxes — policies, insureds, investors — because they
+were three copies of the same four lines and had already drifted apart.
+
 ## Number formatting
 
 Stat tiles, table totals and every money figure in the interface and reports show
@@ -1099,6 +1247,11 @@ reach those rules correctly.
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `search-ui-test.mjs` | typing slowly without losing the caret, typing through a slow answer, a late answer not winning, and one request per search |
+| `opp-delete-test.mjs` | who may clear a shelf of opportunities, what the preview promises, that a wrong count deletes nothing, and that a batch is all or nothing |
+| `entity-signing-test.mjs` | that a company, trust or IRA signs through a named person in a stated capacity, that an individual signs as before, and where the kind of party comes from |
+| `security-controls-test.mjs` | who may export and what is recorded, both session clocks, and that a sign-in from a new place is raised — but never the first one |
+| `security-ui-test.mjs` | the notice across the top, that it leads to the password form and stays until acknowledged, and that the export button is absent for everybody who may not export |
 | `carry-page-test.mjs` | the Carried interest page: refused to a manager, an editor and an investor, earned kept apart from projected, and each filter built from the rows it claims |
 | `policy-columns-test.mjs` | the field catalogue, what may be stored, that an arrangement is personal, and that one saved before a field existed still opens |
 | `policy-columns-ui-test.mjs` | the picker, both ways of moving a column, the footer staying in step, and the arrangement following the login |

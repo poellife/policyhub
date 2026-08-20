@@ -8,7 +8,7 @@
    past what is left.
    ===================================================================== */
 import { chromium } from 'playwright';
-import { BASE, ADMIN, INVESTOR1, INVESTOR2, login } from './test-config.mjs';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, INVESTOR2, login } from './test-config.mjs';
 
 const PREFIX = 'OPPUI';
 const S = '/home/claude/shots';
@@ -466,6 +466,73 @@ await staff.waitForSelector('.opp-card, .empty', { timeout: 12000 });
 await staff.waitForTimeout(1200);
 check('typing the policy number deletes it', await staff.evaluate((id) =>
   fetch(`/api/opportunities/${id}`).then((r) => r.status === 404), spare.id));
+
+console.log('\nCLEARING SEVERAL AT ONCE');
+/* A shelf of opportunities goes stale faster than anything else here. An
+   administrator can take a whole selection; a manager keeps the one-at-a-time
+   delete on a deal's own page, which is the deliberate act this is not. */
+const batch = [];
+for (const tag of ['BULK1', 'BULK2']) {
+  batch.push(await json(await api('/opportunities', { method: 'POST', body: {
+    policy_number: `${PREFIX}-${tag}`, carrier_name: 'Screen Life', product_type: 'UL',
+    face_amount: 1000000, insured_last_name: `Batch${tag}`, insured_first_name: 'Ada',
+    insured_dob: '1941-03-03', le_months: 60, le_date: '2026-01-01',
+    asking_price: 200000, annual_premium: 20000, expected_close: '2026-10-01',
+    fund_id: funds[0].id } })));
+}
+await staff.goto(`${BASE}/#/opportunities`);
+/* The page may already be on this hash from the delete above, in which case a
+   goto changes nothing — reload so the two new deals are actually fetched. */
+await staff.reload();
+await staff.waitForSelector('.opp-card');
+await staff.waitForTimeout(900);
+check('every card has a tick for an administrator',
+  (await staff.locator('.opp-tick input').count()) === (await staff.locator('.opp-card').count()),
+  `${await staff.locator('.opp-tick input').count()} of ${await staff.locator('.opp-card').count()}`);
+check('and nothing is offered until something is picked',
+  (await staff.locator('#oppBulkBar').count()) === 0);
+
+const tickFor = (id) => staff.locator(`.opp-card[data-opp="${id}"] .opp-tick input`);
+await tickFor(batch[0].id).click();
+await staff.waitForTimeout(700);
+check('ticking one does not open the deal', /#\/opportunities$/.test(staff.url()), staff.url());
+check('the bar says what is picked',
+  /1 opportunity selected/.test(await staff.locator('#oppBulkBar').textContent()));
+await tickFor(batch[1].id).click();
+await staff.waitForTimeout(700);
+check('and counts up', /2 opportunities selected/.test(
+  await staff.locator('#oppBulkBar').textContent()));
+
+await staff.click('#oppBulkDeleteBtn');
+await staff.waitForSelector('dialog[open] input[name="confirm"]');
+const bulkText = (await staff.locator('dialog[open]').textContent()).replace(/\s+/g, ' ');
+check('the dialog names both of them',
+  /BatchBULK1/.test(bulkText) && /BatchBULK2/.test(bulkText));
+check('says what goes with them',
+  /Shared with investors/.test(bulkText) && /Premium schedule rows/.test(bulkText));
+check('and offers Pass as the softer answer first',
+  /Pass<\/strong> on each is the better answer|Pass on each is the better answer/.test(bulkText));
+await staff.fill('dialog[open] input[name="confirm"]', 'DELETE 3');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForTimeout(800);
+check('a wrong count deletes nothing',
+  (await staff.locator('dialog[open]').count()) === 1
+  && await staff.evaluate((id) => fetch(`/api/opportunities/${id}`).then((r) => r.status === 200),
+    batch[0].id));
+await staff.fill('dialog[open] input[name="confirm"]', 'DELETE 2');
+await staff.click('dialog[open] button[type=submit]');
+await staff.waitForTimeout(1600);
+check('the right count takes both', await staff.evaluate((ids) =>
+  Promise.all(ids.map((id) => fetch(`/api/opportunities/${id}`).then((r) => r.status)))
+    .then((codes) => codes.every((c) => c === 404)), batch.map((b) => b.id)));
+check('and the bar goes with them', (await staff.locator('#oppBulkBar').count()) === 0);
+
+const mgrPage = await page(MANAGER1.email, MANAGER1.password);
+await mgrPage.goto(`${BASE}/#/opportunities`);
+await mgrPage.waitForSelector('.opp-card, .empty');
+await mgrPage.waitForTimeout(700);
+check('a manager is shown no ticks at all',
+  (await mgrPage.locator('.opp-tick input').count()) === 0);
 
 console.log('\nERRORS');
 check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | '));

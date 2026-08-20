@@ -96,6 +96,16 @@ export function agreementPdf(blocks, { title = 'Operating Agreement', hash = '' 
           doc.space(14);
         }
         doc.signatureLine(block.caption, { width: 320 });
+        /* An entity is bound by the person who signed for it. On paper this
+           is the "By / Title" pair under the party's name; here it is the
+           same thing, filled in or left blank to be filled in. */
+        if (block.entity) {
+          doc.line(block.signed
+            ? `By: ${block.signed.signed_by_name || '—'}${block.signed.signed_by_title
+                ? `, ${block.signed.signed_by_title}` : ''}`
+            : 'By: ____________________     Title: ____________________',
+            { size: 10 });
+        }
         if (block.signed) {
           doc.line(`Signed electronically ${stamp(block.signed.signed_at)}`,
             { style: 'sans', size: 8.5 });

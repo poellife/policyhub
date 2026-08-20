@@ -444,15 +444,30 @@ export function renderAgreement(terms = {}, signers = []) {
   para('IN WITNESS WHEREOF, the parties have executed this Operating Agreement as of the date first '
     + 'above written.');
 
+  /* An entity signs through a person, and the signature block has to show
+     both — the party bound and the human who bound it, in the capacity that
+     gave them the authority. On an unsigned document those are the "By" and
+     "Title" lines somebody would fill in with a pen.
+
+     `entity` is deliberately NOT part of the caption, and so not part of the
+     canonical text: see `canonicalText` below. What the parties agreed to is
+     the words of the agreement, and the shape of a signature line is not one
+     of them — putting it in the hash would mean every document already out
+     for signature no longer matched itself. */
+  const signsThrough = (s) => !!s?.party_type && s.party_type !== 'Individual';
+
   b.push({ type: 'subhead', text: 'Manager / General Partner' });
   const managerSigner = signers.find((s) => s.role === 'Manager');
   b.push({ type: 'signature', caption: `${manager}, Manager / General Partner`,
+    // The manager is the firm, which is an entity whatever else is true.
+    entity: managerSigner ? signsThrough(managerSigner) : true,
     signed: managerSigner?.signed_at ? managerSigner : null });
 
   b.push({ type: 'subhead', text: 'Members' });
   if (!members.length) b.push({ type: 'signature', caption: blank, signed: null });
   for (const m of members)
-    b.push({ type: 'signature', caption: m.name || blank, signed: m.signed_at ? m : null });
+    b.push({ type: 'signature', caption: m.name || blank, entity: signsThrough(m),
+      signed: m.signed_at ? m : null });
 
   b.push({ type: 'pagebreak' });
   head('Addendum A — Members and Notice Addresses');

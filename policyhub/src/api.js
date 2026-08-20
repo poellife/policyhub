@@ -7,6 +7,7 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
+import { recordExport, describeOrigin } from './security.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -524,6 +525,89 @@ router.put('/me/tax-id', authenticate, wrap(async (req, res) => {
  *     it arrived. What comes back out is a list of known column keys, so
  *     nothing that reaches the grid can carry anything else with it.
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Security notices
+ *
+ * Things one person needs to be told, as opposed to things the system
+ * needs to remember — which is why they are not the audit log. A notice is
+ * addressed to somebody, it stays in front of them until they have seen
+ * it, and it says what to do about it.
+ *
+ * Two kinds so far: a sign-in from a location this account has not used
+ * before, which goes to the account holder; and a bulk export, which goes
+ * to every other administrator.
+ * ------------------------------------------------------------------ */
+
+router.get('/me/notices', authenticate, wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT id, kind, detail, created_at, seen_at
+       FROM security_notices
+      WHERE user_id = $1 AND created_at > now() - INTERVAL '60 days'
+      ORDER BY created_at DESC LIMIT 50`, [req.user.uid]);
+  res.json({
+    unseen: rows.filter((r) => !r.seen_at),
+    recent: rows,
+    /* Where they are right now, in the same words a notice uses — so
+       somebody reading "Chrome on Windows · 71.12.34.x" can tell at a glance
+       whether it is the machine in front of them. */
+    here: describeOrigin(req),
+  });
+}));
+
+/** Read and understood. Only ever the caller's own. */
+router.post('/me/notices/seen', authenticate, wrap(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map((n) => parseInt(n, 10)).filter(Number.isFinite).slice(0, 50)
+    : null;
+  await q(
+    `UPDATE security_notices SET seen_at = now()
+      WHERE user_id = $1 AND seen_at IS NULL
+        AND ($2::int[] IS NULL OR id = ANY($2::int[]))`,
+    [req.user.uid, ids]);
+  res.json({ ok: true });
+}));
+
+/**
+ * Where this account has been used, and what it has been told.
+ *
+ * An admin may read anybody's, because "has somebody else been signing in
+ * as Ellen" is a question only an administrator can answer. Everybody else
+ * reads their own and nobody else's.
+ */
+router.get('/security/locations', authenticate, wrap(async (req, res) => {
+  const asked = int(req.query.user_id);
+  if (asked && asked !== req.user.uid && req.user.role !== 'admin')
+    return res.status(403).json({ error: 'Not yours to read' });
+  const uid = asked || req.user.uid;
+  const { rows } = await q(
+    `SELECT label, first_seen, last_seen, sign_ins
+       FROM login_locations WHERE user_id = $1
+      ORDER BY last_seen DESC LIMIT 50`, [uid]);
+  res.json(rows);
+}));
+
+/** The whole firm's, for an administrator. */
+router.get('/security/notices', authenticate, blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT n.id, n.kind, n.detail, n.created_at, n.seen_at,
+            u.full_name AS user_name, u.email AS user_email,
+            a.full_name AS actor_name
+       FROM security_notices n
+       JOIN users u ON u.id = n.user_id
+       LEFT JOIN users a ON a.id = n.actor_id
+      WHERE n.created_at > now() - INTERVAL '90 days'
+      ORDER BY n.created_at DESC LIMIT 200`);
+  res.json(rows);
+}));
+
+/* An export is an administrator's act, recorded with what it contained, and
+   every other administrator hears about it. The client asks first and writes
+   no file if the answer is no, so the check is the server's, not the
+   button's. */
+router.post('/exports', authenticate, blockInvestors, requireRole('admin'),
+  wrap((req, res) => recordExport(req, res)));
 
 const PREF_CLEANERS = { policy_columns: cleanArrangement };
 
@@ -2050,6 +2134,130 @@ router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manage
       `${rows[0].policy_number || rows[0].insured_last_name} · ${rows[0].carrier_name}`);
     await q('DELETE FROM opportunities WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
+  }));
+
+/* ------------------------------------------------------------------ *
+ * Clearing several at once
+ *
+ * A shelf of opportunities goes stale faster than anything else here —
+ * deals that were never taken, duplicates from a broker's list, a batch
+ * keyed in for a fund that never happened. Removing them one page at a
+ * time is the kind of chore that ends with somebody leaving the mess.
+ *
+ * Only an administrator, and only with the count typed out. A manager can
+ * still delete one at a time from its own page, which is the deliberate
+ * act this is not.
+ * ------------------------------------------------------------------ */
+
+/** Which ids were asked for, cleaned up — no duplicates, no rubbish. */
+function bulkOppIds(body) {
+  const raw = Array.isArray(body?.ids) ? body.ids : [];
+  const ids = [...new Set(raw.map((v) => int(v)).filter((v) => Number.isInteger(v) && v > 0))];
+  if (!ids.length) return { error: 'Choose at least one opportunity to delete.' };
+  if (ids.length > BULK_DELETE_LIMIT)
+    return { error: `That is ${ids.length}. Delete at most ${BULK_DELETE_LIMIT} at a time.` };
+  return { ids };
+}
+
+/**
+ * What would go, before anything does.
+ *
+ * Scoped exactly as reading is: an administrator sees every entity, so this
+ * is not narrowed further — but it is still built from a query rather than
+ * from the ids as posted, so an id for something that does not exist simply
+ * does not come back rather than being deleted blind.
+ */
+async function bulkOppTally(ids) {
+  const { rows } = await q(
+    `SELECT o.id, o.policy_number, o.carrier_name, o.status, o.face_amount,
+            o.insured_last_name, o.insured_first_name, f.code AS fund_code,
+            o.policy_id,
+            (SELECT COUNT(*)::int FROM opportunity_shares s
+              WHERE s.opportunity_id = o.id) AS shared_with,
+            (SELECT COUNT(*)::int FROM opportunity_commitments c
+              WHERE c.opportunity_id = o.id AND c.status IN ('Requested','Confirmed'))
+                                              AS live_requests,
+            (SELECT COUNT(*)::int FROM opportunity_premiums pm
+              WHERE pm.opportunity_id = o.id) AS premium_rows
+       FROM opportunities o
+       LEFT JOIN funds f ON f.id = o.fund_id
+      WHERE o.id = ANY($1::int[])
+      ORDER BY o.insured_last_name, o.policy_number`,
+    [ids]);
+  const sum = (k) => rows.reduce((n, r) => n + (Number(r[k]) || 0), 0);
+  return {
+    count: rows.length,
+    opportunities: rows,
+    shares: sum('shared_with'),
+    requests: sum('live_requests'),
+    premiums: sum('premium_rows'),
+    /* A deal that was funded became a policy. Deleting the opportunity does
+       not touch the policy, but it does throw away where it came from, so it
+       is called out separately rather than counted in with the rest. */
+    funded: rows.filter((r) => r.policy_id || r.status === 'Funded').length,
+    confirm_phrase: bulkDeletePhrase(rows.length),
+  };
+}
+
+router.post('/opportunities/bulk-delete/preview', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { ids, error } = bulkOppIds(req.body);
+    if (error) return res.status(400).json({ error });
+    const tally = await bulkOppTally(ids);
+    const missing = ids.filter((id) => !tally.opportunities.some((o) => o.id === id));
+    res.json({ ...tally, missing });
+  }));
+
+router.post('/opportunities/bulk-delete', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { ids, error } = bulkOppIds(req.body);
+    if (error) return res.status(400).json({ error });
+
+    const tally = await bulkOppTally(ids);
+    if (tally.count !== ids.length) {
+      const gone = ids.length - tally.count;
+      return res.status(409).json({
+        error: `${gone} of those no longer ${gone === 1 ? 'exists' : 'exist'}. `
+             + 'Reload and choose again.',
+        found: tally.count,
+      });
+    }
+    if (str(req.body?.confirm) !== tally.confirm_phrase)
+      return res.status(400).json({
+        error: `Type ${tally.confirm_phrase} to confirm.`,
+        confirm_phrase: tally.confirm_phrase,
+      });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rowCount } = await client.query(
+        'DELETE FROM opportunities WHERE id = ANY($1::int[])', [ids]);
+      if (rowCount !== ids.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'The selection changed while it was being deleted. Nothing was removed.' });
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    /* One entry each, in the same shape a single deletion writes, so the log
+       reads the same however a deal was removed — and marked as part of a
+       batch, because thirty entries at the same second with no explanation is
+       its own kind of alarming. */
+    for (const o of tally.opportunities)
+      await audit(req.user.uid, 'opportunity', o.id, 'delete',
+        `${o.policy_number || o.insured_last_name} · ${o.carrier_name} · ${o.status} · `
+        + `${o.shared_with} shared · ${o.live_requests} live request(s) · `
+        + `bulk delete of ${tally.count}`);
+
+    res.json({ ok: true, deleted: tally.count, shares: tally.shares,
+      requests: tally.requests, premiums: tally.premiums });
   }));
 
 /* ------------------------- premium schedule ------------------------- */
@@ -3841,6 +4049,47 @@ export async function resolveInsured(body) {
  * ------------------------------------------------------------------ */
 
 const AGREEMENT_STATUSES = ['Draft', 'Out for signature', 'Executed', 'Void'];
+
+/* What kind of party is on the signature line.
+ *
+ * Everything except an individual signs through a human being: a company by
+ * an officer or manager, a trust by its trustee, an IRA by its custodian.
+ * The list mirrors `investors.investor_type` so a party's kind is read from
+ * the record rather than guessed from the shape of its name — "Ward Family
+ * Holdings" and "Ward Family" are not distinguishable by eye, and getting it
+ * wrong in either direction produces a signature that does not bind. */
+const PARTY_TYPES = ['Individual', 'Entity', 'Trust', 'IRA', 'Other'];
+const signsThroughAPerson = (partyType) =>
+  !!partyType && partyType !== 'Individual';
+
+/* Where the kind of party comes from, in order of how much it is worth
+   trusting:
+ *
+ *   1. what somebody chose on the form. A party who is not an investor on
+ *      file has no record to read, and whoever drew the agreement knows.
+ *   2. the investor record, which is where this is normally kept.
+ *   3. the legal suffix on the name, as a default only.
+ *
+ * The third is a guess, but a narrow one: these are the endings a legal name
+ * carries BECAUSE it is an entity, not a pattern in ordinary names. "Ward
+ * Family Holdings" and "Ward Family" are not distinguishable by eye and this
+ * does not try — it reads "Holdings LLC" and nothing else. A manager called
+ * "Alan Spiegel" is a person and signs as one; "Poel Capital LLC" is not. */
+const ENTITY_SUFFIX =
+  /\b(l\.?l\.?c|l\.?l\.?l?\.?p|inc|incorporated|corp|corporation|co|company|ltd|limited|plc|pllc|partners|partnership|fund|foundation|holdings)\.?$/i;
+const TRUST_WORD = /\btrust(ee|s)?\b|\bfamily trust\b|\brevocable\b/i;
+const looksLikeAnEntity = (name) => {
+  const n = String(name || '').trim().replace(/,\s*$/, '');
+  if (!n) return null;
+  if (TRUST_WORD.test(n)) return 'Trust';
+  return ENTITY_SUFFIX.test(n) ? 'Entity' : null;
+};
+/* What to call the human being's authority, for the message rather than for
+   validation — we do not police job titles. */
+const CAPACITY_HINT = {
+  Trust: 'Trustee', IRA: 'Custodian or account holder',
+  Entity: 'Manager, Member, President…', Other: 'the capacity you sign in',
+};
 const TERM_KEYS = new Set(AGREEMENT_FIELDS.map((f) => f.key));
 
 /** Only the blanks the template knows about, coerced to their own type. */
@@ -3960,6 +4209,11 @@ router.get('/agreements/:id', wrap(async (req, res) => {
     a.signers = a.signers.map((s) => ({
       id: s.id, role: s.role, name: s.name, pct: s.pct, contribution: s.contribution,
       signed_at: s.signed_at, is_me: s.investor_id === mine,
+      /* What kind of party each one is, and who signed for it, are part of the
+         signature block on a document they are a party to — not somebody
+         else's business the way a contribution is. */
+      party_type: s.party_type, signed_by_name: s.signed_by_name,
+      signed_by_title: s.signed_by_title,
     }));
   }
   res.json(a);
@@ -4020,6 +4274,17 @@ router.put('/agreements/:id/signers', blockInvestors, requireRole('admin', 'mana
         error: 'You can only put investors on an agreement if they are in your own entities, or '
           + 'an administrator has given you access to them.' });
 
+    /* What kind of party each one is, read from the investor record now and
+       then frozen on the agreement. A company, a trust or an IRA signs
+       through a human being, and which of the two it is must not change
+       because somebody edited a record while the document was out. */
+    const types = new Map();
+    if (investorIds.length) {
+      const { rows: kinds } = await q(
+        'SELECT id, investor_type FROM investors WHERE id = ANY($1)', [investorIds]);
+      for (const k of kinds) types.set(k.id, k.investor_type || 'Individual');
+    }
+
     const seen = new Set();
     const rows = [];
     for (const s of incoming) {
@@ -4033,6 +4298,10 @@ router.put('/agreements/:id/signers', blockInvestors, requireRole('admin', 'mana
         role: s.role === 'Manager' ? 'Manager' : 'Member',
         name, email: str(s.email), address: str(s.address),
         contribution: num(s.contribution), pct: num(s.pct),
+        party_type: PARTY_TYPES.includes(str(s.party_type)) ? str(s.party_type)
+          : types.get(investorId)
+          || looksLikeAnEntity(name)
+          || 'Individual',
       });
     }
 
@@ -4043,10 +4312,10 @@ router.put('/agreements/:id/signers', blockInvestors, requireRole('admin', 'mana
       for (const [i, r] of rows.entries())
         await client.query(
           `INSERT INTO agreement_signers (agreement_id, investor_id, role, name, email, address,
-                                          contribution, pct, sort_order)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+                                          contribution, pct, sort_order, party_type)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
           [req.params.id, r.investor_id, r.role, r.name, r.email, r.address,
-           r.contribution, r.pct, i]);
+           r.contribution, r.pct, i, r.party_type]);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -4101,6 +4370,7 @@ router.post('/agreements/:id/recall', blockInvestors, requireRole('admin', 'mana
     const { rowCount } = await q(
       `UPDATE agreement_signers SET signed_at = NULL, signed_name = NULL, signed_ip = NULL,
                                     signed_agent = NULL, signed_hash = NULL,
+                                    signed_by_name = '', signed_by_title = '',
                                     declined_at = NULL, decline_note = ''
         WHERE agreement_id = $1 AND (signed_at IS NOT NULL OR declined_at IS NOT NULL)`,
       [req.params.id]);
@@ -4172,6 +4442,36 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
   if (tidy(typed) !== tidy(signer.name))
     return res.status(400).json({
       error: `Sign as "${signer.name}" — that is the name this agreement is drawn in.` });
+
+  /* A company, trust or IRA cannot hold a pen.
+   *
+   * Where the party is one, the signature line needs both halves: the entity,
+   * which is the party bound, and the person signing for it in the capacity
+   * that gives them the authority. The entity name alone is not a signature,
+   * and the person's name alone binds the person rather than the entity —
+   * which is the failure worth preventing, because it is invisible until
+   * somebody tries to enforce the agreement. */
+  const byName = str(req.body.signed_by_name);
+  const byTitle = str(req.body.signed_by_title);
+  const entity = signsThroughAPerson(signer.party_type);
+  if (entity) {
+    if (!byName)
+      return res.status(400).json({
+        error: `${signer.name} is ${signer.party_type === 'Trust' ? 'a trust'
+          : signer.party_type === 'IRA' ? 'an account' : 'an entity'}, so it signs through a `
+          + 'person. Give the name of the individual signing on its behalf.' });
+    if (byName.length < 2 || !/[a-z]/i.test(byName))
+      return res.status(400).json({ error: 'That does not look like a person’s name.' });
+    if (tidy(byName) === tidy(signer.name))
+      return res.status(400).json({
+        error: `The person signing has to be named as well as ${signer.name}. `
+          + 'Repeating the entity name does not say who signed.' });
+    if (!byTitle)
+      return res.status(400).json({
+        error: 'Give the capacity you are signing in — '
+          + `${CAPACITY_HINT[signer.party_type] || 'Manager, Trustee…'}.` });
+  }
+
   if (req.body.agreed !== true)
     return res.status(400).json({ error: 'Tick the box to confirm you intend to sign' });
   if (a.body_hash && str(req.body.body_hash) && str(req.body.body_hash) !== a.body_hash)
@@ -4188,10 +4488,13 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
   await q(
     `UPDATE agreement_signers
         SET signed_at = now(), signed_name = $1, signed_ip = $2, signed_agent = $3,
-            signed_hash = $4, declined_at = NULL, decline_note = ''
-      WHERE id = $5`,
+            signed_hash = $4, declined_at = NULL, decline_note = '',
+            signed_by_name = $5, signed_by_title = $6
+      WHERE id = $7`,
     [typed, ip.slice(0, 64), String(req.headers['user-agent'] || '').slice(0, 300),
-     a.body_hash || a.current_hash, signer.id]);
+     a.body_hash || a.current_hash,
+     entity ? byName.slice(0, 120) : '', entity ? byTitle.slice(0, 80) : '',
+     signer.id]);
 
   // Everyone who had to sign has signed: file it.
   const after = await loadAgreement(req.params.id);
@@ -4204,7 +4507,8 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
                              updated_at = now() WHERE id = $2`, [documentId, req.params.id]);
   }
   await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
-    `signed by ${typed}${outstanding.length ? `, ${outstanding.length} to go` : ' — fully executed'}`);
+    `signed by ${typed}${entity ? ` (by ${byName}, ${byTitle})` : ''}${
+      outstanding.length ? `, ${outstanding.length} to go` : ' — fully executed'}`);
   res.json({ ok: true, executed: !outstanding.length, outstanding: outstanding.length });
 }));
 

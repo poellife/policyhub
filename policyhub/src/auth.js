@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { q, audit } from './db.js';
+import { noteSignIn } from './security.js';
 
 /**
  * The signing key. A session cookie asserts a user id and role, so anyone
@@ -29,22 +30,49 @@ const SECRET = (() => {
 })();
 
 const COOKIE = 'ph_session';
-const MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 
-export function issueToken(res, user) {
+/* Two clocks on a session, and they answer different questions.
+ *
+ *   IDLE — an hour without a request and the session is over. This is the
+ *     one that matters for a screen left open in a meeting room or a laptop
+ *     that walks off: the window in which a found session is useful is an
+ *     hour, not a working day.
+ *
+ *   ABSOLUTE — twelve hours from sign-in, whatever happens. Without it a
+ *     sliding session never ends, and a stolen cookie kept warm by a script
+ *     is a permanent one.
+ *
+ * The idle clock is enforced by the token's own expiry, reissued as the
+ * person works, so it is the server that decides — a browser that declines
+ * to run our timer is still signed out on its next request. */
+const IDLE_MS = 60 * 60 * 1000;          // one hour without a request
+const ABSOLUTE_MS = 12 * 60 * 60 * 1000; // and twelve from signing in, regardless
+/* Reissuing on literally every request would set a cookie on every response
+   for no benefit; a minute's granularity on an hour-long window is plenty. */
+const REFRESH_AFTER_MS = 60 * 1000;
+
+export const SESSION_LIMITS = { idleMs: IDLE_MS, absoluteMs: ABSOLUTE_MS };
+
+export function issueToken(res, user, { expiresAt } = {}) {
+  const now = Date.now();
+  // The absolute deadline rides in the token, so sliding cannot extend it.
+  const abs = expiresAt || now + ABSOLUTE_MS;
+  const idleUntil = Math.min(now + IDLE_MS, abs);
   const token = jwt.sign(
     { uid: user.id, email: user.email, role: user.role, name: user.full_name,
       iid: user.investor_id || null,     // investor logins carry their investor id
-      tv: user.token_version || 0 },     // bumped to revoke every cookie for this user
+      tv: user.token_version || 0,       // bumped to revoke every cookie for this user
+      abs },                             // absolute deadline, in ms since the epoch
     SECRET,
-    { expiresIn: '12h' }
+    { expiresIn: Math.max(1, Math.round((idleUntil - now) / 1000)) }
   );
   res.cookie(COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
-    maxAge: MAX_AGE_MS,
+    maxAge: Math.max(0, idleUntil - now),
   });
+  return { idleUntil, abs };
 }
 
 export function clearToken(res) {
@@ -54,12 +82,25 @@ export function clearToken(res) {
 export function requireAuth(req, res, next) {
   const token = req.cookies?.[COOKIE];
   if (!token) return res.status(401).json({ error: 'Not signed in' });
+  let claims;
   try {
-    req.user = jwt.verify(token, SECRET);
-    next();
+    claims = jwt.verify(token, SECRET);
   } catch {
-    return res.status(401).json({ error: 'Session expired, please sign in again' });
+    clearToken(res);
+    return res.status(401).json({
+      error: 'Signed out after an hour without activity. Please sign in again.' });
   }
+  /* The absolute deadline is checked here rather than left to the token's own
+     expiry, because the token's expiry is the IDLE clock and gets pushed
+     forward as somebody works. */
+  if (claims.abs && Date.now() > Number(claims.abs)) {
+    clearToken(res);
+    return res.status(401).json({
+      error: 'This session has reached its twelve-hour limit. Please sign in again.' });
+  }
+  req.user = claims;
+  req.sessionEndsAt = claims.abs || null;
+  next();
 }
 
 /**
@@ -91,6 +132,15 @@ export async function loadScope(req, res, next) {
     clearToken(res);
     return res.status(401).json({ error: 'Your password changed — please sign in again' });
   }
+  /* Push the idle window forward. Done here, after the account has been
+     re-read and found good, so a suspended or deleted account cannot renew
+     its own session on the way out. */
+  const issuedAgo = Date.now() - Number(req.user.iat || 0) * 1000;
+  if (issuedAgo > REFRESH_AFTER_MS)
+    issueToken(res, { id: req.user.uid, email: req.user.email, role: u.role,
+      full_name: req.user.name, investor_id: u.investor_id,
+      token_version: u.token_version }, { expiresAt: req.user.abs });
+
   req.user.role = u.role;
   req.user.iid = u.investor_id;
   req.user.fundIds = null;
@@ -313,8 +363,19 @@ export async function login(req, res) {
   await clearAttempts(email, ip);
   await q('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
   await audit(user.id, 'user', user.id, 'login', email);
+  /* Fingerprint the sign-in. A password that has been phished or reused
+     produces exactly one reliable signal — a sign-in from somewhere the
+     account has never been used — and this is where that is caught. It must
+     never be able to stop somebody signing in, so it is best-effort. */
+  let origin = { isNew: false };
+  try {
+    origin = await noteSignIn(req, user);
+  } catch (e) {
+    console.error('[auth] could not record the sign-in location:', e.message);
+  }
   issueToken(res, user);
-  res.json({ id: user.id, email: user.email, name: user.full_name, role: user.role });
+  res.json({ id: user.id, email: user.email, name: user.full_name, role: user.role,
+             new_location: origin.isNew ? origin.label : null });
 }
 
 export async function changePassword(req, res) {
