@@ -2501,6 +2501,27 @@ function wireDetailTab(p, values, irrData) {
 
 /* ------------------------------ dialogs ------------------------------ */
 
+/**
+ * A button that opens something which has to fetch first.
+ *
+ * A click handler returning a rejected promise fails silently: the browser
+ * logs it and the person sees a button that did nothing, which is
+ * indistinguishable from a broken one. Anything async behind a button goes
+ * through here so a failure says so.
+ */
+function onClick(selector, handler, root = document) {
+  const el = root.querySelector(selector);
+  if (!el) return;
+  el.addEventListener('click', async (e) => {
+    try {
+      await handler(e);
+    } catch (err) {
+      console.error(selector, err);
+      alert(err?.message || 'That did not work. Try again, or reload the page.');
+    }
+  });
+}
+
 function openDialog(title, bodyHtml, onSubmit, submitLabel = 'Save') {
   const dlg = document.createElement('dialog');
   dlg.innerHTML = `
@@ -3215,9 +3236,13 @@ async function servicingView() {
       wireEntityPicker();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
-      $('#raiseCallBtn')?.addEventListener('click', () => openRaiseCallDialog());
+      onClick('#raiseCallBtn', () => openRaiseCallDialog());
       document.querySelectorAll('[data-call]').forEach((b) =>
-        b.addEventListener('click', () => openCallDialog(Number(b.dataset.call))));
+        b.addEventListener('click', async () => {
+          try {
+            await openCallDialog(Number(b.dataset.call));
+          } catch (err) { alert(err.message); }
+        }));
     },
   };
 }
@@ -3232,9 +3257,19 @@ async function servicingView() {
  */
 async function openRaiseCallDialog() {
   const soon = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
-  let draft = await api(`/capital-calls/draft?days=30&fund=${encodeURIComponent(entityFilter())}`);
+  let draft = null;
 
-  const summary = (d) => (d.items.length ? `
+  const summary = (d) => {
+    if (!d) return '<div class="empty"><span class="spin"></span></div>';
+    if (d.error) return `<div class="error-box">${esc(d.error)}</div>`;
+    if (!d.items.length) return `
+      <div class="notice-box">
+        Nothing falls due inside that window, so there is nothing to call for.
+        Widen it above — or, if premiums are missing rather than absent, a policy needs
+        a <strong>next premium due</strong> date and an amount before it can be called on.
+        The premium forecast lists the ones that are missing either.
+      </div>`;
+    return `
     <div class="field-row">
       <div class="field"><label>Premiums covered</label>
         <div class="strong" style="padding:6px 0">${d.items.length} ·
@@ -3243,6 +3278,9 @@ async function openRaiseCallDialog() {
         <div class="strong" style="padding:6px 0">${fmtExact(
           d.investors.reduce((n, i) => n + i.amount, 0))}</div></div>
     </div>
+    ${d.investors.length === 0 ? `<div class="error-box">
+      Nobody holds a share of those policies, so there is nobody to ask. Set the cap table
+      on each policy first.</div>` : ''}
     ${d.unallocated > 0.005 ? `<div class="notice-box" style="margin-bottom:12px">
       ${fmtExact(d.unallocated)} of this is on percentages nobody holds — the house's own
       share. Nobody is asked for it.</div>` : ''}
@@ -3252,10 +3290,15 @@ async function openRaiseCallDialog() {
         <td>${i.policies} ${i.policies === 1 ? 'policy' : 'policies'}</td>
         <td class="dlg-amt">${fmtExact(i.amount)}</td>
       </tr>`).join('')}</tbody></table>
-    </div>`
-    : `<div class="error-box">Nothing falls due in that window, so there is nothing to
-       call for. Widen it, or post the premiums to the schedule first.</div>`);
+    </div>`;
+  };
 
+  /* The dialog opens FIRST and fetches afterwards. Fetching first meant that
+     anything going wrong — a slow database, a refusal, a five-hundred —
+     rejected inside a click handler with nowhere to show itself, and the
+     button simply did nothing when pressed. A button that does nothing is
+     indistinguishable from a broken one, so now it always opens and the
+     dialog says what happened. */
   const dlg = openDialog('Raise a capital call', `
     <p style="margin-top:0;font-size:14px">Everything falling due inside the window, split
       by who holds each policy, with one date the money has to be in by.</p>
@@ -3263,7 +3306,7 @@ async function openRaiseCallDialog() {
       <div class="field"><label>Premiums due within</label>
         <select name="days" id="callDays">
           ${[[14, 'the next 2 weeks'], [30, 'the next 30 days'], [60, 'the next 60 days'],
-             [90, 'the next 90 days'], [180, 'the next 6 months']]
+             [90, 'the next 90 days'], [180, 'the next 6 months'], [365, 'the next year']]
             .map(([v, label]) => `<option value="${v}" ${v === 30 ? 'selected' : ''}>${label}</option>`).join('')}
         </select></div>
       ${inputField('Money in by', 'due_date', soon(14), 'date', 'required')}
@@ -3271,26 +3314,32 @@ async function openRaiseCallDialog() {
     ${inputField('What to call it', 'title', 'Premium capital call', 'text', 'required')}
     <div class="field"><label>Anything they should know</label>
       <textarea name="note" rows="2" placeholder="Optional — goes in the notice"></textarea></div>
-    <div id="callSummary">${summary(draft)}</div>
+    <div id="callSummary">${summary(null)}</div>
     <span class="muted" style="font-size:12px">Everybody asked is emailed their own figure
       and this date. Nobody is told what anybody else was asked for.</span>
   `, async (v) => {
-    if (!draft.items.length) throw new Error('Nothing to call for in that window.');
+    if (!draft?.items?.length) throw new Error('Nothing to call for in that window.');
+    if (!draft.investors.length) throw new Error('Nobody holds a share of those policies.');
     if (!v.due_date) throw new Error('Give the date the money has to be in by.');
     const made = await api('/capital-calls', { method: 'POST', body: {
-      title: v.title, note: v.note, due_date: v.due_date,
-      items: draft.items } });
+      title: v.title, note: v.note, due_date: v.due_date, items: draft.items } });
     toast(`Called ${fmtExact(made.total)} from ${made.lines.length} ${
       made.lines.length === 1 ? 'investor' : 'investors'}${
       made.notified ? ` · ${made.notified} emailed` : ''}`);
   }, 'Raise it');
 
-  $('#callDays', dlg).addEventListener('change', async (e) => {
-    $('#callSummary', dlg).innerHTML = '<div class="empty"><span class="spin"></span></div>';
-    draft = await api(`/capital-calls/draft?days=${e.target.value}`
-      + `&fund=${encodeURIComponent(entityFilter())}`);
-    $('#callSummary', dlg).innerHTML = summary(draft);
-  });
+  const load = async (days) => {
+    $('#callSummary', dlg).innerHTML = summary(null);
+    try {
+      draft = await api(`/capital-calls/draft?days=${days}`
+        + `&fund=${encodeURIComponent(entityFilter())}`);
+    } catch (err) {
+      draft = { error: err.message, items: [], investors: [] };
+    }
+    if (dlg.isConnected) $('#callSummary', dlg).innerHTML = summary(draft);
+  };
+  $('#callDays', dlg).addEventListener('change', (e) => load(e.target.value));
+  load(30);
   return dlg;
 }
 
@@ -6218,6 +6267,13 @@ async function settingsView() {
         <div class="card-head"><h2>The post</h2><div class="spacer"></div>
           <span class="muted" style="font-size:12px">${mailHealth.configured
             ? esc(mailHealth.from || 'sending') : 'not configured'}</span></div>
+        ${mailHealth.link_problem ? `<div class="card-body" style="padding-bottom:0">
+          <div class="error-box">${esc(mailHealth.link_problem)}</div></div>` : `
+          <div class="card-body" style="padding-bottom:0">
+            <span class="muted" style="font-size:12px">Every message links to
+              <strong>${esc(mailHealth.link || '—')}</strong> — the sign-in screen, never a
+              page inside the portal, so nobody meets a login form where they expected the
+              thing they were told about.</span></div>`}
         <div class="table-wrap"><table class="data">
           <tbody>
             <tr><td>Sent</td><td class="num strong">${mailHealth.counts?.Sent || 0}</td></tr>
@@ -7003,7 +7059,7 @@ async function agreementView() {
       <div class="card-body">
         <p class="secondary" style="margin-top:0">
           Read the whole document below first. Typing your name and pressing the button is your
-          signature: it has the same effect as signing on paper, and PolicyHub records the time,
+          signature: it has the same effect as signing on paper, and the portal records the time,
           your address and a fingerprint of the exact text you are signing.</p>
         <div id="signMsg"></div>
         <button class="primary" id="signBtn">Read and sign</button>
@@ -7325,7 +7381,7 @@ function openSignDialog(a) {
         I agree to sign electronically.</span>
     </label>
     <span class="muted" style="font-size:12px">
-      PolicyHub will record the moment you sign, the address you signed from, and a fingerprint
+      The portal will record the moment you sign, the address you signed from, and a fingerprint
       of the exact text — ${esc(String(a.body_hash || '').slice(0, 16))} — so the document you
       signed can be told apart from any other version later.</span>
   `, async (v) => {
