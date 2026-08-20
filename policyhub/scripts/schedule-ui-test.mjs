@@ -86,12 +86,17 @@ check('premium is the default kind',
   await p.locator('dialog[open] input[name="kind"][value="Premium"]').isChecked());
 check('and the estimated amount is shown for it',
   await p.locator('#stepAmountField').isVisible());
-check('pre-filled from the policy premium',
-  // The field groups thousands as you type, so read it the way a person does.
-  (await p.locator('dialog[open] input[name="amount"]').inputValue()) === '24,000',
+/* Deliberately empty. Every figure the calendar, the premium forecast and a
+   capital call use is read from this one box, so it has to be a number
+   somebody typed while looking at the carrier's statement — not the annual
+   premium from the policy form carried in by a default nobody re-read. */
+check('the amount is left blank rather than carried in from the policy form',
+  (await p.locator('dialog[open] input[name="amount"]').inputValue()) === '',
   await p.locator('dialog[open] input[name="amount"]').inputValue());
 const dlgText = (await p.locator('dialog[open]').textContent()).replace(/\s+/g, ' ');
 check('the dialog says the amount is an estimate', /amount is an estimate/i.test(dlgText));
+check('and says this entry is the only thing a capital call reads',
+  /capital call/i.test(dlgText) && /policy form/i.test(dlgText), dlgText.slice(-260));
 check('and points the actual payment at the ledger', /Log premium payment/.test(dlgText));
 
 await p.fill('dialog[open] input[name="due_date"]', iso(20));

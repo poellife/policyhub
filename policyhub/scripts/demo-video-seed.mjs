@@ -155,6 +155,66 @@ await api(admin, `/opportunities/${opp.id}/premium-schedule`, { method: 'POST', 
 await api(admin, `/opportunities/${opp.id}/shares`,
   { method: 'PUT', body: { investor_ids: [investor.id] } });
 
+/* --------------------------- one that paid -------------------------- */
+/* A book with nothing realized in it is a promise. One claim that has been
+   collected, with the cheque and the date it arrived, is the difference
+   between showing somebody a projection and showing them a result. */
+const matured = await json(await api(admin, '/policies', { method: 'POST', body: {
+  policy_number: 'PC-5540118', carrier_name: 'Pacific Life', product_type: 'UL',
+  fund_code: 'LCG1', face_amount: 3000000, premium_required: 62000, premium_mode: 'Annual',
+  insured_last_name: 'Vandermeer', insured_first_name: 'Alice', dob: '1934-09-02',
+  insured_gender: 'F', insured_state: 'FL',
+  acquisition_date: '2019-05-20', acquisition_cost: 520000 } }));
+await api(admin, `/policies/${matured.id}/transactions`, { method: 'POST', body: {
+  txn_date: '2019-05-20', txn_type: 'Acquisition Cost', amount: 520000 } });
+for (const [d, a] of [['2020-05-20', 62000], ['2021-05-20', 64100], ['2022-05-20', 66300],
+                      ['2023-05-20', 69800], ['2024-05-20', 72400]])
+  await api(admin, `/policies/${matured.id}/transactions`, { method: 'POST', body: {
+    txn_date: d, txn_type: 'Premium Payment', amount: a } });
+await api(admin, `/policies/${matured.id}/investors`, { method: 'POST', body: {
+  investor_id: investor.id, pct: 40, acquired_on: '2019-05-20' } });
+const insureds = await json(await api(admin, '/insureds?search=Vandermeer'));
+const vandermeer = (insureds.rows || insureds).find((i) => i.last_name === 'Vandermeer');
+if (vandermeer)
+  await api(admin, `/insureds/${vandermeer.id}`, { method: 'PUT', body: {
+    date_of_death: '2025-11-14' } });
+await api(admin, `/policies/${matured.id}/proceeds`, { method: 'PUT', body: {
+  proceeds_amount: 3000000, proceeds_received_on: '2026-01-09' } });
+
+/* --------------------- an agreement, and a call --------------------- */
+/* Both are things the portal now asks the investor to DO, and a walkthrough
+   that only shows figures misses the half of it that involves them. */
+for (const a of ((await json(await api(admin, '/agreements'))) || []))
+  if (String(a.title || '').startsWith('LCG1 Fund')) {
+    if (a.status !== 'Draft') await api(admin, `/agreements/${a.id}/recall`, { method: 'POST' });
+    await api(admin, `/agreements/${a.id}`, { method: 'DELETE' });
+  }
+const agreement = await json(await api(admin, '/agreements', { method: 'POST', body: {
+  title: 'LCG1 Fund I LLC — operating agreement', fund_id: lcg1.id,
+  terms: {
+    llc_name: 'LCG1 Fund I LLC', manager_name: 'Poel Capital LLC', state: 'Michigan',
+    effective_date: '2026-01-01', purpose: 'Acquiring and holding life settlement policies',
+    manager_fee: '2', capital_call_days: '10',
+    profit_split: '90/10 after return of capital',
+  } } }));
+await api(admin, `/agreements/${agreement.id}/signers`, { method: 'PUT', body: { signers: [
+  { role: 'Manager', name: 'Poel Capital LLC' },
+  { investor_id: investor.id, name: DEMO.investorName,
+    email: DEMO.email, contribution: 1250000, pct: 35 },
+] } });
+await api(admin, `/agreements/${agreement.id}/issue`, { method: 'POST' });
+
+for (const c of ((await json(await api(admin, '/capital-calls'))) || []))
+  if (String(c.title || '').startsWith('Premiums —')) 
+    await api(admin, `/capital-calls/${c.id}`, { method: 'DELETE' }).catch(() => {});
+const draft = await json(await api(admin, '/capital-calls/draft?days=60'));
+if (draft.items?.length) {
+  const due = new Date(Date.now() + 12 * 86400000).toISOString().slice(0, 10);
+  await api(admin, '/capital-calls', { method: 'POST', body: {
+    title: 'Premiums — third quarter', due_date: due, items: draft.items,
+    note: 'Wiring instructions are unchanged. Call the office if anything looks unfamiliar.' } });
+}
+
 /* ------------------------------- login ------------------------------ */
 const made = await api(admin, '/users', { method: 'POST', body: {
   email: DEMO.email, password: DEMO.password, full_name: 'R. Whitfield',

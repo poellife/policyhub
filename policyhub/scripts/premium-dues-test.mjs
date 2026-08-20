@@ -1,18 +1,17 @@
 /* =====================================================================
-   The dashboard and the Premiums page must agree.
+   The dashboard and the Premiums page must agree — and must agree with
+   the servicing calendar, which is the only place either of them reads.
 
-   A premium reaches an investor from either of two places: a next-due date
-   the carrier put on the policy, or a premium somebody here posted to the
-   schedule. Whoever has to fund it does not care which table it came from.
+   A premium an investor will be asked to fund is an entry somebody made
+   on a policy's servicing tab, with the amount they entered there. The
+   annual figure and carrier due date on the policy form describe how the
+   policy was written; they are not a bill, and no screen that says money
+   is due may read them. Two sources meant one payment appearing twice at
+   two different figures.
 
-   The Portfolio card used to read only the first of those, so a book
-   funded entirely from posted schedules — which is what any import
-   without a next-due column produces — said "no premium dates are
-   scheduled" on the dashboard while the Premiums page one click away
-   listed every one of them.
-
-   So this drives a book with one of each and asserts the two screens show
-   the same dates and the same money.
+   So this drives a book with one policy scheduled and one carrying only
+   a policy-form premium, and asserts both screens show the first, agree
+   with each other to the cent, and show nothing at all for the second.
    ===================================================================== */
 import { chromium } from 'playwright';
 import { BASE, ADMIN, INVESTOR1, login } from './test-config.mjs';
@@ -61,23 +60,31 @@ const make = async (tag, extra) => {
   return p;
 };
 
-/* One with a carrier next-due date and no schedule. One with a schedule and
-   no next-due date — the shape an import produces, and the one that used to
-   vanish from the dashboard. */
-const carrierDated = await make('CARRIERDATE', {
+/* One carrying nothing but policy-form figures — an annual premium and a
+   carrier date next month. Nothing is owed on it until somebody schedules
+   something, and it must appear on neither screen. One with a schedule and
+   no next-due date at all — the shape an import produces, and the only one
+   that is really due. */
+const formOnly = await make('FORMONLY', {
   premium_required: 40000, next_premium_due: iso(20) });
-const scheduleOnly = await make('SCHEDULEONLY', { premium_required: 60000 });
+const scheduled = await make('SCHEDULED', { premium_required: 60000 });
 for (const d of [40, 405]) {
-  const r = await api(`/policies/${scheduleOnly.id}/reminders`, { method: 'POST', body: {
+  const r = await api(`/policies/${scheduled.id}/reminders`, { method: 'POST', body: {
     due_date: iso(d), kind: 'Premium', amount: 60000, note: 'Annual premium' } });
   if (r.status !== 201) console.log('   (schedule row refused:', r.status, await r.text(), ')');
 }
 
 const svc = await json(await fetch(`${BASE}/api/servicing?fund=${FUND}`, { headers: { Cookie: inv } }));
-check('the API carries a carrier-dated premium', (svc.upcoming || []).length >= 1,
-  String((svc.upcoming || []).length));
-check('and a posted schedule', (svc.scheduled || []).filter((r) => r.kind === 'Premium').length >= 1,
-  String((svc.scheduled || []).length));
+const ours = (rows) => (rows || []).filter((r) =>
+  String(r.policy_number || '').startsWith(PREFIX));
+check('the API carries the scheduled premiums', ours(svc.upcoming).length === 2,
+  String(ours(svc.upcoming).length));
+check('and every one of them is a schedule entry',
+  ours(svc.scheduled).filter((r) => r.kind === 'Premium').length === 2,
+  String(ours(svc.scheduled).length));
+check('the policy with only a form figure owes nothing',
+  !ours(svc.upcoming).some((r) => /FORMONLY/.test(r.policy_number)),
+  ours(svc.upcoming).map((r) => r.policy_number).join(', '));
 
 const br = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
 const ctx = await br.newContext({ viewport: { width: 1500, height: 1100 } });
@@ -107,11 +114,12 @@ const dash = await readCard('Premiums coming up');
 check('is not empty when premiums are only on a schedule',
   Array.isArray(dash) && dash.length > 0,
   dash === null ? 'card missing' : `${(dash || []).length} rows`);
-check('and lists the schedule-only policy, which is the one that used to vanish',
-  (dash || []).some((r) => /SCHEDULEONLY/.test(r.policy)),
+check('and lists the scheduled policy, which is the one that used to vanish',
+  (dash || []).some((r) => /SCHEDULED/.test(r.policy)),
   (dash || []).map((r) => r.policy).join(' | '));
-check('alongside the carrier-dated one',
-  (dash || []).some((r) => /CARRIERDATE/.test(r.policy)));
+check('and never the one whose only figure is on the policy form',
+  !(dash || []).some((r) => /FORMONLY/.test(r.policy)),
+  (dash || []).map((r) => r.policy).join(' | '));
 await p.screenshot({ path: `${S}/pd1-dashboard.png`, fullPage: true });
 
 console.log('\nAND THE PREMIUMS PAGE');
@@ -119,7 +127,10 @@ await p.goto(`${BASE}/#/servicing`);
 await p.waitForSelector('table.data', { timeout: 12000 });
 await p.waitForTimeout(1200);
 const page = await readCard('Premiums coming up');
-check('shows both as well', (page || []).length >= 2, String((page || []).length));
+check('shows every scheduled date', (page || []).length >= 2, String((page || []).length));
+check('and still nothing for the unscheduled policy',
+  !(page || []).some((r) => /FORMONLY/.test(r.policy)),
+  (page || []).map((r) => r.policy).join(' | '));
 
 const cents = (v) => String(v).replace(/\.00$/, '');
 const key = (r) => `${r.due}|${r.policy.replace(/\s+/g, ' ')}|${cents(r.share)}`;

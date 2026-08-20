@@ -83,10 +83,19 @@ check('and the ledger is untouched — an estimate is not a payment',
 console.log('\nTHE SERVICING CALENDAR PICKS THEM UP');
 const svc = await json(await api(admin, '/servicing'));
 const mine = (svc.scheduled || []).filter((r) => r.policy_number === `${PREFIX}-1`);
-check('a step inside the window is on the calendar', mine.length === 1,
+check('both steps are on the calendar', mine.length === 2,
   `${mine.length} of ${(svc.scheduled || []).length}`);
-check('the one 400 days out is not — it is not news yet',
-  !mine.some((r) => r.id === premRow.id));
+/* A premium years out still belongs on the list: this schedule is the only
+   record of what has to be funded, so a calendar that stopped at six weeks
+   would take the premium forecast with it. What it does NOT do is raise an
+   alarm — that is reserved for the next six weeks of work. */
+check('including the premium 400 days out, which the forecast needs',
+  mine.some((r) => r.reminder_id === premRow.id),
+  mine.map((r) => `${r.kind}:${String(r.due_date).slice(0, 10)}`).join(' '));
+check('but it raises no alert yet — it is not news',
+  !(svc.alerts || []).some((a) => a.reminder_id === premRow.id));
+check('and it is what the calendar says is coming up',
+  (svc.upcoming || []).some((u) => u.reminder_id === premRow.id));
 const alert = (svc.alerts || []).find((a) => a.scheduled && a.reminder_id === remRow.id);
 check('it reads as an alert', !!alert, JSON.stringify(alert?.reason));
 check('naming what it is and when', /Follow-up due in \d+ days/.test(alert?.reason || ''),

@@ -67,9 +67,13 @@ const mk = async (suffix, fundCode, pct, opts = {}) => {
 };
 const own = await mk('1', 'LCG1', 25);
 const other = await mk('2', 'LCG2', 40);
-// A premium scheduled by hand has to appear beside the carrier's own date.
+/* What this investor will be asked to fund comes off the servicing calendar
+   and nothing else. Both policies carry an annual premium and a carrier due
+   date; only what is scheduled here may reach the statement. */
 await api(admin, `/policies/${own.id}/reminders`, { method: 'POST', body: {
   due_date: iso(200), kind: 'Premium', amount: 46000, note: 'Step-up per the illustration' } });
+await api(admin, `/policies/${other.id}/reminders`, { method: 'POST', body: {
+  due_date: iso(120), kind: 'Premium', amount: 40000, note: 'Annual premium' } });
 
 console.log('AN ADMIN SEES THE WHOLE RELATIONSHIP');
 const all = await json(await api(admin, `/reports/investors?investor_ids=${subject.id}`));
@@ -101,13 +105,18 @@ check('the parts add up to the whole',
 
 console.log('\nWHAT IS DUE NEXT');
 const dues = rep.upcoming.filter((u) => String(u.policy_number).startsWith(PREFIX));
-check('both carrier dates are listed', dues.filter((u) => u.source !== 'scheduled').length === 2,
+check('both scheduled premiums are listed', dues.length === 2,
   dues.map((u) => `${u.date}:${u.source}`).join(' '));
-check('and the one scheduled by hand', dues.some((u) => u.source === 'scheduled'));
+check('every one of them from the servicing calendar',
+  dues.every((u) => u.source === 'scheduled'),
+  dues.map((u) => u.source).join(' '));
+check('and nothing from the policy form, which carries its own date and figure',
+  !dues.some((u) => near(u.amount_full, 40000) && u.policy_number === `${PREFIX}-1`),
+  dues.map((u) => `${u.policy_number}:${u.amount_full}`).join(' '));
 check('soonest first', dues.every((u, i) => i === 0 || dues[i - 1].date <= u.date));
-const own45 = dues.find((u) => u.policy_number === `${PREFIX}-1` && u.source !== 'scheduled');
-check('each amount is their share', near(own45.amount, 40000 * 0.25), String(own45.amount));
-check('with the full policy figure beside it', near(own45.amount_full, 40000));
+const own45 = dues.find((u) => u.policy_number === `${PREFIX}-1`);
+check('each amount is their share', near(own45.amount, 46000 * 0.25), String(own45.amount));
+check('with the full policy figure beside it', near(own45.amount_full, 46000));
 check('and the twelve-month total is summed', rep.upcoming_12mo > 0,
   String(rep.upcoming_12mo));
 

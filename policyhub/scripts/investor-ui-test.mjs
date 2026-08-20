@@ -1,5 +1,25 @@
 import { chromium } from 'playwright';
-import { BASE, ADMIN, INVESTOR1 } from './test-config.mjs';
+import { BASE, ADMIN, INVESTOR1, login } from './test-config.mjs';
+
+/* A premium the investor will be asked to fund.
+   Everything an investor is shown about money going out is read from the
+   servicing calendar, so a book with nothing scheduled has an honestly
+   empty Premiums page — and this suite is checking the full one. Put one
+   date on one of their policies, and take it off again at the end. */
+const adminCookie = await login(ADMIN.email, ADMIN.password);
+const call = (path, opts = {}) => fetch(`${BASE}/api${path}`, {
+  ...opts,
+  body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
+  headers: { Cookie: adminCookie, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+});
+const investorCookie = await login(INVESTOR1.email, INVESTOR1.password);
+const theirPolicies = await (await fetch(`${BASE}/api/policies`,
+  { headers: { Cookie: investorCookie } })).json();
+const scheduledOn = theirPolicies[0];
+const scheduledPremium = await (await call(`/policies/${scheduledOn.id}/reminders`, {
+  method: 'POST', body: { kind: 'Premium', amount: 18000, note: 'Annual premium',
+    due_date: new Date(Date.now() + 45 * 86400000).toISOString().slice(0, 10) } })).json();
+
 const S='/home/claude/shots';
 const fails=[]; const errs=[];
 const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
@@ -267,6 +287,9 @@ await inv.screenshot({ path: `${S}/i10-investor-statement.png`, fullPage: true }
 await inv.goto(`${BASE}/#/settings`); await inv.waitForSelector('#pwForm'); await inv.waitForTimeout(500);
 const setTxt = await inv.locator('.main').textContent();
 check('investor settings shows only password', setTxt.includes('Change your password') && !setTxt.includes('Owner entities') && !setTxt.includes('Activity log'));
+
+if (scheduledPremium?.id)
+  await call(`/policy-reminders/${scheduledPremium.id}`, { method: 'DELETE' });
 
 console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
 check('no page errors', errs.length===0);

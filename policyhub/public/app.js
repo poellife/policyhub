@@ -46,6 +46,10 @@ const state = {
   funds: [],
   oppCount: 0,        // drives the badge in the menu
   showDecided: false, // whether the registration queue shows decided ones too
+  /* Whether the servicing page lists cancelled capital calls. A cancelled
+     call stays on the record — it is part of what was asked and withdrawn —
+     but it is not work, so it is off the page until somebody asks for it. */
+  showCancelledCalls: false,
   // Which column the Maturities register is ordered by, and which way.
   matSort: { key: 'matured_on', dir: -1 },
   /* Policies ticked for deletion. A Set of ids rather than a flag on each
@@ -546,23 +550,20 @@ const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?
 function premiumDues(svc) {
   const name = (r) => r.display_name
     || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
-  return [
-    ...(svc.upcoming || []).filter((r) => r.next_premium_due).map((r) => ({
-      date: String(r.next_premium_due).slice(0, 10),
-      policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
-      insured: name(r), sex: sexAndAge(r.insured_gender, r.insured_dob),
-      amount: Number(r.premium_required) || 0,
-      amount_full: Number(r.premium_required_full) || 0,
-      source: r.premium_mode || 'carrier',
-    })),
-    ...(svc.scheduled || []).filter((r) => r.kind === 'Premium').map((r) => ({
+  /* One source, and only one: what somebody put on the servicing calendar.
+     The policy record's annual premium and carrier due date describe the
+     policy — they are not a bill, and reading them here meant the same
+     payment showed up twice at two different figures. */
+  return (svc.scheduled || [])
+    .filter((r) => r.kind === 'Premium')
+    .map((r) => ({
       date: String(r.due_date).slice(0, 10),
       policy_id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
       insured: name(r), sex: sexAndAge(r.insured_gender, r.insured_dob),
       amount: Number(r.amount) || 0, amount_full: Number(r.amount_full) || 0,
       source: 'scheduled', note: r.note,
-    })),
-  ].sort((a, b) => (a.date < b.date ? -1 : 1));
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
 const isAdminUser    = () => state.user?.role === 'admin';
@@ -1103,12 +1104,12 @@ function alertRow(a) {
       </div>
       <div class="spacer"></div>
       <div style="text-align:right">
+        ${''/* Only a scheduled item carries a figure. The rest of these are
+               lapse risk and stale carrier data — putting the policy's annual
+               premium beside them read as an amount that was due. */}
         <div style="font-variant-numeric:tabular-nums;font-weight:600">${
-          a.scheduled ? (a.amount ? fmtExact(a.amount) : '')
-            : (a.premium_required ? fmtExact(a.premium_required) : '')}</div>
-        <div class="meta">${a.scheduled
-          ? `${fmtDate(a.due_date)} · scheduled`
-          : (a.next_premium_due ? fmtDate(a.next_premium_due) : '')}</div>
+          a.scheduled && a.amount ? fmtExact(a.amount) : ''}</div>
+        <div class="meta">${a.scheduled ? `${fmtDate(a.due_date)} · scheduled` : ''}</div>
       </div>
     </div>`;
 }
@@ -1638,7 +1639,9 @@ async function policyView() {
       <div class="stat"><div class="label">Next premium due</div>
         <div class="value" style="font-size:22px">${nextPremium(p) ? fmtDate(nextPremium(p).date) : '—'}</div>
         <div class="note">${nextPremium(p)
-          ? `${fmtExact(scaled(p.premium_required, p))} · your share`
+          ? (nextPremium(p).amount
+              ? `${fmtExact(scaled(nextPremium(p).amount, p))} · your share`
+              : 'amount not set yet')
           : 'nothing scheduled'}</div></div>` : `
       <div class="stat"><div class="label">Coverage runway</div>
         <div class="value" style="${monthsCovered !== null && monthsCovered < 6 ? 'color:var(--critical)' : ''}">${
@@ -1802,11 +1805,11 @@ function overviewTab(p) {
         ${row('Acquired', fmtDate(p.acquisition_date))}
         ${row('Acquisition cost', money(scaled(p.acquisition_cost, p)))}
         ${row('Total invested', money(scaled(p.total_invested, p)))}
-        ${row('Premium required', `${money(scaled(p.premium_required, p))} <span class="muted">${esc(p.premium_mode || '')}</span>`)}
         ${row('Next premium due', nextPremium(p)
-          ? `${fmtDate(nextPremium(p).date)}${nextPremium(p).scheduled
-              ? ' <span class="muted">scheduled</span>' : ''}`
-          : fmtDate(null))}
+          ? `${fmtDate(nextPremium(p).date)}${nextPremium(p).amount
+              ? ` <span class="muted">· ${money(scaled(nextPremium(p).amount, p))}</span>` : ''}`
+          : '<span class="muted">nothing scheduled</span>')}
+        ${row('Premium on the policy', `${money(scaled(p.premium_required, p))} <span class="muted">${esc(p.premium_mode || '')} · reference</span>`)}
         ${row('Grace period', `${p.grace_period_days || 61} days`)}
         ${row('Values as of', fmtDate(p.value_as_of))}
         ${row('Case files', p.documents_url
@@ -1982,23 +1985,21 @@ function transactionsTab(p) {
 /**
  * The soonest premium actually coming on a policy.
  *
- * A policy carries one next-due date from the carrier, but a premium put on
- * the follow-up schedule by hand is just as real and may fall sooner. Whoever
- * is reading the page wants the earlier of the two, and wants to know which
- * kind it is.
+ * Read from the servicing schedule and nowhere else. The carrier date and
+ * annual figure on the policy form describe the policy as it was written;
+ * what has to be paid, and when, is what somebody entered on the servicing
+ * tab. Two sources meant the page could show a date the calendar did not
+ * have and a figure the capital call did not use.
  */
 function nextPremium(p) {
   const todayIso = today();
-  const options = [];
-  if (p.next_premium_due && String(p.next_premium_due).slice(0, 10) >= todayIso)
-    options.push({ date: String(p.next_premium_due).slice(0, 10), scheduled: false });
-  for (const r of p.reminders || [])
-    if (r.kind === 'Premium' && !r.done_at && String(r.due_date).slice(0, 10) >= todayIso)
-      options.push({ date: String(r.due_date).slice(0, 10), scheduled: true });
-  options.sort((a, b) => (a.date < b.date ? -1 : 1));
-  // Nothing ahead: fall back to the carrier date so a lapsed one still shows.
-  return options[0]
-    || (p.next_premium_due ? { date: String(p.next_premium_due).slice(0, 10), scheduled: false } : null);
+  const options = (p.reminders || [])
+    .filter((r) => r.kind === 'Premium' && !r.done_at
+      && String(r.due_date).slice(0, 10) >= todayIso)
+    .map((r) => ({ date: String(r.due_date).slice(0, 10), scheduled: true,
+                   amount: Number(r.amount) || 0, note: r.note || '' }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  return options[0] || null;
 }
 
 function servicingTab(p, monthsCovered) {
@@ -2008,18 +2009,13 @@ function servicingTab(p, monthsCovered) {
      on a policy they hold 8% of has been handed an alarm they cannot act on. */
   if (isInvestorUser()) {
     const f = shareFactor(p);
-    // Anything scheduled by hand joins the carrier's own next-due date, so the
-    // investor sees one list of what is coming rather than two half-lists.
+    // Every premium date on this policy's servicing schedule. That schedule
+    // is the whole list — nothing here is inferred from the policy record.
     const planned = (p.reminders || [])
       .filter((r) => r.kind === 'Premium' && !r.done_at)
       .map((r) => ({ date: String(r.due_date).slice(0, 10), amount: Number(r.amount) * f,
                      full: Number(r.amount), note: r.note, scheduled: true }));
-    const carrier = p.next_premium_due
-      ? [{ date: String(p.next_premium_due).slice(0, 10),
-           amount: Number(p.premium_required || 0) * f,
-           full: Number(p.premium_required || 0), note: '', scheduled: false }]
-      : [];
-    const all = [...carrier, ...planned].sort((a, b) => (a.date < b.date ? -1 : 1));
+    const all = [...planned].sort((a, b) => (a.date < b.date ? -1 : 1));
 
     return `
     <div class="card">
@@ -2042,9 +2038,9 @@ function servicingTab(p, monthsCovered) {
       </table></div>
       <div class="card-body" style="border-top:1px solid var(--grid)">
         <span class="muted" style="font-size:12.5px;line-height:1.6">
-          Amounts beyond the next carrier date are estimates from the policy illustration and
-          will move. Your column is ${p.my_pct != null ? fmtPct(p.my_pct) : 'your percentage'}
-          of the full policy premium beside it.</span>
+          These are the premium dates entered on this policy's servicing schedule; amounts
+          are estimates until the payment is made. Your column is ${p.my_pct != null
+            ? fmtPct(p.my_pct) : 'your percentage'} of the full policy premium beside it.</span>
       </div>
     </div>`;
   }
@@ -2052,13 +2048,22 @@ function servicingTab(p, monthsCovered) {
   const steps = p.reminders || [];
   const open = steps.filter((r) => !r.done_at);
   const done = steps.filter((r) => r.done_at);
-  const due = p.next_premium_due
-    ? Math.round((new Date(`${p.next_premium_due}T00:00:00`) - new Date(`${today()}T00:00:00`)) / 86400000)
-    : null;
+  /* Counted from the servicing schedule, which is where a premium that has
+     to be paid is recorded. An overdue one is an entry nobody has marked
+     done, not a date left behind on the policy form. */
+  const overdue = open
+    .filter((r) => r.kind === 'Premium' && String(r.due_date).slice(0, 10) < today())
+    .sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
+  const soonest = nextPremium(p);
+  const days = (iso) =>
+    Math.round((new Date(`${iso}T00:00:00`) - new Date(`${today()}T00:00:00`)) / 86400000);
   const notes = [];
-  if (due !== null && due < 0) notes.push(['critical', `Premium was due ${Math.abs(due)} days ago`]);
-  else if (due !== null && due <= 14) notes.push(['warning', `Premium due in ${due} days`]);
-  else if (due !== null) notes.push(['info', `Premium due in ${due} days`]);
+  if (overdue)
+    notes.push(['critical',
+      `Premium was due ${Math.abs(days(String(overdue.due_date).slice(0, 10)))} days ago`]);
+  else if (soonest)
+    notes.push([days(soonest.date) <= 14 ? 'warning' : 'info',
+      `Premium due in ${days(soonest.date)} days`]);
   if (monthsCovered !== null && monthsCovered < 3)
     notes.push(['critical', `Account value covers only ${monthsCovered.toFixed(1)} months of cost of insurance`]);
   else if (monthsCovered !== null && monthsCovered < 6)
@@ -2070,12 +2075,14 @@ function servicingTab(p, monthsCovered) {
       <div class="card-head"><h2>Premium schedule</h2></div>
       <div class="card-body">
         <dl class="kv">
-          <dt>Premium required</dt><dd>${money(scaled(p.premium_required, p))}</dd>
-          <dt>Mode</dt><dd>${esc(p.premium_mode || '—')}</dd>
-          <dt>Next due</dt><dd>${nextPremium(p)
-            ? `${fmtDate(nextPremium(p).date)}${nextPremium(p).scheduled
-                ? ' <span class="muted">scheduled</span>' : ''}`
-            : fmtDate(null)}</dd>
+          <dt>Next due</dt><dd>${soonest
+            ? `${fmtDate(soonest.date)}${soonest.amount
+                ? ` <span class="muted">· ${money(scaled(soonest.amount, p))}</span>` : ''}`
+            : '<span class="muted">nothing scheduled</span>'}</dd>
+          ${''/* Reference, not an obligation: what the policy was written to
+                 take. Nothing on the servicing calendar is derived from it. */}
+          <dt>Premium on the policy</dt><dd>${money(scaled(p.premium_required, p))}
+            <span class="muted">${esc(p.premium_mode || '')} · reference</span></dd>
           <dt>Grace period</dt><dd>${p.grace_period_days || 61} days</dd>
           <dt>Last withdrawal</dt><dd>${fmtDate(p.date_of_last_withdrawal)}</dd>
           <dt>Values as of</dt><dd>${fmtDate(p.value_as_of)}</dd>
@@ -2473,7 +2480,10 @@ function wireDetailTab(p, values, irrData) {
 
   if (detailTab === 'servicing') {
     $('#logPremiumBtn')?.addEventListener('click', () =>
-      openTxnDialog(p, { txn_type: 'Premium Payment', amount: p.premium_required }));
+      /* Prefilled from what was scheduled, not from the policy form — the
+         figure somebody is about to confirm should be the one they were
+         asked to find. */
+      openTxnDialog(p, { txn_type: 'Premium Payment', amount: nextPremium(p)?.amount || '' }));
     $('#scheduleStepBtn')?.addEventListener('click', () => openStepDialog(p));
 
     document.querySelectorAll('[data-step-edit]').forEach((b) =>
@@ -3005,11 +3015,19 @@ function openValueDialog(p) {
 function openStepDialog(p, existing = null) {
   const editing = !!existing;
   const kind = existing?.kind || 'Premium';
-  // Default to a year out at the stated premium — the commonest case by far,
-  // and a sensible thing to correct rather than a blank form to fill in.
+  /* A date to correct rather than a blank box: a year on from the last
+     premium already scheduled, or a year from today if this is the first.
+     The AMOUNT is deliberately not suggested — every figure the calendar,
+     the forecast and a capital call use comes from this field, so it has to
+     be one somebody typed while looking at the carrier's statement, not the
+     policy form's annual figure carried in by default. */
+  const lastScheduled = (p.reminders || [])
+    .filter((r) => r.kind === 'Premium')
+    .map((r) => dateInput(r.due_date))
+    .sort()
+    .pop();
   const suggestedDate = existing ? dateInput(existing.due_date)
-    : addMonthsIso(dateInput(p.next_premium_due) || today(),
-      { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 }[p.premium_mode] || 12);
+    : addMonthsIso(lastScheduled || today(), 12);
 
   const dlg = openDialog(editing ? 'Edit this step' : 'Schedule next step', `
     <div class="field">
@@ -3035,7 +3053,7 @@ function openStepDialog(p, existing = null) {
       <div class="field" id="stepAmountField">
         <label>Estimated amount</label>
         <input name="amount" type="text" inputmode="decimal" data-money autocomplete="off"
-               value="${esc(groupDigits(String(existing?.amount ?? p.premium_required ?? '')))}">
+               value="${esc(groupDigits(String(existing?.amount ?? '')))}">
       </div>
     </div>
 
@@ -3046,7 +3064,9 @@ function openStepDialog(p, existing = null) {
 
     <span class="muted" style="font-size:12px">
       This goes on the Servicing calendar and stays there until somebody marks it done.
-      The amount is an estimate — what was actually paid is recorded with
+      A premium entered here is the only thing the calendar, the premium forecast and a
+      capital call read — nothing is taken from the annual figure on the policy form.
+      The amount is an estimate; what was actually paid is recorded with
       <strong>Log premium payment</strong>, which is a different thing and belongs in
       the ledger.
     </span>
@@ -3091,11 +3111,22 @@ function openTxnDialog(p, preset = {}) {
 /* ----------------------------- servicing ----------------------------- */
 
 async function servicingView() {
-  const [svc, funds, calls] = await Promise.all([
+  const mayRaise = !isInvestorUser() && ['admin', 'manager'].includes(state.user.role);
+  const [svc, funds, calls, dupes] = await Promise.all([
     api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
     loadFunds(),
     api('/capital-calls').catch(() => []),
+    /* Calls raised more than once before this was fixed. New ones fold into
+       the open call by themselves; these are the ones already on the page. */
+    mayRaise ? api('/capital-calls/duplicates').catch(() => ({ groups: [] }))
+      : Promise.resolve({ groups: [] }),
   ]);
+  const dupeGroups = dupes.groups || [];
+  /* Cancelled calls stay on the record but off the page. After folding
+     duplicates in, the copies are cancelled rather than deleted — leaving
+     them in the list would mean the fix appeared to change nothing. */
+  const shownCalls = calls.filter((c) => c.status !== 'Cancelled' || state.showCancelledCalls);
+  const cancelledCount = calls.length - calls.filter((c) => c.status !== 'Cancelled').length;
   const investor = isInvestorUser();
   // An investor is shown what is still to come. A date that has already
   // passed is a servicing matter — somebody is chasing it — and putting it
@@ -3133,17 +3164,30 @@ async function servicingView() {
     ${/* What has been asked for, and what has come back. A premium schedule
           says when the carrier wants the money; a call says when the office
           needs it in the account, which is the date an investor can act on. */''}
-    ${calls.length ? `
+    ${dupeGroups.length ? `
+    <div class="notice-box" style="margin-bottom:14px">
+      <strong>${dupeGroups.length === 1 ? 'One ask has' : `${dupeGroups.length} asks have`}
+      been raised more than once.</strong>
+      ${dupeGroups.map((g) => `${g.calls.length} identical calls for ${
+        esc(g.calls[0].title || 'a capital call')} due ${fmtDate(g.calls[0].due_date)}`).join('; ')}.
+      Combining keeps the earliest one and moves every investor onto it — including anybody
+      who has already said they paid — and cancels the copies.
+      <div style="margin-top:9px"><button class="btn-sm" id="combineCallsBtn">Combine them</button></div>
+    </div>` : ''}
+
+    ${shownCalls.length || cancelledCount ? `
     <div class="card">
       <div class="card-head"><h2>Capital calls</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">${
-          calls.filter((c) => c.status === 'Open').length} open</span></div>
+          calls.filter((c) => c.status === 'Open').length} open</span>${cancelledCount ? `
+        <button class="btn-sm" id="toggleCancelledCalls" style="margin-left:10px">${
+          state.showCancelledCalls ? 'Hide' : 'Show'} ${cancelledCount} cancelled</button>` : ''}</div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>Called</th><th>What for</th><th>Money in by</th>
           ${investor ? '<th class="num">Your share</th><th>You</th>'
             : '<th class="num">Asked</th><th class="num">Received</th><th>Parties</th>'}
           <th></th></tr></thead>
-        <tbody>${calls.map((c) => `<tr>
+        <tbody>${shownCalls.map((c) => `<tr>
           <td class="muted">${fmtDate(c.created_at)}</td>
           <td class="strong">${esc(c.title || 'Capital call')}${c.fund_code
             ? ` <span class="muted">· ${esc(c.fund_code)}</span>` : ''}</td>
@@ -3203,15 +3247,18 @@ async function servicingView() {
       </table></div>
       <div class="card-body" style="border-top:1px solid var(--grid)">
         <span class="muted" style="font-size:12.5px;line-height:1.6">
-          Amounts beyond the next carrier date are estimates from the policy illustration and
-          will move. Your column is your percentage of the full policy premium beside it.</span>
+          These are the premium dates on your policies' servicing schedules; amounts are
+          estimates until the payment is made and can move. Your column is your percentage
+          of the full policy premium beside it.</span>
       </div>
     </div>` : `
     <div class="card">
       <div class="card-head"><h2>Upcoming premiums</h2></div>
       <div class="card-body flush">
         ${Object.keys(grouped).length === 0
-          ? '<div class="empty">No premium due dates recorded. Add them on each policy.</div>'
+          ? `<div class="empty">Nothing is scheduled. Premium dates and amounts come from
+               <strong>Schedule next step</strong> on a policy's Servicing tab — that entry is
+               the only thing this calendar, the forecast and a capital call read.</div>`
           : Object.entries(grouped).sort().map(([month, rows]) => `
             <div style="padding:11px 16px;border-bottom:1px solid var(--grid);background:var(--page)">
               <strong>${new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong>
@@ -3237,6 +3284,25 @@ async function servicingView() {
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       onClick('#raiseCallBtn', () => openRaiseCallDialog());
+      onClick('#toggleCancelledCalls', () => {
+        state.showCancelledCalls = !state.showCancelledCalls;
+        render();
+      });
+      onClick('#combineCallsBtn', async () => {
+        const total = dupeGroups.reduce((n, g) => n + g.calls.length - 1, 0);
+        if (!confirm(`Fold ${total} duplicate call${total === 1 ? '' : 's'} into the `
+          + `original${dupeGroups.length === 1 ? '' : 's'}? The copies are cancelled, not `
+          + 'deleted, and every investor line moves across.')) return;
+        let folded = 0;
+        for (const g of dupeGroups) {
+          const [keep, ...rest] = g.calls;
+          const r = await api(`/capital-calls/${keep.id}/absorb`,
+            { method: 'POST', body: { ids: rest.map((c) => c.id) } });
+          folded += r.folded || 0;
+        }
+        toast(`${folded} duplicate call${folded === 1 ? '' : 's'} folded in`);
+        render();
+      });
       document.querySelectorAll('[data-call]').forEach((b) =>
         b.addEventListener('click', async () => {
           try {
@@ -3309,9 +3375,10 @@ async function openRaiseCallDialog() {
     if (d.error) return `<div class="error-box">${esc(d.error)}</div>`;
     if (mode === 'premiums' && !d.items?.length) return `
       <div class="notice-box">
-        Nothing falls due inside that window, so there is nothing to call for.
-        Widen it above — or, if premiums are missing rather than absent, a policy needs
-        a <strong>next premium due</strong> date and an amount before it can be called on.
+        Nothing is scheduled inside that window, so there is nothing to call for.
+        Widen it above — or, if premiums are missing rather than absent, put them on the
+        policy's Servicing tab with <strong>Schedule next step</strong>. A capital call is
+        raised from those entries and their amounts, and from nothing else.
       </div>`;
     if (mode === 'acquisition' && !d.items?.length) return `
       <div class="notice-box">Choose which deal the money is for.</div>`;
@@ -3341,8 +3408,8 @@ async function openRaiseCallDialog() {
         <label class="rpt-choice selected">
           <input type="radio" name="callFor" value="premiums" checked>
           <span class="rpt-choice-name">Premiums falling due</span>
-          <span class="rpt-choice-blurb">Everything due inside a window, split by who holds
-            each policy.</span>
+          <span class="rpt-choice-blurb">Every premium scheduled inside a window, split by
+            who holds each policy.</span>
         </label>
         <label class="rpt-choice">
           <input type="radio" name="callFor" value="acquisition">
@@ -3388,9 +3455,20 @@ async function openRaiseCallDialog() {
         : {}),
       investor_ids: people().map((i) => i.investor_id),
     } });
-    toast(`Called ${fmtExact(made.total)} from ${made.lines.length} ${
-      made.lines.length === 1 ? 'investor' : 'investors'}${
-      made.notified ? ` · ${made.notified} emailed` : ''}`);
+    /* Raised twice. The server folded it into the call already open rather
+       than writing a second one, and says so — otherwise the toast reads
+       like a fresh ask and somebody goes looking for a row that is not
+       there. */
+    if (made.merged)
+      toast(made.added
+        ? `That call was already open — ${made.added} ${made.added === 1
+            ? 'investor was' : 'investors were'} added to it${
+            made.notified ? ` and emailed` : ''}`
+        : 'That exact call is already open, so nothing was sent again');
+    else
+      toast(`Called ${fmtExact(made.total)} from ${made.lines.length} ${
+        made.lines.length === 1 ? 'investor' : 'investors'}${
+        made.notified ? ` · ${made.notified} emailed` : ''}`);
   }, 'Raise it');
 
   const paint = () => {

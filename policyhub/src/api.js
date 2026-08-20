@@ -2614,24 +2614,13 @@ router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res
   const funds = fundScope(req);
   const to = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 
-  /* Premiums the carrier has dated inside the window, plus anything posted
-     to the schedule by hand — the same two sources the forecast reads, for
-     the same reason: a book imported without a next-due column would
-     otherwise produce an empty call. */
-  const { rows: carrier } = await q(
-    `SELECT pl.id AS policy_id, pl.policy_number, pl.carrier_name,
-            COALESCE(pl.display_name,
-                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
-              AS insured_name,
-            pl.next_premium_due AS due_date, pl.premium_required AS amount, pl.fund_id
-       FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND pl.next_premium_due IS NOT NULL AND pl.next_premium_due <= $4::date
-        AND COALESCE(pl.premium_required, 0) > 0
-        AND ($3 = '' OR pl.fund_code = $3)
-        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
-      ORDER BY pl.next_premium_due`,
-    [scope, funds, fund, to]);
+  /* One source: the servicing calendar.
+     A capital call asks somebody for a specific number of dollars by a
+     specific date, so the number has to be one a person entered against a
+     dated obligation — not the annual figure typed into the policy form
+     when the policy was set up, which is an illustration and moves. If
+     nothing is scheduled in the window, there is nothing to call for, and
+     saying so is better than inventing an amount from a stale field. */
   const { rows: posted } = await q(
     `SELECT pl.id AS policy_id, pl.policy_number, pl.carrier_name,
             COALESCE(pl.display_name,
@@ -2641,6 +2630,7 @@ router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res
        FROM policy_reminders r
        JOIN policy_latest pl ON pl.id = r.policy_id
       WHERE r.kind = 'Premium' AND r.done_at IS NULL
+        AND COALESCE(r.amount, 0) > 0
         AND r.due_date >= CURRENT_DATE AND r.due_date <= $4::date
         AND pl.status NOT IN ('Lapsed','Sold','Matured')
         AND ($3 = '' OR pl.fund_code = $3)
@@ -2648,7 +2638,7 @@ router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res
       ORDER BY r.due_date`,
     [scope, funds, fund, to]);
 
-  const items = [...carrier, ...posted].map((r) => ({
+  const items = posted.map((r) => ({
     ...r, amount: Number(r.amount) || 0,
     due_date: String(r.due_date).slice(0, 10),
   }));
@@ -2714,6 +2704,161 @@ router.get('/capital-calls', wrap(async (req, res) => {
   res.json(rows);
 }));
 
+/**
+ * Calls that are the same call.
+ *
+ * Signatures only started being written when this was fixed, so this works
+ * the honest way — it reads the open calls and computes what each one's
+ * signature would be. Anything that comes out identical is one obligation
+ * that got asked for more than once.
+ *
+ * Must be declared before `/capital-calls/:id`, or "duplicates" is read as
+ * an id and this route never runs.
+ */
+router.get('/capital-calls/duplicates', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const scope = callScope(req);
+    const { rows: open } = await q(
+      `SELECT c.id, c.title, c.purpose, c.due_date, c.fund_id, c.created_at
+         FROM capital_calls c WHERE c.status = 'Open' AND ${scope.sql}
+        ORDER BY c.id`, scope.params);
+    if (open.length < 2) return res.json({ groups: [] });
+
+    const { rows: items } = await q(
+      `SELECT call_id, policy_id, opportunity_id, due_date, amount, kind
+         FROM capital_call_items WHERE call_id = ANY($1)`, [open.map((c) => c.id)]);
+    const { rows: lines } = await q(
+      `SELECT l.call_id, l.investor_id, l.amount, l.marked_paid_at, l.confirmed_at,
+              i.name AS investor_name
+         FROM capital_call_lines l JOIN investors i ON i.id = l.investor_id
+        WHERE l.call_id = ANY($1)`, [open.map((c) => c.id)]);
+
+    const byCall = new Map(open.map((c) => [c.id, { ...c, items: [], lines: [] }]));
+    for (const i of items) byCall.get(i.call_id)?.items.push(i);
+    for (const l of lines) byCall.get(l.call_id)?.lines.push(l);
+
+    const groups = new Map();
+    for (const c of byCall.values()) {
+      if (!c.items.length) continue;             // nothing to compare
+      const sig = signatureOfCall(c);
+      if (!groups.has(sig)) groups.set(sig, []);
+      groups.get(sig).push({
+        id: c.id, title: c.title, purpose: c.purpose, due_date: c.due_date,
+        created_at: c.created_at,
+        total: c.lines.reduce((n, l) => n + Number(l.amount || 0), 0),
+        parties: c.lines.length,
+        investors: c.lines.map((l) => l.investor_name).sort(),
+        settled: c.lines.some((l) => l.marked_paid_at || l.confirmed_at),
+      });
+    }
+    res.json({
+      groups: [...groups.entries()]
+        .filter(([, calls]) => calls.length > 1)
+        .map(([signature, calls]) => ({
+          signature, keep: calls[0].id, calls,
+          parties: new Set(calls.flatMap((c) => c.investors)).size,
+        })),
+    });
+  }));
+
+/**
+ * Fold the duplicates into one.
+ *
+ * The earliest call survives and every line moves onto it. A line the
+ * survivor already has is left alone unless the copy carries something the
+ * survivor does not — somebody having said they paid it is a fact worth
+ * keeping whichever row it happens to be sitting on. The emptied calls are
+ * cancelled rather than deleted, with a note saying where they went, so the
+ * trail of what was asked for still reads.
+ */
+router.post('/capital-calls/:id/absorb', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const keepId = int(req.params.id);
+    if (!keepId || !(await callVisible(req, keepId)))
+      return res.status(404).json({ error: 'Capital call not found' });
+    const keep = await loadCall(keepId);
+    if (keep.status !== 'Open')
+      return res.status(409).json({ error: 'That call is not open' });
+    const signature = signatureOfCall(keep);
+
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : [])
+      .map((n) => int(n)).filter((n) => n && n !== keepId);
+    if (!ids.length) return res.status(400).json({ error: 'Nothing to fold in' });
+
+    /* Every one of them has to be the same ask, still open, and one this
+       person may see. Folding two different calls together would silently
+       forgive one of them. */
+    const folded = [];
+    for (const id of ids) {
+      if (!(await callVisible(req, id)))
+        return res.status(403).json({ error: `Capital call ${id} is not one of yours` });
+      const other = await loadCall(id);
+      if (!other || other.status !== 'Open')
+        return res.status(409).json({ error: `Capital call ${id} is not open` });
+      if (signatureOfCall(other) !== signature)
+        return res.status(409).json({
+          error: `Capital call ${id} is not the same ask, so it cannot be folded in` });
+      folded.push(other);
+    }
+
+    const client = await pool.connect();
+    let moved = 0, kept = 0;
+    try {
+      await client.query('BEGIN');
+      for (const other of folded) {
+        for (const line of other.lines) {
+          const mine = keep.lines.find((l) => l.investor_id === line.investor_id);
+          if (!mine) {
+            await client.query(
+              'UPDATE capital_call_lines SET call_id = $1 WHERE id = $2', [keepId, line.id]);
+            keep.lines.push({ ...line, call_id: keepId });
+            moved++;
+            continue;
+          }
+          /* Both rows have this investor. Keep the survivor's line, but do
+             not lose a claim or a receipt recorded against the copy. */
+          if ((line.marked_paid_at && !mine.marked_paid_at)
+              || (line.confirmed_at && !mine.confirmed_at)) {
+            await client.query(
+              `UPDATE capital_call_lines
+                  SET marked_paid_at = COALESCE(marked_paid_at, $2),
+                      marked_paid_by = COALESCE(marked_paid_by, $3),
+                      marked_note    = CASE WHEN marked_note = '' THEN $4 ELSE marked_note END,
+                      confirmed_at   = COALESCE(confirmed_at, $5),
+                      confirmed_by   = COALESCE(confirmed_by, $6)
+                WHERE id = $1`,
+              [mine.id, line.marked_paid_at, line.marked_paid_by, line.marked_note,
+               line.confirmed_at, line.confirmed_by]);
+          }
+          kept++;
+        }
+        await client.query(
+          `UPDATE capital_calls
+              SET status = 'Cancelled', closed_at = now(), updated_at = now(),
+                  note = TRIM(BOTH ' ' FROM note || ' · folded into capital call #' || $2)
+            WHERE id = $1`, [other.id, keepId]);
+      }
+      await client.query(
+        'UPDATE capital_calls SET signature = $2, updated_at = now() WHERE id = $1',
+        [keepId, signature]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await audit(req.user.uid, 'capital_call', keepId, 'update',
+      `folded ${folded.length} duplicate call(s) in — ${moved} investor line(s) moved, `
+      + `${kept} already here · ${folded.map((c) => `#${c.id}`).join(', ')}`);
+    for (const other of folded)
+      await audit(req.user.uid, 'capital_call', other.id, 'update',
+        `cancelled — the same ask as capital call #${keepId}, folded into it`);
+
+    res.json({ ...(await loadCall(keepId)), folded: folded.length, moved });
+  }));
+
 router.get('/capital-calls/:id', wrap(async (req, res) => {
   if (!(await callVisible(req, req.params.id)))
     return res.status(404).json({ error: 'Capital call not found' });
@@ -2728,6 +2873,92 @@ router.get('/capital-calls/:id', wrap(async (req, res) => {
   }
   res.json(call);
 }));
+
+/**
+ * What makes two capital calls the same call.
+ *
+ * The purpose, the date the money is wanted, the entity it is for, and the
+ * exact set of things it covers. Nothing else — not who was selected, and
+ * not the note, because raising the same ask again while remembering one
+ * more investor is the commonest way this happens and it should reach that
+ * investor, not produce a second debt on everybody else's screen.
+ *
+ * Amounts are in, rounded to the cent. A call for a different amount is a
+ * different ask and deserves its own row.
+ */
+function callSignature({ purpose, due, fundId, rows }) {
+  const parts = rows
+    .map((r) => [r.policyId || 0, r.oppId || 0,
+                 r.due ? String(r.due).slice(0, 10) : '',
+                 Math.round((Number(r.amount) || 0) * 100), r.kind || 'Premium'].join(':'))
+    .sort();
+  return createHash('sha256')
+    .update(JSON.stringify([purpose, String(due), fundId || 0, parts]))
+    .digest('hex').slice(0, 40);
+}
+
+/** The same signature, computed from a call already written down. */
+const signatureOfCall = (call) => callSignature({
+  purpose: call.purpose, due: String(call.due_date).slice(0, 10), fundId: call.fund_id,
+  rows: (call.items || []).map((i) => ({
+    policyId: i.policy_id, oppId: i.opportunity_id,
+    due: i.due_date ? String(i.due_date).slice(0, 10) : '',
+    amount: Number(i.amount) || 0, kind: i.kind,
+  })),
+});
+
+const openCallLike = async (signature) => (await q(
+  `SELECT id FROM capital_calls WHERE signature = $1 AND status = 'Open' LIMIT 1`,
+  [signature])).rows[0] || null;
+
+/**
+ * Tell people what they have been asked for.
+ *
+ * `only` is the set of investors to write to. On a fresh call that is
+ * everybody; on a repeat it is whoever was not on the call already, because
+ * a second copy of a notice somebody has already acted on is how a paid call
+ * gets paid twice.
+ */
+async function tellAboutCall(call, { purpose, due, items, only }) {
+  let told = 0;
+  for (const line of call.lines) {
+    if (only && !only.has(line.investor_id)) continue;
+    const to = line.login_email || line.investor_email;
+    if (!to) continue;
+    const sent = await sendMail('capital_call', {
+      to, userId: line.user_id || null, name: line.investor_name,
+      amount: `$${Number(line.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+      due, title: call.title, purpose,
+      policies: items, note: call.note,
+    });
+    if (sent.id) told++;
+  }
+  return told;
+}
+
+/**
+ * Fold a repeat into the call that is already open.
+ *
+ * Anybody not yet on it is added at the figure just worked out. Anybody
+ * already on it is left exactly as they are — including whatever they have
+ * since said about paying it, which is the whole point of not making a
+ * second row.
+ */
+async function foldIntoCall(callId, lines) {
+  const held = new Set((await q(
+    'SELECT investor_id FROM capital_call_lines WHERE call_id = $1', [callId]))
+    .rows.map((r) => r.investor_id));
+  const added = new Set();
+  for (const [investorId, amount] of lines) {
+    if (held.has(investorId)) continue;
+    await q(`INSERT INTO capital_call_lines (call_id, investor_id, amount)
+             VALUES ($1,$2,$3) ON CONFLICT (call_id, investor_id) DO NOTHING`,
+      [callId, investorId, Math.round(amount * 100) / 100]);
+    added.add(investorId);
+  }
+  await q('UPDATE capital_calls SET updated_at = now() WHERE id = $1', [callId]);
+  return added;
+}
 
 /** Raise one. This is the moment the figures stop moving. */
 router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
@@ -2827,20 +3058,37 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
       return res.status(400).json({
         error: 'Nobody holds a share of those policies, so there is nobody to ask.' });
 
+    /* Has this exact ask already gone out?
+       If it has and it is still open, the right answer is not a second call
+       — it is to make sure everybody who should be on the first one is. */
+    const signature = callSignature({ purpose, due, fundId, rows });
+    const already = await openCallLike(signature);
+    if (already) {
+      const added = await foldIntoCall(already.id, lines);
+      const call = await loadCall(already.id);
+      await audit(req.user.uid, 'capital_call', already.id, 'update',
+        added.size
+          ? `raised again — folded into the open call, ${added.size} investor(s) added`
+          : 'raised again — identical to the open call, nothing changed');
+      const told = await tellAboutCall(call, { purpose, due, items: rows.length,
+        only: added });
+      return res.json({ ...call, merged: true, added: added.size, notified: told });
+    }
+
     const client = await pool.connect();
     let callId;
     try {
       await client.query('BEGIN');
       const { rows: made } = await client.query(
         `INSERT INTO capital_calls (reference, title, fund_id, due_date, covers_from, covers_to,
-                                    note, created_by, purpose)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+                                    note, created_by, purpose, signature)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
         [str(req.body.reference),
          str(req.body.title) || (purpose === 'Acquisition'
            ? 'Capital call — acquisition' : 'Premium capital call'), fundId, due,
          rows.reduce((d, r) => (!d || (r.due && r.due < d) ? r.due : d), null),
          rows.reduce((d, r) => (!d || (r.due && r.due > d) ? r.due : d), null),
-         str(req.body.note), req.user.uid, purpose]);
+         str(req.body.note), req.user.uid, purpose, signature]);
       callId = made[0].id;
       for (const r of rows)
         await client.query(
@@ -2857,6 +3105,20 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
+      /* Two clicks, both in flight, both past the check above. The index
+         settles it: whichever lost folds into whichever won. */
+      if (e.code === '23505') {
+        const won = await openCallLike(signature);
+        if (won) {
+          const added = await foldIntoCall(won.id, lines);
+          const call = await loadCall(won.id);
+          await audit(req.user.uid, 'capital_call', won.id, 'update',
+            'raised twice at once — folded into the call that was already written');
+          const told = await tellAboutCall(call, { purpose, due, items: rows.length,
+            only: added });
+          return res.json({ ...call, merged: true, added: added.size, notified: told });
+        }
+      }
       throw e;
     } finally {
       client.release();
@@ -2869,18 +3131,7 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
 
     /* And they are told, once, with their own figure and the date. An ask
        nobody hears about is not an ask. */
-    let told = 0;
-    for (const line of call.lines) {
-      const to = line.login_email || line.investor_email;
-      if (!to) continue;
-      const sent = await sendMail('capital_call', {
-        to, userId: line.user_id || null, name: line.investor_name,
-        amount: `$${Number(line.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
-        due, title: call.title, purpose,
-        policies: rows.length, note: call.note,
-      });
-      if (sent.id) told++;
-    }
+    const told = await tellAboutCall(call, { purpose, due, items: rows.length, only: null });
     res.status(201).json({ ...call, notified: told });
   }));
 
@@ -3883,18 +4134,13 @@ router.get('/servicing', wrap(async (req, res) => {
   const alerts = [];
   for (const p of (isInvestor(req) ? [] : rows)) {
     const name = p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim();
-    const d = p.days_until_due;
 
-    if (d !== null && d < 0) {
-      alerts.push({ ...p, insured: name, severity: 'critical',
-        reason: `Premium was due ${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} ago` });
-    } else if (d !== null && d <= 14) {
-      alerts.push({ ...p, insured: name, severity: 'warning',
-        reason: `Premium due in ${d} day${d === 1 ? '' : 's'}` });
-    } else if (d !== null && d <= 45) {
-      alerts.push({ ...p, insured: name, severity: 'info',
-        reason: `Premium due in ${d} days` });
-    }
+    /* No premium alert is raised from the policy record.
+       A premium that has to be found is one somebody put on the servicing
+       calendar; the carrier date and annual figure on the policy form are
+       reference, not an obligation, and alerting on both meant the same
+       payment appeared twice with two different amounts. The scheduled
+       premiums below raise their own alerts. */
 
     // Months of coverage the account value can absorb at the current COI.
     const coi = Number(p.cost_of_insurance) || 0;
@@ -3941,13 +4187,20 @@ router.get('/servicing', wrap(async (req, res) => {
        FROM policy_reminders r JOIN policy_latest pl ON pl.id = r.policy_id
       WHERE r.done_at IS NULL
         AND ($1::int IS NULL OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
-        AND ($1::int IS NOT NULL OR r.due_date <= CURRENT_DATE + 45)
+        /* Staff: follow-ups for the next six weeks, but EVERY scheduled
+           premium still ahead — this is now the only source of what is due,
+           so cutting it at 45 days would cut the forecast off with it. */
+        AND ($1::int IS NOT NULL
+             OR r.due_date <= CURRENT_DATE + 45
+             OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
         AND ($3 = '' OR pl.fund_code = $3)
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY r.due_date`,
     [scope, funds, fund]);
   if (!isInvestor(req)) {
     for (const r of steps.rows) {
+      // The list reaches years out; the alert list is this month and next.
+      if (r.days_until_due > 45) continue;
       const name = r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
       const d = r.days_until_due;
       const when = d < 0 ? `${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} overdue`
@@ -3967,7 +4220,25 @@ router.get('/servicing', wrap(async (req, res) => {
 
   const rank = { critical: 0, serious: 1, warning: 2, info: 3 };
   alerts.sort((a, b) => rank[a.severity] - rank[b.severity]);
-  res.json({ upcoming: rows.filter((r) => r.next_premium_due), alerts, scheduled: steps.rows });
+
+  /* What is coming up, from the servicing calendar and nowhere else.
+     `premium_required` and `next_premium_due` on the policy record describe
+     the policy; a premium that has to be paid is an entry somebody made on
+     this screen, with the amount they entered. Shaped like the old rows so
+     the page reads the same field names. */
+  const upcoming = steps.rows
+    .filter((r) => r.kind === 'Premium' && r.days_until_due >= 0)
+    .map((r) => ({
+      id: r.id, policy_number: r.policy_number, carrier_name: r.carrier_name,
+      display_name: r.display_name, insured_first: r.insured_first,
+      insured_last: r.insured_last, insured_gender: r.insured_gender,
+      status: r.status,
+      next_premium_due: r.due_date,
+      premium_required: r.amount, premium_required_full: r.amount_full,
+      my_pct: r.my_pct, premium_mode: 'Scheduled',
+      days_until_due: r.days_until_due, note: r.note, reminder_id: r.reminder_id,
+    }));
+  res.json({ upcoming, alerts, scheduled: steps.rows });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -4616,13 +4887,6 @@ router.get('/reports/returns', wrap(async (req, res) => {
   });
 }));
 
-const MODE_MONTHS = { Monthly: 1, Quarterly: 3, 'Semi-Annual': 6, Annual: 12 };
-
-/**
- * Projects each active policy's premium payments forward and groups them by
- * calendar month. A due date already in the past is reported in the current
- * month and flagged overdue rather than silently rolled forward.
- */
 /**
  * One statement per investor, for the people who run the book.
  *
@@ -4719,13 +4983,9 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
       allFlows.push(...withTerminal);
       const a = analyzeFlows(withTerminal);
 
-      if (p.status !== 'Matured' && p.next_premium_due)
-        upcoming.push({ policy_id: p.id, policy_number: p.policy_number,
-          insured: p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim(),
-          date: String(p.next_premium_due).slice(0, 10),
-          amount: Number(p.premium_required || 0) * factor,
-          amount_full: Number(p.premium_required || 0),
-          source: p.premium_mode || 'carrier' });
+      /* What this investor will be asked for comes from the servicing
+         calendar only — see the premium forecast. The policy's own annual
+         figure is reference data and is reported separately below. */
       for (const r of planned.get(p.id) || [])
         upcoming.push({ policy_id: p.id, policy_number: p.policy_number,
           insured: p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim(),
@@ -4805,13 +5065,16 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
 
   const scope = scopeId(req);
   const funds = fundScope(req);
+  /* The live book, for one purpose only: saying which policies have nothing
+     scheduled against them. No figure in this report comes from these rows.
+     A premium is money that has to be found on a date, and the only record
+     of that is what somebody entered on the servicing calendar. */
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
             pl.insured_first, pl.insured_last, pl.insured_gender,
-            pl.fund_code, pl.premium_mode, pl.next_premium_due, pl.status,
+            pl.fund_code, pl.premium_mode, pl.status,
             pl.face_amount, pl.cost_of_insurance, pl.account_value,
-            ${shareOf('pl.id', 2)} AS my_pct,
-            pl.premium_required * (${shareOf('pl.id', 2)} / 100.0) AS premium_required
+            ${shareOf('pl.id', 2)} AS my_pct
        FROM policy_latest pl
       WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
         AND ($1 = '' OR pl.fund_code = $1)
@@ -4822,8 +5085,6 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
 
   const now = new Date();
   const startMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const horizon = new Date(startMonth);
-  horizon.setUTCMonth(horizon.getUTCMonth() + months);
 
   const buckets = new Map();
   const monthKey = (d) =>
@@ -4834,49 +5095,15 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
     buckets.set(monthKey(d), { month: monthKey(d), total: 0, payments: [] });
   }
 
-  const noSchedule = [];
-  for (const p of rows) {
-    const amount = Number(p.premium_required) || 0;
-    const step = MODE_MONTHS[p.premium_mode] || 12;
-    const insured = p.display_name ||
-      `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
-
-    if (!amount || !p.next_premium_due) {
-      noSchedule.push({ ...p, insured,
-        reason: !amount ? 'No premium amount recorded' : 'No next due date recorded' });
-      continue;
-    }
-
-    let due = new Date(`${String(p.next_premium_due).slice(0, 10)}T00:00:00Z`);
-    let overdue = false;
-    if (due < startMonth) {
-      overdue = true;                       // surface it now, don't skip it
-      due = new Date(startMonth);
-    }
-    let guard = 0;
-    while (due < horizon && guard++ < 240) {
-      const b = buckets.get(monthKey(due));
-      if (b) {
-        b.total += amount;
-        b.payments.push({
-          policy_id: p.id, policy_number: p.policy_number, carrier_name: p.carrier_name,
-          insured, fund_code: p.fund_code, amount, mode: p.premium_mode,
-          due_date: due.toISOString().slice(0, 10), overdue,
-        });
-      }
-      overdue = false;
-      due.setUTCMonth(due.getUTCMonth() + step);
-    }
-  }
-
   const schedule = [...buckets.values()];
-  let running = 0;
-  for (const b of schedule) { running += b.total; b.cumulative = running; }
 
-  /* Premiums somebody here posted to the schedule by hand. They are as real a
-     call on the investor's money as a date the carrier printed, and leaving
-     them out is what made this report read empty on a book imported without a
-     next-due column. */
+  /* Every premium on the servicing calendar, and nothing else.
+     This report used to also project forward from the policy record — the
+     annual figure and the carrier's next due date, repeated by mode for
+     five years. Those are an illustration typed in when the policy was set
+     up; they drift, and a forecast built on them disagreed with the capital
+     call raised from it. What is forecast now is what has actually been
+     scheduled. */
   const { rows: posted } = await q(
     `SELECT r.id, r.due_date, r.amount, r.note, pl.id AS policy_id,
             pl.policy_number, pl.carrier_name, pl.fund_code,
@@ -4900,8 +5127,19 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   }));
   for (const r of postedRows) {
     const b = buckets.get(r.due_date.slice(0, 7));
-    if (b) { b.total += r.amount; b.payments.push(r); running += r.amount; }
+    if (b) { b.total += r.amount; b.payments.push(r); }
   }
+
+  /* Policies carrying no scheduled premium at all. Not shown in the report
+     — it is a working list, and one that says "nothing has been entered
+     here yet" rather than "this policy needs no premium". */
+  const scheduledPolicies = new Set(postedRows.map((r) => r.policy_id));
+  const noSchedule = rows
+    .filter((p) => !scheduledPolicies.has(p.id))
+    .map((p) => ({ ...p,
+      insured: p.display_name
+        || `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—',
+      reason: 'Nothing scheduled on the servicing calendar' }));
   // Re-run the cumulative column now that the posted rows are in their buckets.
   let cum = 0;
   for (const b of schedule) {
@@ -4910,8 +5148,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
   }
 
   /* The dated window. Everything due between today and today plus `days`,
-     from both sources, in one list — which is also exactly what a capital
-     call is made of. */
+     in one list — which is also exactly what a capital call is made of. */
   const from = today();
   const to = new Date(Date.now() + (days || 0) * 86400000).toISOString().slice(0, 10);
   const inWindow = days
@@ -4933,7 +5170,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
     generatedAt: new Date().toISOString(),
     schedule,
     grandTotal: cum,
-    policiesScheduled: rows.length - noSchedule.length,
+    policiesScheduled: scheduledPolicies.size,
     noSchedule,
   });
 }));

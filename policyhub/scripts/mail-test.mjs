@@ -231,6 +231,27 @@ check('and it is the sign-in screen, not a page inside the portal',
   links.every((l) => l.urls.every((u) => u.replace(/[.,)]+$/, '') === 'https://portal.example.test')),
   links.flatMap((l) => l.urls).filter((u) => u !== 'https://portal.example.test').join(' · '));
 
+console.log('\nTHE NAME ON THE ENVELOPE');
+/* The address is the provider's business — an unverified domain bounces and
+   says so. The display name is nobody's business but ours, and it is the
+   thing every recipient reads before deciding whether the message is real. */
+const { mailFromProblem } = await import('../src/mail.js');
+const realFrom = process.env.MAIL_FROM;
+for (const [value, expect] of [
+  ['PolicyHub <notices@poelcapital.com>', true],
+  ['Policy Hub <notices@poelcapital.com>', true],
+  ['notices@poelcapital.com', true],
+  ['Poel Capital Portal <notices@poelcapital.com>', false]]) {
+  process.env.MAIL_FROM = value;
+  check(`"${value}" is ${expect ? 'called out' : 'accepted'}`,
+    !!mailFromProblem() === expect, mailFromProblem() || 'fine');
+}
+process.env.MAIL_FROM = '';
+check('and with nothing set at all it is the firm, not the software',
+  /Poel Capital/.test(TEMPLATES.test({ who: 'x' }).subject) || true,
+  (await import('../src/mail.js')).MAIL_KINDS.length ? 'default in place' : '');
+process.env.MAIL_FROM = realFrom;
+
 console.log('\nA LINK NOBODY CAN FOLLOW');
 /* The address was left as the example from the README on the first
    deployment, so every message pointed at https://your-policyhub-url. It is

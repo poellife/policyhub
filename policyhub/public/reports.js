@@ -148,7 +148,7 @@ const REPORTS = {
   },
   forecast: {
     name: 'Premium forecast',
-    blurb: 'Projected premium payments by month with running capital requirement.',
+    blurb: 'Scheduled premium payments by month with running capital requirement.',
     landscape: false,
   },
   factsheet: {
@@ -436,11 +436,12 @@ function buildForecastWindow(d, o) {
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">Basis of this window</h3>
       <p class="rpt-note">
-        Every row is a date already on file — a carrier's next due date carried forward at
-        the policy's payment mode, or a premium posted to the servicing schedule by hand.
-        Nothing here is projected out of an assumption about later years. A due date that
-        has already passed is included wherever it falls and marked past due, because it is
-        still money that has to go out.
+        Every row is a premium entered on a policy's servicing schedule, at the amount
+        entered there. Nothing is projected from the annual figure or carrier due date
+        recorded when the policy was set up — those describe the policy, not an obligation
+        with a date on it — and nothing is assumed about later years. A policy with no
+        scheduled premium contributes nothing to this window; that is a data-entry job,
+        and it is listed on screen under Servicing where the fixing happens.
       </p>
     </div>
     ${footer('Premium Forecast')}`;
@@ -464,7 +465,8 @@ function buildForecast(d, o) {
 
     <div class="rpt-tiles" data-count="4">
       ${tile(`Next ${near} month${near === 1 ? '' : 's'}`, fmtExact(nearTotal), 'Capital required')}
-      ${tile(`Full ${d.months}-month total`, fmtExact(d.grandTotal), `${d.policiesScheduled} policies scheduled`)}
+      ${tile(`Full ${d.months}-month total`, fmtExact(d.grandTotal),
+        `${d.policiesScheduled} ${d.policiesScheduled === 1 ? 'policy' : 'policies'} with a schedule`)}
       ${tile('Average active month', fmtExact(avg), `${active.length} months with payments due`)}
       ${tile('Peak month', peak ? fmtExact(peak.total) : '—', peak ? monthLabel(peak.month) : '')}
     </div>
@@ -516,12 +518,14 @@ function buildForecast(d, o) {
           Servicing, where the fixing happens. */''}
 
     <div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">Basis of projection</h3>
+      <h3 class="rpt-h3">Basis of this forecast</h3>
       <p class="rpt-note">
-        Each policy is projected forward from its next due date at its stated payment mode,
-        holding the current premium amount constant. Actual cost of insurance on universal life
-        policies rises with insured age, so later years are likely to understate the true
-        requirement. A due date already past is shown in the current month and marked past due.
+        Every payment shown is one entered on a policy's servicing schedule, at the amount
+        entered there. Nothing is projected forward from the annual premium or carrier due
+        date recorded when the policy was set up. A month reads as empty because nothing has
+        been scheduled in it, which is not the same as nothing being owed — the schedule has
+        to be kept up for this to be complete. Amounts remain estimates until each payment
+        is made.
       </p>
     </div>
     ${footer('Premium Forecast')}`;

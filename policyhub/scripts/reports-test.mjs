@@ -1,6 +1,26 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
-import { BASE, ADMIN } from './test-config.mjs';
+import { BASE, ADMIN, login } from './test-config.mjs';
+
+/* Something for the premium forecast to forecast.
+   Every figure in that report is read from the servicing calendar, so a
+   fixture book with nothing scheduled produces an honestly empty report —
+   and an empty report cannot be checked for shape. Two dated premiums, one
+   inside a week and one inside a month, removed again at the end. */
+const adminCookie = await login(ADMIN.email, ADMIN.password);
+const call = (path, opts = {}) => fetch(`${BASE}/api${path}`, {
+  ...opts,
+  body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
+  headers: { Cookie: adminCookie, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+});
+const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+const book = await (await call('/policies')).json();
+const live = book.filter((x) => !['Lapsed', 'Sold', 'Matured'].includes(x.status)).slice(0, 2);
+const fixtureSteps = [];
+for (const [i, policy] of live.entries())
+  fixtureSteps.push(await (await call(`/policies/${policy.id}/reminders`, {
+    method: 'POST', body: { kind: 'Premium', amount: 24000 + i * 1000,
+      note: 'Annual premium', due_date: day(i === 0 ? 4 : 21) } })).json());
 const SHOTS='/home/claude/shots';
 const fails=[]; const errs=[];
 const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
@@ -60,7 +80,9 @@ check('schedule has totals row', /Totals — \d+ policies/.test(s2));
 console.log('\nPREMIUM FORECAST');
 const s3 = await run('forecast','premium forecast');
 check('forecast shows 12-month requirement', s3.includes('Next 12 months'));
-check('forecast states its basis', s3.includes('Basis of projection'));
+check('forecast states its basis', s3.includes('Basis of this forecast'));
+check('and that the basis is the servicing calendar, not the policy form',
+  /servicing schedule/i.test(s3) && /Nothing is projected/i.test(s3));
 
 /* The short horizons are not shorter versions of the long one. "What is due
    this week" is a dated list somebody has to fund; a month bucket cannot
@@ -93,7 +115,7 @@ check('it says what has to be funded and by when',
 check('and past-due money is called out separately',
   /Already past due/.test(week));
 check('the basis says nothing is being projected',
-  /Basis of this window/.test(week) && /already on file/.test(week));
+  /Basis of this window/.test(week) && /servicing schedule/i.test(week));
 
 const month = await forecast('d30');
 check('thirty days is the same shape, a longer window',
@@ -209,6 +231,9 @@ check('and the basis is stated plainly',
 check('the picker offers investors to choose from',
   (await p.locator('#rptInvestors option').count()) > 0,
   `${await p.locator('#rptInvestors option').count()} options`);
+
+for (const step of fixtureSteps)
+  if (step?.id) await call(`/policy-reminders/${step.id}`, { method: 'DELETE' });
 
 console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
 check('no page errors', errs.length===0);

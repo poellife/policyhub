@@ -1027,3 +1027,25 @@ ALTER TABLE capital_calls ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT
 ALTER TABLE capital_call_items ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'Premium';
 ALTER TABLE capital_call_items ADD COLUMN IF NOT EXISTS opportunity_id INTEGER
   REFERENCES opportunities(id) ON DELETE SET NULL;
+
+/* The same call, raised twice.
+   Somebody presses Raise, the page is slow, they press it again — or the
+   same premium window is called for a second time a fortnight later
+   because nobody could see the first one had gone out. Either way the
+   investor gets asked twice for one obligation, which is worse than a
+   duplicate row: it reads as two debts.
+
+   The signature is what makes two calls the same call — what it is for,
+   the date the money is wanted, the owning entity, and the exact set of
+   things it covers. Raising a call whose signature matches one already
+   open adds anybody newly selected to THAT call instead of making a
+   second one. The unique index is the backstop for the double-click: two
+   requests in flight at once cannot both win.
+
+   Only open calls are constrained. A premium window called for in March
+   and again next March is two genuine asks, and closing the first one
+   releases the signature. */
+ALTER TABLE capital_calls ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capital_calls_signature
+  ON capital_calls (signature)
+  WHERE status = 'Open' AND signature <> '';

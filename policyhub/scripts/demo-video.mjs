@@ -33,6 +33,14 @@ const ctx = await br.newContext({
 const p = await ctx.newPage();
 const wait = (ms) => p.waitForTimeout(ms);
 
+/* The recording starts when the context does, so that is the zero the
+   subtitle file is written against. Every line records when it appeared and
+   when it left, and the .srt is written from those numbers rather than from
+   an estimate — a subtitle that drifts is worse than none. */
+const T0 = Date.now();
+const at = () => Date.now() - T0;
+const subtitles = [];
+
 /* --------------------------- the furniture --------------------------- */
 
 /** Brand cards and captions live in one injected stylesheet. */
@@ -54,13 +62,18 @@ const FURNITURE = `
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     text-transform: uppercase; letter-spacing: 0.18em; color: #8f8f8f; margin-bottom: 20px;
   }
+  /* Subtitles, not chips: wide enough for a sentence, two lines when a
+     sentence needs two, and legible over a white table at a glance. The
+     same words go out as an .srt beside the film, so a player that shows
+     its own captions says exactly what is burned in. */
   #vidCap {
-    position: fixed; left: 50%; bottom: 46px; transform: translateX(-50%) translateY(10px);
-    z-index: 99998; background: rgba(10,10,10,.93); color: #fff;
-    padding: 15px 26px; border-radius: 999px; font-family: 'Inter Tight', system-ui, sans-serif;
-    font-size: 19px; font-weight: 500; letter-spacing: -0.01em; white-space: nowrap;
-    opacity: 0; transition: opacity 380ms ease, transform 380ms ease;
-    box-shadow: 0 8px 30px rgba(0,0,0,.18); pointer-events: none;
+    position: fixed; left: 50%; bottom: 44px; transform: translateX(-50%) translateY(10px);
+    z-index: 99998; background: rgba(10,10,10,.90); color: #fff;
+    padding: 14px 30px; border-radius: 14px; font-family: 'Inter Tight', system-ui, sans-serif;
+    font-size: 24px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.35;
+    max-width: 1180px; text-align: center; text-wrap: balance;
+    opacity: 0; transition: opacity 300ms ease, transform 300ms ease;
+    box-shadow: 0 10px 40px rgba(0,0,0,.22); pointer-events: none;
   }
   #vidCap.on { opacity: 1; transform: translateX(-50%) translateY(0); }
   #vidCursor {
@@ -104,16 +117,45 @@ async function card(eyebrow, title, sub, hold = 2600) {
   await wait(560);
 }
 
+/**
+ * A subtitle. Shown on screen and written to the file.
+ *
+ * `hold` is how long the words stay up, which is decided by how long they
+ * take to read rather than by how long the animation underneath runs — the
+ * two are separated so that slowing a scroll does not silently speed up the
+ * reading.
+ */
 async function caption(text, hold = 2400) {
   await furnish();
+  const start = at();
   await p.evaluate((t) => {
     const c = document.getElementById('vidCap');
     c.textContent = t; c.classList.add('on');
   }, text);
   await wait(hold);
+  subtitles.push({ text, start, end: at() });
   await p.evaluate(() => document.getElementById('vidCap').classList.remove('on'));
-  await wait(320);
+  await wait(260);
 }
+
+/** A subtitle that stays up while something else happens underneath it. */
+async function say(text) {
+  await furnish();
+  const start = at();
+  await p.evaluate((t) => {
+    const c = document.getElementById('vidCap');
+    c.textContent = t; c.classList.add('on');
+  }, text);
+  return async () => {
+    subtitles.push({ text, start, end: at() });
+    await p.evaluate(() => document.getElementById('vidCap').classList.remove('on'));
+  };
+}
+
+/* A full-screen card is a subtitle too, as far as somebody reading is
+   concerned — it is the words on screen at that second. */
+const cardSub = (title, sub, start, end) =>
+  subtitles.push({ text: sub ? `${title} — ${sub}` : title, start, end });
 
 /** Move the on-screen pointer to an element, then click it for real. */
 async function point(selector, { click = true, nth = 0 } = {}) {
@@ -149,122 +191,237 @@ async function glide(to, ms = 1500) {
   }), [to, ms]);
 }
 
-/* ------------------------------ the film ----------------------------- */
+/* ------------------------------ the film -----------------------------
+ *
+ * Spoken to the person who might invest, not about them. The claim being
+ * made is a simple one — you can see everything, at any hour, without
+ * asking anybody — so the film is mostly the application answering
+ * questions before they are asked: what do I hold, what is it worth
+ * today, what has actually come back, what is being asked of me, and
+ * what is next.
+ *
+ * About two minutes. Each beat holds long enough to read the line and
+ * see the figure it is about.
+ * -------------------------------------------------------------------- */
 
 await p.goto(BASE);
 await p.waitForSelector('#loginForm');
-await wait(400);
-await card('Poel Capital · Policy Portfolio', 'Your investor access',
-  'Your positions, your returns, and the opportunities we bring to you — in one place, whenever you want to look.', 3400);
+await wait(500);
 
-await caption('Your own secure login', 2000);
+let t = at();
+await card('Poel Capital · Investor access', 'Your money, in plain sight',
+  'Everything you hold, what it has returned, and what is being asked of you — '
+  + 'up to the minute, whenever you want to look.', 4200);
+cardSub('Your money, in plain sight',
+  'Everything you hold and what it has returned — up to the minute.', t, at());
+
+let done = await say('Your own login. Nobody sees your book but you and us.');
 await point('#email');
 await p.fill('#email', '');
-await p.type('#email', DEMO.email, { delay: 55 });
+await p.type('#email', DEMO.email, { delay: 45 });
 await point('#password');
-await p.type('#password', DEMO.password, { delay: 45 });
-await wait(300);
+await p.type('#password', DEMO.password, { delay: 38 });
+await done();
+await wait(200);
 await point('button[type=submit]');
 await p.waitForSelector('.kpi-row', { timeout: 15000 });
 await hideCursor();
 await wait(1400);
 
-await caption('You land on your portfolio — only what you own', 3000);
-await glide(320, 1400);
-await wait(1600);
+/* ---------------------------- what you hold ------------------------- */
+await caption('You land on your own portfolio — and only ever your own.', 3000);
+done = await say('Every figure here is your share, valued as of today.');
+await glide(300, 1500);
+await wait(3000);
+await done();
 await glide(0, 900);
 
-await caption('Every figure is your share of each policy', 2600);
+await caption('The return is worked out from the dates money actually moved.', 3400);
+
 await point('.nav a[href="#/policies"]');
 await p.waitForSelector('table.data tbody tr', { timeout: 12000 });
 await hideCursor();
-await wait(1500);
-await glide(260, 1300);
-await wait(1900);
+await wait(1300);
+done = await say('Every policy you are in, with the percentage you own beside it.');
+await glide(240, 1400);
+await wait(2800);
+await done();
 await glide(0, 800);
 
 await point('table.data tbody tr', { nth: 0 });
 await p.waitForSelector('.share-banner', { timeout: 12000 });
 await hideCursor();
-await wait(900);
-await caption('The percentage you own is stated on the page', 3000);
-await glide(300, 1400);
-await wait(1500);
-await glide(0, 900);
+await wait(1200);
+await caption('Open one and the page states your share before anything else.', 3200);
 
-await caption('Your return, solved on the dates money actually moved', 2400);
+done = await say('Every dollar in and out — the price paid, and every premium since.');
 await point('.tabs button', { nth: 2 });
-await wait(2400);
-await hideCursor();
-await glide(280, 1300);
-await wait(1800);
-await glide(0, 900);
-
-await caption('Every premium coming — yours beside the full policy', 2600);
-await point('.tabs button', { nth: 3 });
+await wait(1600);
+await glide(320, 1400);
 await wait(3000);
-await hideCursor();
+await done();
+await glide(0, 800);
 
-await card('Opportunities', 'New deals, brought to you',
-  'You see what is still available, the analysis behind it, and take the percentage you want.', 3000);
+/* -------------------------- what came back -------------------------- */
+await p.goto(`${BASE}/#/maturities`);
+await p.waitForSelector('table.data tbody tr', { timeout: 12000 });
+await furnish();
+await wait(1200);
+done = await say('When a policy pays out, you see the cheque and the day it arrived.');
+await wait(3400);
+await done();
+await caption('Not a projection. What actually came back, and what it returned.', 3400);
 
+/* --------------------------- what is asked -------------------------- */
+await p.goto(`${BASE}/#/servicing`);
+await p.waitForSelector('h1', { timeout: 12000 });
+await furnish();
+await wait(1300);
+done = await say('Premiums coming, months ahead — your share, not the whole policy.');
+await glide(300, 1400);
+await wait(2800);
+await done();
+await glide(0, 800);
+
+const callBtn = p.locator('[data-call]').first();
+if (await callBtn.count()) {
+  done = await say('When money is called for, you are told the amount and the date.');
+  await point('[data-call]', { nth: 0 });
+  await p.waitForSelector('dialog', { timeout: 8000 });
+  await hideCursor();
+  await wait(3200);
+  await done();
+  await caption('You tell us it has been sent. We confirm when it lands.', 3000);
+  await p.locator('dialog #dlgCancel').click().catch(() => {});
+  await wait(500);
+}
+
+/* ---------------------------- agreements ---------------------------- */
+await p.goto(`${BASE}/#/agreements`);
+await p.waitForSelector('h1', { timeout: 12000 });
+await furnish();
+await wait(1200);
+done = await say('The agreements you are party to — read and signed in the portal.');
+await wait(3400);
+await done();
+
+/* --------------------------- opportunities -------------------------- */
 await p.goto(`${BASE}/#/opportunities`);
 await p.waitForSelector('.opp-card', { timeout: 12000 });
 await furnish();
-await wait(1500);
-await caption('You see an offer the moment it is shared with you', 2600);
+await wait(800);
+await caption('New deals appear the moment we put one in front of you.', 3000);
+
 await point('.opp-card a.btn', { nth: 0 });
 await p.waitForSelector('.scenario-table', { timeout: 12000 });
 await hideCursor();
-await wait(1300);
+await wait(900);
+done = await say('The return if it runs to life expectancy — and either side of it.');
+await glide(430, 1500);
+await wait(3000);
+await done();
 
-await caption('The rate at life expectancy — and two years either side', 3000);
-await glide(420, 1500);
-await wait(2400);
+done = await say('The medical picture behind the estimate, in full.');
+await glide(1150, 1600);
+await wait(3000);
+await done();
 
-await caption('The medical picture behind the estimate', 2800);
-await glide(1150, 1700);
-await wait(2400);
-
-await glide(2000, 1600);
-await wait(1800);
-await caption('You ask for the percentage you want', 2600);
+await glide(2000, 1500);
+await wait(600);
+done = await say('You take the percentage you want. No minimum you have not agreed.');
 const take = p.locator('#takePct');
 if (await take.count()) {
   await point('#takePct');
   await p.fill('#takePct', '');
-  await p.type('#takePct', '15', { delay: 150 });
-  await wait(1300);
+  await p.type('#takePct', '15', { delay: 130 });
+  await wait(2000);
   await hideCursor();
-  await wait(900);
 }
-await glide(0, 1100);
+await done();
+await glide(0, 1000);
 
-await card('Statements', 'On your share, always',
-  'Print-ready documents that quote the percentage you hold — never the whole policy.', 2800);
-
+/* ---------------------------- statements ---------------------------- */
 await p.goto(`${BASE}/#/reports`);
 await p.waitForSelector('#rptGenerate', { timeout: 12000 });
 await furnish();
-await wait(1000);
+await wait(1200);
+done = await say('Statements you can print or keep — on your share, never the whole book.');
 await point('.rpt-choice', { nth: 1 });
-await wait(400);
+await wait(300);
 await point('#rptGenerate');
 await p.waitForSelector('.rpt-sheet', { timeout: 25000 });
 await hideCursor();
-await wait(1400);
-await caption('Every figure in the document is your share', 2800);
+await wait(2100);
+await done();
+done = await say('Every figure in the document is the one on the screen behind it.');
 await glide(520, 1700);
-await wait(2200);
+await wait(3000);
+await done();
 await glide(0, 900);
 
-await card('', 'Poel Capital',
-  'Policy portfolio management, built for life settlements.', 3200);
-await wait(400);
+/* ------------------------------ closing ----------------------------- */
+t = at();
+await card('', 'Nothing you have to ask for',
+  'It is your money. The portal is simply where it is all written down — '
+  + 'open at any hour, current to the minute.', 4600);
+cardSub('Nothing you have to ask for',
+  'It is your money — open at any hour, current to the minute.', t, at());
+
+t = at();
+await card('', 'Poel Capital', 'Life settlement portfolio management · Southfield, Michigan', 3200);
+cardSub('Poel Capital', 'Life settlement portfolio management', t, at());
+await wait(600);
 
 await ctx.close();
 await br.close();
 
 const file = fs.readdirSync(OUT).find((f) => f.endsWith('.webm'));
 fs.renameSync(`${OUT}/${file}`, `${OUT}/raw.webm`);
-console.log(`recorded ${OUT}/raw.webm`);
+
+/* ---------------------------- the subtitles --------------------------- */
+/* Written from the times the lines were actually on the screen, not from a
+   guess at reading speed. Two small corrections: a line that overlaps the
+   next is trimmed to end where the next begins, and a line too brief to
+   read is given a floor of 1.2 seconds — the burned-in caption has already
+   gone by then, but a caption track that flashes is unreadable. */
+const stamp = (ms) => {
+  const t = Math.max(0, Math.round(ms));
+  const h = String(Math.floor(t / 3600000)).padStart(2, '0');
+  const m = String(Math.floor(t / 60000) % 60).padStart(2, '0');
+  const s = String(Math.floor(t / 1000) % 60).padStart(2, '0');
+  return `${h}:${m}:${s},${String(t % 1000).padStart(3, '0')}`;
+};
+
+const cues = subtitles
+  .filter((c) => c.text && c.end > c.start)
+  .sort((a, b) => a.start - b.start)
+  .map((c, i, all) => {
+    const next = all[i + 1];
+    let end = Math.max(c.end, c.start + 1200);
+    if (next && end > next.start - 60) end = Math.max(c.start + 700, next.start - 60);
+    return { ...c, end };
+  });
+
+const srt = cues.map((c, i) =>
+  `${i + 1}\n${stamp(c.start)} --> ${stamp(c.end)}\n${c.text}\n`).join('\n');
+fs.writeFileSync(`${OUT}/investor-portal.srt`, srt);
+
+/* ------------------------------- the file ----------------------------- */
+/* webm is what the recorder produces; mp4 is what plays everywhere a person
+   might open it — a phone, a mail client, a slide. The re-encode is also the
+   only chance to fix the frame rate, which the recorder varies. */
+const { execFileSync } = await import('node:child_process');
+execFileSync('ffmpeg', [
+  '-y', '-i', `${OUT}/raw.webm`,
+  '-r', '30', '-c:v', 'libx264', '-preset', 'slow', '-crf', '20',
+  '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an',
+  `${OUT}/investor-portal.mp4`,
+], { stdio: 'inherit' });
+
+const seconds = Number(execFileSync('ffprobe', [
+  '-v', 'error', '-show_entries', 'format=duration',
+  '-of', 'default=nw=1:nk=1', `${OUT}/investor-portal.mp4`,
+]).toString().trim());
+
+console.log(`recorded ${OUT}/investor-portal.mp4 — ${seconds.toFixed(1)}s, `
+  + `${cues.length} subtitles`);
