@@ -62,6 +62,53 @@ const s3 = await run('forecast','premium forecast');
 check('forecast shows 12-month requirement', s3.includes('Next 12 months'));
 check('forecast states its basis', s3.includes('Basis of projection'));
 
+/* The short horizons are not shorter versions of the long one. "What is due
+   this week" is a dated list somebody has to fund; a month bucket cannot
+   answer it, because the 3rd and the 28th are the same bucket and a very
+   different week. So under a quarter the report changes shape. */
+console.log('\nHOW FAR OUT TO LOOK');
+const horizons = await p.$$eval('#rptMonths option', (o) => o.map((x) => x.textContent.trim()));
+check('the horizon starts at a week, not a year',
+  /7 days/.test(horizons[0]), horizons.join(' · '));
+check('and still reaches five years', /60 months/.test(horizons[horizons.length - 1]));
+check('with the months in between',
+  ['6 months', '12 months', '24 months'].every((m) => horizons.some((h) => h.includes(m))),
+  horizons.join(' · '));
+
+const forecast = async (horizon) => {
+  await p.selectOption('#rptMonths', horizon);
+  await p.click('#rptGenerate');
+  await p.waitForSelector('.rpt-sheet', { timeout: 20000 });
+  await p.waitForTimeout(900);
+  return p.locator('.rpt-output').textContent();
+};
+const week = await forecast('d7');
+check('a week gives a dated window rather than monthly totals',
+  /Next 7 days/.test(week) && !/Schedule by month/.test(week));
+check('with the span printed, so it is unambiguous',
+  /\d\d\/\d\d\/\d{4} – \d\d\/\d\d\/\d{4}/.test(week),
+  (week.match(/\d\d\/\d\d\/\d{4} – \d\d\/\d\d\/\d{4}/) || [''])[0]);
+check('it says what has to be funded and by when',
+  /Due in this window/.test(week) && /Soonest/.test(week));
+check('and past-due money is called out separately',
+  /Already past due/.test(week));
+check('the basis says nothing is being projected',
+  /Basis of this window/.test(week) && /already on file/.test(week));
+
+const month = await forecast('d30');
+check('thirty days is the same shape, a longer window',
+  /Next 30 days/.test(month) && /Day by day/.test(month));
+const weekTotal = (t) => Number(((t.match(/Due in this window\s*\$([\d,]+\.\d\d)/) || [])[1] || '0').replace(/,/g, ''));
+check('and never asks for less money than the week inside it',
+  weekTotal(month) >= weekTotal(week), `${weekTotal(week)} → ${weekTotal(month)}`);
+
+const half = await forecast('m6');
+check('six months goes back to monthly totals',
+  /Schedule by month/.test(half) && !/Day by day/.test(half));
+check('and the near-term tile says six, not twelve',
+  /Next 6 months/.test(half) && !/Next 12 months/.test(half));
+await p.selectOption('#rptMonths', 'm24');
+
 console.log('\nFACT SHEETS');
 await p.click('.rpt-choice:has(input[value="factsheet"])');
 await p.waitForTimeout(300);

@@ -909,7 +909,7 @@ and avoids running headless Chrome on the server — which would not fit in a
 |---|---|
 | Portfolio summary | Tile strip of headline figures, death benefit by carrier chart, and composition tables by carrier, product type and owner, each with % of book |
 | Policy schedule | Every policy as a landscape table with column totals — the formatted version of the grid |
-| Premium forecast | 12/24/36/60-month projection by month with running capital requirement, optional payment-level detail, and an explicit list of policies that *could not* be projected |
+| Premium forecast | Any horizon from **7 days to 60 months**. A week, a fortnight, 30/60/90 days give a dated list of what has to be funded; 6 months and beyond give the monthly projection with a running capital requirement. Both carry optional payment-level detail and an explicit list of policies that *could not* be projected |
 | Policy fact sheet | One page per policy: headline tiles, policy terms, premium and servicing, all lives insured, AV/CSV history chart and recent carrier values |
 | Return — policies in force | Simple interest on every live policy as if it matured today. Ranked best to worst, with a return-by-policy chart, owner-entity subtotals and the capital-weighted book rate. Landscape. |
 | Return — realized | The same for matured policies, using the cheque that actually arrived on the day it was funded. Landscape. |
@@ -924,6 +924,26 @@ mode. Cost of insurance on universal life rises with insured age, so later years
 understate the true requirement — the report says so on its face rather than
 implying false precision. Policies missing a premium amount or a next-due date
 are listed separately and excluded from the totals rather than silently dropped.
+
+
+### How far out the premium forecast looks
+
+The horizon starts at **7 days**, not a year: a week, a fortnight, 30, 60 or 90
+days, then 6, 12, 24, 36 and 60 months.
+
+Under a quarter the report changes shape, because the short question is not a
+shorter version of the long one. "What is due over five years" is a column of
+monthly totals somebody plans against. "What is due this week" is a list of
+payments somebody has to fund — and a month bucket cannot answer it, since the
+3rd and the 28th are the same bucket and a very different week. So a day
+horizon prints the window's dates, what is due on each of them, a running
+total, and every payment behind it, with anything already past due called out
+on its own tile and carried into the window wherever it falls.
+
+Nothing in a day window is projected. Every row is a date already on file — a
+carrier's next due date carried forward at the policy's payment mode, or a
+premium posted to the servicing schedule by hand — which is also exactly what a
+capital call is made of.
 
 ## Number formatting
 

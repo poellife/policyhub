@@ -308,11 +308,157 @@ function buildSchedule(rows, o) {
     ${footer('Policy Schedule')}`;
 }
 
+/* How far out to look.
+ *
+ * The short answers are not shorter versions of the long one. "What is due
+ * this week" is a dated list of payments somebody has to fund; "what is due
+ * over five years" is a column of monthly totals somebody plans against. A
+ * month bucket cannot answer the first — a payment on the 3rd and one on the
+ * 28th are the same bucket and a very different week — so a horizon under a
+ * quarter asks the server for a dated window and the report changes shape.
+ */
+export const FORECAST_HORIZONS = [
+  ['d7', 'Next 7 days', { days: 7 }],
+  ['d14', 'Next 2 weeks', { days: 14 }],
+  ['d30', 'Next 30 days', { days: 30 }],
+  ['d60', 'Next 60 days', { days: 60 }],
+  ['d90', 'Next 90 days', { days: 90 }],
+  ['m6', 'Next 6 months', { months: 6 }],
+  ['m12', 'Next 12 months', { months: 12 }],
+  ['m24', 'Next 24 months', { months: 24 }],
+  ['m36', 'Next 36 months', { months: 36 }],
+  ['m60', 'Next 60 months', { months: 60 }],
+];
+export const forecastHorizon = (key) =>
+  FORECAST_HORIZONS.find(([k]) => k === key) || FORECAST_HORIZONS[7];
+
+/**
+ * The short horizon: everything due between today and the end of the window,
+ * dated, in one list.
+ *
+ * Same report, different question. There is no monthly column here because a
+ * week does not have months in it, and no projection note about later years
+ * because nothing here is a projection — every row is a date already on file.
+ * Anything overdue is carried in whatever window was asked for: it is the most
+ * urgent thing on the page, and dropping it because it is behind the start of
+ * the window is how a missed premium stays missed.
+ */
+function buildForecastWindow(d, o) {
+  const w = d.window;
+  const rows = w.payments;
+  const overdue = rows.filter((x) => x.overdue);
+  const byDate = [];
+  for (const pay of rows) {
+    const at = byDate.find((x) => x.date === pay.due_date);
+    if (at) { at.total += pay.amount; at.payments.push(pay); }
+    else byDate.push({ date: pay.due_date, total: pay.amount, payments: [pay] });
+  }
+  let running = 0;
+  for (const day of byDate) { running += day.total; day.cumulative = running; }
+
+  const tile = (label, value, note) => `
+    <div class="rpt-tile"><div class="rpt-tile-label">${label}</div>
+      <div class="rpt-tile-value">${value}</div>
+      ${note ? `<div class="rpt-tile-note">${note}</div>` : ''}</div>`;
+  const span = `${fmtDate(w.from)} – ${fmtDate(w.to)}`;
+
+  return `
+    ${letterhead('Premium Forecast',
+      `Next ${w.days} day${w.days === 1 ? '' : 's'} · ${span}${o.fund ? ` · Fund ${o.fund}` : ''}`,
+      o.asOf)}
+    ${confidential(false)}
+
+    <div class="rpt-tiles" data-count="4">
+      ${tile('Due in this window', fmtExact(w.total), 'Capital required')}
+      ${tile('Payments', String(rows.length),
+        `${w.policies} ${w.policies === 1 ? 'policy' : 'policies'}`)}
+      ${tile('Soonest', byDate.length ? fmtDate(byDate[0].date) : '—',
+        byDate.length ? fmtExact(byDate[0].total) : 'nothing due')}
+      ${tile('Already past due', overdue.length ? fmtExact(
+        overdue.reduce((s2, x) => s2 + x.amount, 0)) : '—',
+        overdue.length ? `${overdue.length} ${overdue.length === 1 ? 'payment' : 'payments'} behind`
+          : 'nothing outstanding')}
+    </div>
+
+    ${rows.length === 0 ? `
+    <div class="rpt-block">
+      <p class="rpt-note">Nothing is due between ${span}. Widen the horizon to see
+        what is coming after that.</p>
+    </div>` : `
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">What is due, by day</h3>
+      <div id="rptForecastChart"></div>
+    </div>
+
+    <div class="rpt-block">
+      <h3 class="rpt-h3">Day by day</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Date</th><th class="num">Payments</th>
+          <th class="num">Amount due</th><th class="num">Cumulative</th></tr></thead>
+        <tbody>${byDate.map((day) => `<tr>
+          <td class="strong">${fmtDate(day.date)}</td>
+          <td class="num">${day.payments.length}</td>
+          <td class="num">${money(day.total)}</td>
+          <td class="num">${money(day.cumulative)}</td>
+        </tr>`).join('')}</tbody>
+        <tfoot><tr><td>Total</td><td class="num">${rows.length}</td>
+          <td class="num">${money(w.total)}</td><td></td></tr></tfoot>
+      </table>
+    </div>
+
+    <div class="rpt-block">
+      <h3 class="rpt-h3">Payment detail</h3>
+      <table class="rpt-table rpt-table-tight">
+        <thead><tr><th>Due</th><th>Last name</th><th>First name</th><th>Carrier</th>
+          <th>Policy no.</th><th>Owner</th><th>Mode</th><th class="num">Amount</th></tr></thead>
+        <tbody>${rows.map((pay) => `<tr>
+          <td class="${pay.overdue ? 'rpt-overdue' : ''}">${fmtDate(pay.due_date)}${
+            pay.overdue ? ' — past due' : ''}</td>
+          <td class="strong">${esc(pay.insured.split(',')[0] || pay.insured)}</td>
+          <td>${esc((pay.insured.split(',')[1] || '').trim())}</td>
+          <td>${esc(pay.carrier_name)}</td>
+          <td class="rpt-nowrap">${esc(pay.policy_number)}</td>
+          <td>${esc(pay.fund_code || '—')}</td>
+          <td>${esc(pay.mode || '—')}</td>
+          <td class="num">${money(pay.amount)}</td>
+        </tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="7">Total</td>
+          <td class="num">${money(w.total)}</td></tr></tfoot>
+      </table>
+    </div>`}
+
+    ${d.noSchedule.length ? `<div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">Not included — incomplete schedule</h3>
+      <p class="rpt-note">These policies are in force but could not be projected. Their premiums
+        are <strong>not</strong> in the totals above.</p>
+      <table class="rpt-table">
+        <thead><tr><th>Insured</th><th>Carrier</th><th>Policy no.</th><th>Reason</th></tr></thead>
+        <tbody>${d.noSchedule.map((p) => `<tr>
+          <td class="strong">${esc(p.insured)}</td><td>${esc(p.carrier_name)}</td>
+          <td>${esc(p.policy_number)}</td><td>${esc(p.reason)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>` : ''}
+
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">Basis of this window</h3>
+      <p class="rpt-note">
+        Every row is a date already on file — a carrier's next due date carried forward at
+        the policy's payment mode, or a premium posted to the servicing schedule by hand.
+        Nothing here is projected out of an assumption about later years. A due date that
+        has already passed is included wherever it falls and marked past due, because it is
+        still money that has to go out.
+      </p>
+    </div>
+    ${footer('Premium Forecast')}`;
+}
+
 function buildForecast(d, o) {
   const active = d.schedule.filter((m) => m.total > 0);
   const peak = active.reduce((a, b) => (b.total > (a?.total || 0) ? b : a), null);
   const avg = active.length ? d.grandTotal / active.length : 0;
-  const next12 = d.schedule.slice(0, 12).reduce((s, m) => s + m.total, 0);
+  const near = Math.min(12, d.months);
+  const nearTotal = d.schedule.slice(0, near).reduce((s, m) => s + m.total, 0);
 
   const tile = (label, value, note) => `
     <div class="rpt-tile"><div class="rpt-tile-label">${label}</div>
@@ -324,7 +470,7 @@ function buildForecast(d, o) {
     ${confidential(false)}
 
     <div class="rpt-tiles" data-count="4">
-      ${tile('Next 12 months', fmtExact(next12), 'Capital required')}
+      ${tile(`Next ${near} month${near === 1 ? '' : 's'}`, fmtExact(nearTotal), 'Capital required')}
       ${tile(`Full ${d.months}-month total`, fmtExact(d.grandTotal), `${d.policiesScheduled} policies scheduled`)}
       ${tile('Average active month', fmtExact(avg), `${active.length} months with payments due`)}
       ${tile('Peak month', peak ? fmtExact(peak.total) : '—', peak ? monthLabel(peak.month) : '')}
@@ -1189,7 +1335,8 @@ export async function reportsView(api, state) {
   state.funds = funds;
 
   const r = state.report || (state.report = {
-    type: 'summary', fund: '', showBasis: true, months: 24, detail: true, policyIds: [],
+    type: 'summary', fund: '', showBasis: true, months: 24, horizon: 'm24',
+    detail: true, policyIds: [],
   });
 
   const html = `
@@ -1223,8 +1370,11 @@ export async function reportsView(api, state) {
           <div class="field" id="rptMonthsField" style="${r.type === 'forecast' ? '' : 'display:none'}">
             <label>Horizon</label>
             <select id="rptMonths">
-              ${[12, 24, 36, 60].map((m) => `<option value="${m}" ${r.months === m ? 'selected' : ''}>${m} months</option>`).join('')}
-            </select></div>
+              ${FORECAST_HORIZONS.map(([k, label]) =>
+                `<option value="${k}" ${r.horizon === k ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+            <span class="muted" style="font-size:12px">Under a quarter gives a dated list
+              of what has to be funded, rather than monthly totals.</span></div>
         </div>
 
         <div class="field" id="rptPolicyField" style="${r.type === 'factsheet' ? '' : 'display:none'}">
@@ -1304,7 +1454,7 @@ export async function reportsView(api, state) {
           detail: $('#rptDetail').checked,
         };
         r.fund = o.fund; r.showBasis = o.showBasis; r.detail = o.detail;
-        r.months = parseInt($('#rptMonths').value, 10) || 24;
+        r.horizon = $('#rptMonths').value;
 
         try {
           setPageOrientation(REPORTS[r.type].landscape);
@@ -1325,14 +1475,41 @@ export async function reportsView(api, state) {
             out.innerHTML = `<div class="rpt-sheet">${buildSchedule(rows, o)}</div>`;
 
           } else if (r.type === 'forecast') {
-            const d = await api(`/reports/premium-forecast?months=${r.months}&fund=${encodeURIComponent(o.fund)}`);
-            out.innerHTML = `<div class="rpt-sheet">${buildForecast(d, o)}</div>`;
-            charts = () => barChart($('#rptForecastChart'), {
-              rows: d.schedule.filter((m) => m.total > 0).slice(0, 24).map((m) => ({
-                label: monthLabel(m.month), value: m.total,
-                note: `${m.payments.length} payment${m.payments.length === 1 ? '' : 's'}`,
-                seriesName: 'Premium due' })),
-            });
+            const [, , window] = forecastHorizon(r.horizon);
+            const span = window.days ? `days=${window.days}` : `months=${window.months}`;
+            const d = await api(`/reports/premium-forecast?${span}`
+              + `&fund=${encodeURIComponent(o.fund)}`);
+            const dated = !!d.window;
+            out.innerHTML = `<div class="rpt-sheet">${
+              dated ? buildForecastWindow(d, o) : buildForecast(d, o)}</div>`;
+            charts = () => {
+              const el = $('#rptForecastChart');
+              if (!el) return;                       // an empty window draws none
+              if (dated) {
+                /* One bar per day money actually goes out, not one per day in
+                   the window — a fortnight of empty bars either side of two
+                   real ones is a chart of the calendar, not of the money. */
+                const byDate = new Map();
+                for (const pay of d.window.payments) {
+                  const at = byDate.get(pay.due_date)
+                    || { total: 0, n: 0, date: pay.due_date };
+                  at.total += pay.amount; at.n++;
+                  byDate.set(pay.due_date, at);
+                }
+                return barChart(el, {
+                  rows: [...byDate.values()].map((day) => ({
+                    label: fmtDate(day.date), value: day.total,
+                    note: `${day.n} payment${day.n === 1 ? '' : 's'}`,
+                    seriesName: 'Premium due' })),
+                });
+              }
+              return barChart(el, {
+                rows: d.schedule.filter((m) => m.total > 0).slice(0, 24).map((m) => ({
+                  label: monthLabel(m.month), value: m.total,
+                  note: `${m.payments.length} payment${m.payments.length === 1 ? '' : 's'}`,
+                  seriesName: 'Premium due' })),
+              });
+            };
 
           } else if (r.type === 'return-active' || r.type === 'return-realized') {
             const realized = r.type === 'return-realized';

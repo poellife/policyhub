@@ -3543,12 +3543,17 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
 }));
 
 router.get('/reports/premium-forecast', wrap(async (req, res) => {
-  const months = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
+  const asked = Math.min(60, Math.max(1, parseInt(req.query.months, 10) || 24));
   /* A horizon in days, for the short questions. "What is due this week" is not
      a shorter version of "what is due over five years" — a month bucket cannot
      answer it — so when `days` is given the reply is a dated list of payments
      rather than a column of monthly totals. */
   const days = req.query.days ? Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 0)) : 0;
+  /* The dated window is filtered out of the month buckets, so the buckets have
+     to reach past it — otherwise "the next 400 days" quietly stops at whatever
+     the month horizon happened to be. Two months of headroom covers a window
+     ending mid-month and a payment dated the last day of it. */
+  const months = days ? Math.min(60, Math.max(asked, Math.ceil(days / 28) + 1)) : asked;
   const fund = str(req.query.fund);
 
   const scope = scopeId(req);
