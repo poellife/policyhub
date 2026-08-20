@@ -181,6 +181,58 @@ check('the record says so, so the form can offer to reset rather than open',
 check('and nothing about the password comes with it',
   !JSON.stringify(listed).match(/password|hash/i));
 
+console.log('\nAND SOMEBODY IS TOLD, EVERY TIME');
+/* Four moments where an email is the whole point of the feature: somebody
+   registers, somebody is approved, an account is opened for them, and the
+   office is told a registration is waiting. The outbox is the record of
+   whether it happened, so that is what is checked rather than the code path
+   that was supposed to write it. */
+const outbox = async (kind, to) => json(await api(admin,
+  `/mail/outbox?kind=${kind}&to=${encodeURIComponent(to)}`));
+
+const applicant = `${PREFIX.toLowerCase()}-applied@test.local`;
+for (const u of ((await json(await api(admin, '/users'))) || []))
+  if (u.email === applicant) await api(admin, `/users/${u.id}`, { method: 'DELETE' });
+for (const a of ((await json(await api(admin, '/applications'))) || []))
+  if (a.email === applicant) await api(admin, `/applications/${a.id}`, { method: 'DELETE' });
+
+const applied = await fetch(`${BASE}/api/register`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ full_name: `${PREFIX} Applicant`, email: applicant,
+    password: scratchPassword('applied'), phone: '555-0100',
+    address_line1: '1 Test Street', city: 'Southfield', state: 'MI',
+    postal_code: '48075', investor_type: 'Individual' }) });
+check('a registration is accepted', applied.status === 202, String(applied.status));
+
+const theirs = await outbox('registration_received', applicant);
+check('the person who registered is told we have it', theirs?.count >= 1,
+  JSON.stringify(theirs).slice(0, 120));
+const queue = await outbox('registration_new', ADMIN.email);
+check('and the office is told somebody is waiting', queue?.count >= 1,
+  JSON.stringify(queue).slice(0, 120));
+
+const pending = ((await json(await api(admin, '/applications?status=Pending'))) || [])
+  .find((a) => a.email === applicant);
+check('the application is in the queue', !!pending);
+if (pending) {
+  const ok = await api(admin, `/applications/${pending.id}/approve`, { method: 'POST', body: {} });
+  check('approving it works', ok.status === 200, String(ok.status));
+  const told = await outbox('registration_approved', applicant);
+  check('and they are told they are in', told?.count >= 1, JSON.stringify(told).slice(0, 120));
+  check('the message names the address they sign in with, not a password',
+    /@/.test(told?.latest_subject || '') === false && !/password is/i.test(told?.latest || ''),
+    told?.latest_subject);
+}
+
+const opened = await outbox('portal_open', addr('a'));
+check('an investor whose account we opened was told that too', opened?.count >= 1,
+  JSON.stringify(opened).slice(0, 120));
+
+for (const u of ((await json(await api(admin, '/users'))) || []))
+  if (u.email === applicant) await api(admin, `/users/${u.id}`, { method: 'DELETE' });
+for (const i of ((await json(await api(admin, '/investors'))) || []))
+  if (String(i.name).startsWith(PREFIX)) await api(admin, `/investors/${i.id}`, { method: 'DELETE' });
+
 await wipe();
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL INVESTOR LOGIN CHECKS PASSED');
 process.exit(fails.length ? 1 : 0);

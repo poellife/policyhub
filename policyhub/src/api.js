@@ -7,8 +7,9 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
-import { recordExport, describeOrigin } from './security.js';
-import { sendMail, flushMail, mailReady, MAIL_KINDS } from './mail.js';
+import { recordExport, describeOrigin, clientIp } from './security.js';
+import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem }
+  from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -402,6 +403,15 @@ router.post('/register', wrap(async (req, res) => {
        str(b.note).slice(0, 1000), String(ip).slice(0, 64)]
     );
     await audit(null, 'application', rows[0].id, 'create', `${fullName} · ${email}`);
+    /* Two messages, in opposite directions. The applicant is told we have it
+       and that a person reads it, so the wait is a promise rather than a
+       silence. The office is told somebody is waiting, so the queue does not
+       depend on whoever happens to open the page. */
+    await sendMail('registration_received', { to: email, name: fullName });
+    await tellStaff('registration_new', await staffAudience({}), {
+      name: fullName, email, entity: str(b.entity_name),
+      when: new Date().toISOString().replace('T', ' ').slice(0, 16),
+    });
   } catch (e) {
     /* A second application from the same mailbox, or an account that
        already exists. Neither is told to the sender: an error that
@@ -528,6 +538,62 @@ router.put('/me/tax-id', authenticate, wrap(async (req, res) => {
  *     nothing that reaches the grid can carry anything else with it.
  * ------------------------------------------------------------------ */
 
+/**
+ * Who at the firm hears when an investor does something.
+ *
+ * An investor asking for a piece of a deal, signing an agreement or saying
+ * they have wired money is a thing that needs answering. Left to a queue,
+ * it waits until somebody happens to open the right page. So the people
+ * whose job it is are told:
+ *
+ *   - the managers of the entity it concerns, and any manager an
+ *     administrator has put that investor in the hands of. "Their
+ *     investors" is exactly the relationship the scope tables already
+ *     describe, so it is read from them rather than guessed.
+ *   - every active administrator.
+ *   - whoever specifically set the thing in motion, if they are neither.
+ *
+ * Deduplicated by user id: somebody who is both the manager and the person
+ * who issued it gets one message, not three.
+ */
+async function staffAudience({ fundId = null, investorId = null, alsoUserId = null } = {}) {
+  const { rows } = await q(
+    `SELECT DISTINCT u.id, u.email, u.full_name
+       FROM users u
+      WHERE u.is_active = TRUE
+        AND u.email <> ''
+        AND (
+          u.role = 'admin'
+          OR (u.role = 'manager' AND $1::int IS NOT NULL
+              AND EXISTS (SELECT 1 FROM user_funds uf
+                           WHERE uf.user_id = u.id AND uf.fund_id = $1))
+          OR (u.role = 'manager' AND $2::int IS NOT NULL
+              AND EXISTS (SELECT 1 FROM user_investors ui
+                           WHERE ui.user_id = u.id AND ui.investor_id = $2))
+          /* A manager whose entity holds a policy this investor is in, even
+             where neither link above was set by hand. */
+          OR (u.role = 'manager' AND $2::int IS NOT NULL
+              AND EXISTS (SELECT 1
+                            FROM policy_investors pi
+                            JOIN policies p ON p.id = pi.policy_id
+                            JOIN user_funds uf ON uf.fund_id = p.fund_id
+                           WHERE pi.investor_id = $2 AND uf.user_id = u.id))
+          OR u.id = $3::int
+        )`,
+    [fundId, investorId, alsoUserId]);
+  return rows;
+}
+
+/** Tell all of them the same thing. Never throws into a route. */
+async function tellStaff(kind, audience, vars) {
+  let told = 0;
+  for (const person of audience) {
+    const sent = await sendMail(kind, { to: person.email, userId: person.id, ...vars });
+    if (sent.id) told++;
+  }
+  return told;
+}
+
 /* ------------------------------------------------------------------ *
  * Security notices
  *
@@ -589,6 +655,23 @@ router.get('/security/locations', authenticate, wrap(async (req, res) => {
   res.json(rows);
 }));
 
+/**
+ * Start the list again.
+ *
+ * Only ever the caller's own. Useful after something in front of the
+ * application changes — a new office, a CDN in the way — and every recorded
+ * place is suddenly the wrong shape. The next sign-in is treated as a first
+ * sign-in, which raises nothing, and the list rebuilds from there.
+ */
+router.delete('/security/locations', authenticate, wrap(async (req, res) => {
+  const { rowCount } = await q('DELETE FROM login_locations WHERE user_id = $1', [req.user.uid]);
+  await q(`UPDATE security_notices SET seen_at = now()
+            WHERE user_id = $1 AND kind = 'new_location' AND seen_at IS NULL`, [req.user.uid]);
+  await audit(req.user.uid, 'user', req.user.uid, 'update',
+    `cleared ${rowCount} recorded sign-in location(s)`);
+  res.json({ ok: true, cleared: rowCount });
+}));
+
 /** The whole firm's, for an administrator. */
 router.get('/security/notices', authenticate, blockInvestors, requireRole('admin'),
   wrap(async (req, res) => {
@@ -624,11 +707,9 @@ router.get('/me/notifications', authenticate, wrap(async (req, res) => {
     'SELECT kind, enabled FROM notification_prefs WHERE user_id = $1', [req.user.uid]);
   const off = new Set(rows.filter((r) => !r.enabled).map((r) => r.kind));
   /* Only the kinds that would ever be addressed to somebody in this role —
-     an investor has no opinion to express about bulk exports. */
-  const mine = MAIL_KINDS.filter((k) => k.who === 'everyone'
-    || (k.who === 'investor' && req.user.role === 'investor')
-    || (k.who === 'admin' && req.user.role === 'admin')
-    || (k.who === 'staff' && !['investor'].includes(req.user.role)));
+     an investor has no opinion to express about bulk exports — and only the
+     ones there is any point offering a choice about. */
+  const mine = choosableKinds(req.user.role);
   res.json({
     email: req.user.email,
     sending: mailReady(),
@@ -665,9 +746,38 @@ router.get('/mail/health', authenticate, blockInvestors, requireRole('admin'),
     res.json({
       configured: mailReady(),
       from: process.env.MAIL_FROM || null,
+      /* What every link in every message points at, and whether it looks
+         usable. A placeholder left in the setting is invisible until an
+         investor clicks it and lands nowhere. */
+      link: process.env.APP_URL || null,
+      link_problem: appUrlProblem(),
       counts: Object.fromEntries(rows.map((r) => [r.status, r.n])),
       latest: rows.reduce((d, r) => (!d || r.latest > d ? r.latest : d), null),
       failures: stuck,
+    });
+  }));
+
+/**
+ * Was a particular message written, and what happened to it?
+ *
+ * Counts and subjects, never bodies — "did the investor get the capital
+ * call" is a question somebody will ask, and answering it should not mean
+ * reading their post. Administrators only, for the same reason.
+ */
+router.get('/mail/outbox', authenticate, blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const kind = str(req.query.kind);
+    const to = str(req.query.to);
+    const { rows } = await q(
+      `SELECT id, kind, to_email, subject, status, attempts, last_error, created_at, sent_at
+         FROM email_outbox
+        WHERE ($1 = '' OR kind = $1) AND ($2 = '' OR lower(to_email) = lower($2))
+        ORDER BY created_at DESC LIMIT 50`, [kind, to]);
+    res.json({
+      count: rows.length,
+      latest_subject: rows[0]?.subject || null,
+      latest_status: rows[0]?.status || null,
+      messages: rows,
     });
   }));
 
@@ -2337,6 +2447,408 @@ router.post('/opportunities/bulk-delete', blockInvestors, requireRole('admin'),
       requests: tally.requests, premiums: tally.premiums });
   }));
 
+/* ==================================================================== *
+ * Capital calls
+ *
+ * The ask, and the trail of what came back. A call is raised over a
+ * window of premiums that are coming due, split across the investors who
+ * hold those policies, and given ONE date the money has to be in by —
+ * which is the thing a premium schedule cannot tell anybody, because a
+ * carrier's due date is when the carrier wants it, not when the office
+ * needs it in the account.
+ *
+ * Three properties this has to hold:
+ *
+ *   - a notice does not change after it is sent. The premiums it covers
+ *     are copied onto the call, not joined to; a schedule that moves
+ *     afterwards does not rewrite what somebody was asked for.
+ *   - what an investor says and what the office saw are separate facts.
+ *     An investor marking a line paid is a claim. Confirming it is a
+ *     receipt. Collapsing the two would mean either treating a claim as
+ *     money in the bank or giving the investor no way to say anything.
+ *   - nobody is asked for somebody else's share. A line is that
+ *     investor's percentage of each policy in the call, and an investor
+ *     sees their own line and the total of the call, never anybody
+ *     else's.
+ * ==================================================================== */
+
+const CALL_STATUSES = ['Open', 'Closed', 'Cancelled'];
+
+/** Which calls this reader may see at all. */
+function callScope(req) {
+  if (isInvestor(req))
+    return { sql: `EXISTS (SELECT 1 FROM capital_call_lines l
+                            WHERE l.call_id = c.id AND l.investor_id = $1)`,
+             params: [Number(req.user.iid)] };
+  const funds = fundScope(req);
+  if (funds) return { sql: '(c.fund_id IS NULL OR c.fund_id = ANY($1))', params: [funds] };
+  return { sql: 'TRUE', params: [] };
+}
+
+/** A call with its items and lines, or null. */
+async function loadCall(id) {
+  const { rows } = await q(
+    `SELECT c.*, f.code AS fund_code, u.full_name AS raised_by
+       FROM capital_calls c
+       LEFT JOIN funds f ON f.id = c.fund_id
+       LEFT JOIN users u ON u.id = c.created_by
+      WHERE c.id = $1`, [id]);
+  const call = rows[0];
+  if (!call) return null;
+  const [items, lines] = await Promise.all([
+    q(`SELECT * FROM capital_call_items WHERE call_id = $1 ORDER BY due_date, insured_name`, [id]),
+    q(`SELECT l.*, i.name AS investor_name, i.email AS investor_email,
+              u.email AS login_email, u.id AS user_id
+         FROM capital_call_lines l
+         JOIN investors i ON i.id = l.investor_id
+         LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
+        WHERE l.call_id = $1 ORDER BY i.name`, [id]),
+  ]);
+  call.items = items.rows;
+  call.lines = lines.rows;
+  call.total = call.lines.reduce((n, l) => n + Number(l.amount || 0), 0);
+  call.collected = call.lines.filter((l) => l.confirmed_at)
+    .reduce((n, l) => n + Number(l.amount || 0), 0);
+  call.claimed = call.lines.filter((l) => l.marked_paid_at && !l.confirmed_at)
+    .reduce((n, l) => n + Number(l.amount || 0), 0);
+  return call;
+}
+
+const callVisible = async (req, id) => {
+  const scope = callScope(req);
+  const { rows } = await q(
+    `SELECT c.id FROM capital_calls c
+      WHERE c.id = $${scope.params.length + 1} AND ${scope.sql}`, [...scope.params, id]);
+  return !!rows[0];
+};
+
+/**
+ * What is coming due, and who would be asked for what.
+ *
+ * The same figures the premium forecast produces, turned round: by
+ * investor rather than by month, because that is the shape of the ask.
+ * Nothing is written — this is what the form shows before anybody commits
+ * to sending it.
+ */
+router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res) => {
+  const days = Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 30));
+  const fund = str(req.query.fund);
+  const scope = scopeId(req);
+  const funds = fundScope(req);
+  const to = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+  /* Premiums the carrier has dated inside the window, plus anything posted
+     to the schedule by hand — the same two sources the forecast reads, for
+     the same reason: a book imported without a next-due column would
+     otherwise produce an empty call. */
+  const { rows: carrier } = await q(
+    `SELECT pl.id AS policy_id, pl.policy_number, pl.carrier_name,
+            COALESCE(pl.display_name,
+                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+              AS insured_name,
+            pl.next_premium_due AS due_date, pl.premium_required AS amount, pl.fund_id
+       FROM policy_latest pl
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND pl.next_premium_due IS NOT NULL AND pl.next_premium_due <= $4::date
+        AND COALESCE(pl.premium_required, 0) > 0
+        AND ($3 = '' OR pl.fund_code = $3)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      ORDER BY pl.next_premium_due`,
+    [scope, funds, fund, to]);
+  const { rows: posted } = await q(
+    `SELECT pl.id AS policy_id, pl.policy_number, pl.carrier_name,
+            COALESCE(pl.display_name,
+                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+              AS insured_name,
+            r.due_date, r.amount, pl.fund_id, r.note
+       FROM policy_reminders r
+       JOIN policy_latest pl ON pl.id = r.policy_id
+      WHERE r.kind = 'Premium' AND r.done_at IS NULL
+        AND r.due_date >= CURRENT_DATE AND r.due_date <= $4::date
+        AND pl.status NOT IN ('Lapsed','Sold','Matured')
+        AND ($3 = '' OR pl.fund_code = $3)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      ORDER BY r.due_date`,
+    [scope, funds, fund, to]);
+
+  const items = [...carrier, ...posted].map((r) => ({
+    ...r, amount: Number(r.amount) || 0,
+    due_date: String(r.due_date).slice(0, 10),
+  }));
+  if (!items.length)
+    return res.json({ days, to, items: [], investors: [], total: 0, unallocated: 0 });
+
+  /* Who holds what, at the percentages on file now. A call is a snapshot:
+     somebody who buys in next week is not asked for this one. */
+  const { rows: holders } = await q(
+    `SELECT pi.policy_id, pi.investor_id, pi.pct, i.name
+       FROM policy_investors pi JOIN investors i ON i.id = pi.investor_id
+      WHERE pi.policy_id = ANY($1)`, [items.map((i) => i.policy_id)]);
+
+  const byInvestor = new Map();
+  let unallocated = 0;
+  for (const item of items) {
+    const mine = holders.filter((h) => h.policy_id === item.policy_id);
+    const held = mine.reduce((n, h) => n + Number(h.pct), 0);
+    /* The house's own share. Named rather than spread over the investors,
+       because asking somebody for a percentage they do not hold is how a
+       capital call becomes an argument. */
+    unallocated += item.amount * Math.max(0, 100 - held) / 100;
+    for (const h of mine) {
+      const at = byInvestor.get(h.investor_id)
+        || { investor_id: h.investor_id, name: h.name, amount: 0, policies: 0 };
+      at.amount += item.amount * Number(h.pct) / 100;
+      at.policies++;
+      byInvestor.set(h.investor_id, at);
+    }
+  }
+
+  res.json({
+    days, to, items,
+    investors: [...byInvestor.values()].sort((a, b) => b.amount - a.amount),
+    total: items.reduce((n, i) => n + i.amount, 0),
+    unallocated,
+  });
+}));
+
+router.get('/capital-calls', wrap(async (req, res) => {
+  const scope = callScope(req);
+  const mine = isInvestor(req) ? Number(req.user.iid) : null;
+  const { rows } = await q(
+    `SELECT c.*, f.code AS fund_code,
+            (SELECT COUNT(*)::int FROM capital_call_lines l WHERE l.call_id = c.id) AS parties,
+            (SELECT COALESCE(SUM(l.amount),0) FROM capital_call_lines l WHERE l.call_id = c.id)
+              AS total,
+            (SELECT COALESCE(SUM(l.amount),0) FROM capital_call_lines l
+              WHERE l.call_id = c.id AND l.confirmed_at IS NOT NULL) AS collected,
+            (SELECT l.amount FROM capital_call_lines l
+              WHERE l.call_id = c.id AND l.investor_id = $${scope.params.length + 1}) AS my_amount,
+            (SELECT l.marked_paid_at FROM capital_call_lines l
+              WHERE l.call_id = c.id AND l.investor_id = $${scope.params.length + 1})
+              AS my_marked_at,
+            (SELECT l.confirmed_at FROM capital_call_lines l
+              WHERE l.call_id = c.id AND l.investor_id = $${scope.params.length + 1})
+              AS my_confirmed_at
+       FROM capital_calls c
+       LEFT JOIN funds f ON f.id = c.fund_id
+      WHERE ${scope.sql}
+      ORDER BY (c.status = 'Open') DESC, c.due_date DESC, c.id DESC`,
+    [...scope.params, mine]);
+  res.json(rows);
+}));
+
+router.get('/capital-calls/:id', wrap(async (req, res) => {
+  if (!(await callVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Capital call not found' });
+  const call = await loadCall(req.params.id);
+  if (isInvestor(req)) {
+    /* Their own line, the total of the call, and what it is for. Who else
+       was asked and for how much is somebody else's business. */
+    const mine = Number(req.user.iid);
+    call.lines = call.lines.filter((l) => l.investor_id === mine)
+      .map((l) => ({ ...l, investor_email: undefined, login_email: undefined }));
+    call.me = call.lines[0] || null;
+  }
+  res.json(call);
+}));
+
+/** Raise one. This is the moment the figures stop moving. */
+router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    const due = date(req.body.due_date);
+    if (!due) return res.status(400).json({ error: 'Give the date the money has to be in by' });
+    if (due < today())
+      return res.status(400).json({ error: 'That date has already passed' });
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+    if (!items.length)
+      return res.status(400).json({ error: 'A call has to cover at least one premium' });
+
+    const fundId = int(req.body.fund_id);
+    const scoped = fundScope(req);
+    if (fundId && scoped && !scoped.includes(fundId))
+      return res.status(403).json({ error: 'That owner entity is not one of yours' });
+
+    /* Every policy named has to be one this person may see. Otherwise a call
+       is a way to read a premium out of somebody else's book. */
+    const policyIds = [...new Set(items.map((i) => int(i.policy_id)).filter(Boolean))];
+    const { rows: allowed } = await q(
+      `SELECT pl.id, pl.policy_number, pl.carrier_name,
+              COALESCE(pl.display_name,
+                       TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+                AS insured_name
+         FROM policy_latest pl
+        WHERE pl.id = ANY($3) AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}`,
+      [scopeId(req), fundScope(req), policyIds]);
+    if (allowed.length !== policyIds.length)
+      return res.status(403).json({ error: 'One of those policies is not one of yours' });
+    const byId = new Map(allowed.map((p) => [p.id, p]));
+
+    const { rows: holders } = await q(
+      `SELECT policy_id, investor_id, pct FROM policy_investors WHERE policy_id = ANY($1)`,
+      [policyIds]);
+
+    const lines = new Map();
+    const rows = [];
+    for (const raw of items) {
+      const policyId = int(raw.policy_id);
+      const amount = num(raw.amount);
+      if (!policyId || !amount || amount <= 0) continue;
+      const p = byId.get(policyId);
+      rows.push({ policyId, amount, due: date(raw.due_date),
+        number: p.policy_number, carrier: p.carrier_name, insured: p.insured_name,
+        note: str(raw.note) });
+      for (const h of holders.filter((x) => x.policy_id === policyId))
+        lines.set(h.investor_id,
+          (lines.get(h.investor_id) || 0) + amount * Number(h.pct) / 100);
+    }
+    if (!rows.length) return res.status(400).json({ error: 'None of those premiums had an amount' });
+    if (!lines.size)
+      return res.status(400).json({
+        error: 'Nobody holds a share of those policies, so there is nobody to ask.' });
+
+    const client = await pool.connect();
+    let callId;
+    try {
+      await client.query('BEGIN');
+      const { rows: made } = await client.query(
+        `INSERT INTO capital_calls (reference, title, fund_id, due_date, covers_from, covers_to,
+                                    note, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [str(req.body.reference), str(req.body.title) || 'Premium capital call', fundId, due,
+         rows.reduce((d, r) => (!d || (r.due && r.due < d) ? r.due : d), null),
+         rows.reduce((d, r) => (!d || (r.due && r.due > d) ? r.due : d), null),
+         str(req.body.note), req.user.uid]);
+      callId = made[0].id;
+      for (const r of rows)
+        await client.query(
+          `INSERT INTO capital_call_items (call_id, policy_id, policy_number, carrier_name,
+                                           insured_name, due_date, amount, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [callId, r.policyId, r.number, r.carrier, r.insured, r.due, r.amount, r.note]);
+      for (const [investorId, amount] of lines)
+        await client.query(
+          `INSERT INTO capital_call_lines (call_id, investor_id, amount) VALUES ($1,$2,$3)`,
+          [callId, investorId, Math.round(amount * 100) / 100]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    const call = await loadCall(callId);
+    await audit(req.user.uid, 'capital_call', callId, 'create',
+      `${call.title} · ${rows.length} premium(s) · ${call.lines.length} investor(s) · `
+      + `${call.total.toFixed(2)} due ${due}`);
+
+    /* And they are told, once, with their own figure and the date. An ask
+       nobody hears about is not an ask. */
+    let told = 0;
+    for (const line of call.lines) {
+      const to = line.login_email || line.investor_email;
+      if (!to) continue;
+      const sent = await sendMail('capital_call', {
+        to, userId: line.user_id || null, name: line.investor_name,
+        amount: `$${Number(line.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+        due, title: call.title,
+        policies: rows.length, note: call.note,
+      });
+      if (sent.id) told++;
+    }
+    res.status(201).json({ ...call, notified: told });
+  }));
+
+/** An investor says the money has gone. A claim, not a receipt. */
+router.post('/capital-calls/:id/paid', wrap(async (req, res) => {
+  const mine = scopeId(req);
+  if (mine === null) return res.status(403).json({ error: 'Not an investor account' });
+  const { rows } = await q(
+    `UPDATE capital_call_lines
+        SET marked_paid_at = now(), marked_paid_by = $1, marked_note = $2
+      WHERE call_id = $3 AND investor_id = $4 AND confirmed_at IS NULL
+      RETURNING id, amount`,
+    [req.user.uid, str(req.body.note).slice(0, 300), req.params.id, mine]);
+  if (!rows[0])
+    return res.status(409).json({
+      error: 'Either this is not your call, or the office has already confirmed it.' });
+  await audit(req.user.uid, 'capital_call', Number(req.params.id), 'update',
+    `investor ${mine} says ${rows[0].amount} has been sent`);
+  /* A claim needs somebody to go and look at a bank account, which nobody
+     does on a schedule. */
+  const { rows: ctx } = await q(
+    `SELECT c.title, c.fund_id, i.name FROM capital_calls c, investors i
+      WHERE c.id = $1 AND i.id = $2`, [req.params.id, mine]);
+  await tellStaff('capital_call_paid',
+    await staffAudience({ fundId: ctx[0]?.fund_id, investorId: mine }), {
+      investor: ctx[0]?.name || `investor ${mine}`,
+      amount: `$${Number(rows[0].amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+      title: ctx[0]?.title || 'a capital call',
+      note: str(req.body.note).slice(0, 300),
+    });
+  res.json({ ok: true });
+}));
+
+/** The office saw it arrive. A receipt. */
+router.put('/capital-calls/:id/lines/:lineId', blockInvestors, canEdit, wrap(async (req, res) => {
+  if (!(await callVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Capital call not found' });
+  const action = str(req.body.action);
+  if (!['confirm', 'unconfirm', 'waive'].includes(action))
+    return res.status(400).json({ error: 'Say what to do: confirm, unconfirm or waive' });
+
+  const sets = action === 'confirm'
+    ? `confirmed_at = now(), confirmed_by = ${req.user.uid}, waived_at = NULL`
+    : action === 'waive'
+      ? `waived_at = now(), confirmed_at = NULL, confirmed_by = NULL`
+      : `confirmed_at = NULL, confirmed_by = NULL`;
+  const { rows } = await q(
+    `UPDATE capital_call_lines SET ${sets}
+      WHERE id = $1 AND call_id = $2 RETURNING investor_id, amount`,
+    [req.params.lineId, req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'That line is not on this call' });
+  await audit(req.user.uid, 'capital_call', Number(req.params.id), 'update',
+    `${action} ${rows[0].amount} from investor ${rows[0].investor_id}`);
+
+  /* Everything in and confirmed closes the call on its own — a list that
+     stays open with nothing outstanding is a list nobody trusts. */
+  const call = await loadCall(req.params.id);
+  const outstanding = call.lines.filter((l) => !l.confirmed_at && !l.waived_at);
+  if (!outstanding.length && call.status === 'Open')
+    await q(`UPDATE capital_calls SET status = 'Closed', closed_at = now(), updated_at = now()
+              WHERE id = $1`, [req.params.id]);
+  res.json({ ok: true, outstanding: outstanding.length });
+}));
+
+router.put('/capital-calls/:id', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await callVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Capital call not found' });
+    const status = str(req.body.status);
+    if (!CALL_STATUSES.includes(status))
+      return res.status(400).json({ error: 'Status must be Open, Closed or Cancelled' });
+    await q(
+      `UPDATE capital_calls SET status = $1, note = COALESCE(NULLIF($2,''), note),
+                                closed_at = CASE WHEN $1 = 'Open' THEN NULL ELSE now() END,
+                                updated_at = now()
+        WHERE id = $3`, [status, str(req.body.note), req.params.id]);
+    await audit(req.user.uid, 'capital_call', Number(req.params.id), 'update', status);
+    res.json({ ok: true });
+  }));
+
+router.delete('/capital-calls/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const call = await loadCall(req.params.id);
+  if (!call) return res.status(404).json({ error: 'Capital call not found' });
+  const paid = call.lines.filter((l) => l.confirmed_at).length;
+  if (paid)
+    return res.status(409).json({
+      error: `${paid} payment${paid === 1 ? ' has' : 's have'} been confirmed against this call. `
+        + 'Cancel it instead — that keeps the record of what was asked and what came in.' });
+  await q('DELETE FROM capital_calls WHERE id = $1', [req.params.id]);
+  await audit(req.user.uid, 'capital_call', Number(req.params.id), 'delete', call.title);
+  res.json({ ok: true });
+}));
+
 /* ------------------------- premium schedule ------------------------- */
 
 router.post('/opportunities/:id/premiums', blockInvestors, oppEdit, wrap(async (req, res) => {
@@ -2490,6 +3002,14 @@ router.put('/opportunities/:id/shares', blockInvestors, oppEdit, wrap(async (req
       error: 'You can only share with investors in your own entities, or ones an administrator '
         + 'has given you access to.' });
 
+  /* Who is newly on the list, worked out before the write — afterwards there
+     is no way to tell somebody who was just added from somebody who has been
+     able to see it for a month, and telling the second group again is how a
+     notice becomes noise. */
+  const { rows: had } = await q(
+    'SELECT investor_id FROM opportunity_shares WHERE opportunity_id = $1', [req.params.id]);
+  const fresh = ids.filter((id) => !had.some((h) => h.investor_id === id));
+
   await q('DELETE FROM opportunity_shares WHERE opportunity_id = $1 AND investor_id <> ALL($2)',
     [req.params.id, ids.length ? ids : [-1]]);
   for (const id of ids)
@@ -2497,7 +3017,38 @@ router.put('/opportunities/:id/shares', blockInvestors, oppEdit, wrap(async (req
              VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [req.params.id, id, req.user.uid]);
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
     `shared with ${ids.length} investor(s)`);
-  res.json({ ok: true, shared_with: ids.length });
+
+  let told = 0;
+  if (fresh.length) {
+    const { rows: oppRows } = await q(
+      `SELECT o.*, f.code AS fund_code FROM opportunities o
+         LEFT JOIN funds f ON f.id = o.fund_id WHERE o.id = $1`, [req.params.id]);
+    const opp = oppRows[0] || {};
+    const { rows: people } = await q(
+      `SELECT i.id, i.name, i.email, u.email AS login_email, u.id AS user_id
+         FROM investors i LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
+        WHERE i.id = ANY($1)`, [fresh]);
+    /* What the deal is called in a sentence: the insured, the carrier, and
+       the face — enough to recognise it without opening anything, and not so
+       much that the email is the deal sheet. */
+    const headline = [
+      [opp.insured_last_name, opp.insured_first_name].filter(Boolean).join(', ')
+        || opp.policy_number || 'a policy',
+      opp.carrier_name,
+      opp.face_amount
+        ? `$${Number(opp.face_amount).toLocaleString('en-US')} death benefit` : '',
+    ].filter(Boolean).join(' · ');
+    for (const person of people) {
+      const to = person.login_email || person.email;
+      if (!to) continue;
+      const sent = await sendMail('opportunity_shared', {
+        to, userId: person.user_id || null, name: person.name, headline,
+        closes: opp.offer_closes_on ? String(opp.offer_closes_on).slice(0, 10) : '',
+      });
+      if (sent.id) told++;
+    }
+  }
+  res.json({ ok: true, shared_with: ids.length, notified: told });
 }));
 
 /* --------------------------- commitments ---------------------------- */
@@ -2578,6 +3129,23 @@ router.post('/opportunities/:id/commit', wrap(async (req, res) => {
       [o.id, me, pct, str(req.body.notes)]);
     await client.query('COMMIT');
     await audit(req.user.uid, 'opportunity', o.id, 'update', `investor ${me} requested ${pct}%`);
+
+    /* Somebody has to confirm or decline this, so somebody has to know it
+       happened. The manager whose client it is, and the administrators. */
+    const { rows: about } = await q(
+      `SELECT o.fund_id, o.policy_number, o.carrier_name, o.face_amount,
+              o.insured_first_name, o.insured_last_name, i.name AS investor_name
+         FROM opportunities o, investors i WHERE o.id = $1 AND i.id = $2`, [o.id, me]);
+    const ctx = about[0] || {};
+    await tellStaff('investor_interest',
+      await staffAudience({ fundId: ctx.fund_id, investorId: me }), {
+        investor: ctx.investor_name || `investor ${me}`,
+        pct: `${pctText(pct)}`,
+        headline: [[ctx.insured_last_name, ctx.insured_first_name].filter(Boolean).join(', ')
+          || ctx.policy_number, ctx.carrier_name].filter(Boolean).join(' · '),
+        note: str(req.body.notes),
+        remaining: pctText(Math.max(0, remaining - pct)),
+      });
     res.status(201).json(rows[0]);
   } catch (e) {
     await client.query('ROLLBACK');
@@ -4724,11 +5292,10 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
       error: 'The agreement changed since this page was opened. Reload it and read it again '
         + 'before signing.' });
 
-  /* Behind a proxy the socket address is the proxy, so the forwarded
-     header is used when the app is running behind one — and only the
-     first hop of it, which is the only part a client cannot forge past. */
-  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  const ip = (req.app.get('trust proxy') && forwarded) || req.ip || req.socket?.remoteAddress || '';
+  /* The same resolution the sign-in fingerprint uses: behind a CDN the
+     socket address is the CDN, and a signature stamped with a Cloudflare
+     machine's address records nothing about who signed. */
+  const ip = clientIp(req) || req.socket?.remoteAddress || '';
 
   await q(
     `UPDATE agreement_signers
@@ -4757,17 +5324,13 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
 
   /* Whoever sent it out is waiting on it, so they hear about each signature
      rather than having to keep opening the page to look. */
-  if (a.issued_by) {
-    const { rows: issuer } = await q(
-      'SELECT id, email FROM users WHERE id = $1 AND is_active = TRUE', [a.issued_by]);
-    if (issuer[0])
-      await sendMail('agreement_signed', {
-        to: issuer[0].email, userId: issuer[0].id,
-        title: a.terms?.llc_name || a.title || 'the operating agreement',
-        who: `${typed}${entity ? ` (by ${byName}, ${byTitle})` : ''}`,
-        outstanding: outstanding.length,
-      });
-  }
+  await tellStaff('agreement_signed',
+    await staffAudience({ fundId: a.fund_id, investorId: signer.investor_id,
+      alsoUserId: a.issued_by }), {
+      title: a.terms?.llc_name || a.title || 'the operating agreement',
+      who: `${typed}${entity ? ` (by ${byName}, ${byTitle})` : ''}`,
+      outstanding: outstanding.length,
+    });
   res.json({ ok: true, executed: !outstanding.length, outstanding: outstanding.length });
 }));
 
@@ -4788,6 +5351,14 @@ router.post('/agreements/:id/decline', wrap(async (req, res) => {
     [str(req.body.note).slice(0, 500), signer.id]);
   await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
     `declined by ${signer.name}`);
+  /* A refusal needs answering more urgently than a signature does, and it is
+     the one thing nobody thinks to go and look for. */
+  await tellStaff('agreement_declined',
+    await staffAudience({ fundId: a.fund_id, investorId: signer.investor_id,
+      alsoUserId: a.issued_by }), {
+      title: a.terms?.llc_name || a.title || 'the operating agreement',
+      who: signer.name, note: str(req.body.note).slice(0, 300),
+    });
   res.json({ ok: true });
 }));
 
@@ -5004,6 +5575,11 @@ router.post('/applications/:id/approve', blockInvestors, requireRole('admin', 'm
     await audit(req.user.uid, 'application', Number(req.params.id), 'update',
       `approved ${a.full_name} · investor ${investorId} · user ${userId}${
         fundId ? ` · entity ${fundId}` : ' · no entity assigned'}`);
+    /* They were told to expect this, so it has to arrive. Their password is
+       the one they chose when they registered — nobody here has ever known
+       it — so the message says to use that rather than carrying anything. */
+    await sendMail('registration_approved', {
+      to: a.email, userId, name: a.full_name, email: a.email });
     res.json({ ok: true, investor_id: investorId, user_id: userId,
                name: investorName, fund_id: fundId });
   }));

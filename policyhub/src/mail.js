@@ -22,8 +22,25 @@
 import { q } from './db.js';
 
 const KEY = () => process.env.RESEND_API_KEY || '';
-const FROM = () => process.env.MAIL_FROM || 'PolicyHub <notices@poelcapital.com>';
-const APP = () => (process.env.APP_URL || 'https://policyhub.onrender.com').replace(/\/+$/, '');
+/* The name on the envelope is the firm, not the software. An investor knows
+   who Poel Capital is; nobody outside this repository has heard of PolicyHub,
+   and a message from a name the recipient does not recognise is a message
+   they are right to distrust. */
+const FROM = () => process.env.MAIL_FROM
+  || 'Poel Capital Policy Portal <notices@poelcapital.com>';
+const APP = () => String(process.env.APP_URL || '').replace(/\/+$/, '');
+
+/* A link nobody can follow is worse than no link: it reads as a broken
+   product rather than a missing setting. Said once, loudly, at startup. */
+export function appUrlProblem() {
+  const url = APP();
+  if (!url) return 'APP_URL is not set, so messages will not carry a link at all.';
+  if (!/^https?:\/\//i.test(url)) return `APP_URL (${url}) is not a web address.`;
+  if (/your-|changeme|localhost|127\.0\.0\.1|<|>/i.test(url))
+    return `APP_URL is still the example value (${url}). Set it to the address people `
+      + 'actually use, or every link in every message goes nowhere.';
+  return null;
+}
 const REPLY_TO = () => process.env.MAIL_REPLY_TO || '';
 /* Where the provider lives. An override rather than a constant for two
    reasons: a different provider with the same shape is a one-line change,
@@ -44,8 +61,12 @@ export const MAIL_KINDS = [
   { kind: 'bulk_export', label: 'Somebody exported the book',
     who: 'admin', forced: true,
     note: 'Sent to the other administrators.' },
+  /* One-off, and sent before the recipient could ever have expressed a
+     preference about it — by the time somebody can see a tick box for "your
+     account has been opened", it has been opened and the message has gone.
+     Offering the choice would be theatre, so these are not on the screen. */
   { kind: 'portal_open', label: 'A portal account has been opened',
-    who: 'investor',
+    who: 'investor', once: true,
     note: 'Sent to an investor when their login is set up. Never carries the password.' },
   { kind: 'agreement_out', label: 'An agreement is waiting for a signature',
     who: 'investor',
@@ -53,9 +74,34 @@ export const MAIL_KINDS = [
   { kind: 'capital_call', label: 'A capital call',
     who: 'investor',
     note: 'Sent when money is called for premiums — your share and the date it is needed by.' },
+  { kind: 'opportunity_shared', label: 'A new opportunity is available to you',
+    who: 'investor',
+    note: 'Sent when a deal is put in front of you.' },
+  { kind: 'registration_received', label: 'Your registration was received',
+    who: 'investor', once: true,
+    note: 'Sent once, when you register.' },
+  { kind: 'registration_approved', label: 'Your registration was approved',
+    who: 'investor', once: true,
+    note: 'Sent when the office opens your account.' },
+
+  /* The other direction. Somebody at the firm hears when an investor does
+     something that needs answering — otherwise a request sits in a queue
+     until whoever happens to open the page finds it. */
   { kind: 'agreement_signed', label: 'An agreement was signed',
     who: 'staff',
-    note: 'Sent to whoever issued it, as each party signs.' },
+    note: 'Sent to whoever issued it, and to the manager whose client signed.' },
+  { kind: 'agreement_declined', label: 'Somebody declined to sign',
+    who: 'staff',
+    note: 'Sent when a party says they are not signing, with whatever they said.' },
+  { kind: 'investor_interest', label: 'An investor asked for a piece of a deal',
+    who: 'staff',
+    note: 'Sent when somebody requests a share of an opportunity.' },
+  { kind: 'capital_call_paid', label: 'An investor says a capital call has been paid',
+    who: 'staff',
+    note: 'A claim, not a receipt — it tells you to look for the money.' },
+  { kind: 'registration_new', label: 'Somebody registered for access',
+    who: 'staff',
+    note: 'Sent when a registration lands in the queue.' },
 ];
 /* Kinds that exist but are not something anybody subscribes to, so they are
    not on the preferences screen. `test` is asked for explicitly by the person
@@ -63,8 +109,17 @@ export const MAIL_KINDS = [
    HERE, or the queue refuses them — which is exactly what it did. */
 const INTERNAL_KINDS = ['test'];
 const KIND_SET = new Set([...MAIL_KINDS.map((k) => k.kind), ...INTERNAL_KINDS]);
+/* Kinds no preference can stop: the security ones, which is the point of
+   them, and the one-off ones, which have no preference to consult. */
 const FORCED = new Set([
-  ...MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind), ...INTERNAL_KINDS]);
+  ...MAIL_KINDS.filter((k) => k.forced || k.once).map((k) => k.kind), ...INTERNAL_KINDS]);
+
+/** The kinds worth offering somebody a choice about. */
+export const choosableKinds = (role) => MAIL_KINDS.filter((k) => !k.once && (
+  k.who === 'everyone'
+  || (k.who === 'investor' && role === 'investor')
+  || (k.who === 'admin' && role === 'admin')
+  || (k.who === 'staff' && role !== 'investor')));
 
 /** Has this person switched this off? Forced kinds ignore the answer. */
 async function wants(userId, kind) {
@@ -177,6 +232,8 @@ const pendingCount = async () => Number(
 
 /** The worker. Started by the server; stopped by returning the handle. */
 export function startMailWorker({ everyMs = 60_000 } = {}) {
+  const bad = appUrlProblem();
+  if (bad) console.warn(`[mail] ${bad}`);
   if (!mailReady()) {
     console.warn('[mail] RESEND_API_KEY is not set — messages will queue and wait.');
     return null;
@@ -208,7 +265,7 @@ function wrapHtml(subject, text) {
               font:15px/1.55 -apple-system,'Segoe UI',system-ui,sans-serif;color:#0a0a0a">
     <div style="font-weight:600;letter-spacing:-.02em;margin-bottom:2px">Poel Capital</div>
     <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#67696e">
-      Policy Portfolio</div>
+      Policy Portal</div>
     <hr style="border:0;border-top:1px solid #e2e4e8;margin:18px 0 22px">
     <h1 style="font-size:17px;margin:0 0 16px">${esc(subject)}</h1>
     ${paras}
@@ -219,7 +276,18 @@ function wrapHtml(subject, text) {
   </div></body></html>`;
 }
 
-const link = (path = '') => `${APP()}${path}`;
+/**
+ * Every link goes to the front door.
+ *
+ * Deep links into a portal that requires signing in are a small trap: the
+ * person clicks, meets a login screen, signs in, and lands on the dashboard
+ * rather than the thing the email was about — so the link taught them
+ * nothing and cost them a step. Worse, a deep link that is wrong (a stale
+ * route, a misconfigured address) reads as a broken product rather than a
+ * broken link. So the email says where to go in words, and the link goes to
+ * the door.
+ */
+const link = () => APP() || '';
 
 export const TEMPLATES = {
   new_location: ({ name, label, when }) => ({
@@ -227,8 +295,8 @@ export const TEMPLATES = {
     text: `${name ? `${name},\n\n` : ''}Somebody signed in to your Poel Capital portal account `
       + `from ${label} on ${when}.\n\n`
       + `If that was you, there is nothing to do.\n\n`
-      + `If it was not, change your password now — doing so ends every other session at `
-      + `once: ${link('/#/settings')}\n\n`
+      + `If it was not, sign in and change your password now — doing so ends every other `
+      + `session at once. ${link()}\n\n`
       + `We record the browser and the network a sign-in came from, never the full address.`,
   }),
 
@@ -237,7 +305,7 @@ export const TEMPLATES = {
     text: `${actor} exported data from the Poel Capital portal on ${when}.\n\n`
       + `${detail}\n\n`
       + `Every administrator except the one who did it is told, and the export is on the `
-      + `activity log: ${link('/#/settings')}`,
+      + `activity log, under Settings. ${link()}`,
   }),
 
   portal_open: ({ name, email }) => ({
@@ -245,7 +313,7 @@ export const TEMPLATES = {
     text: `${name ? `${name},\n\n` : ''}An account has been opened for you on the Poel Capital `
       + `portal. You can see your positions, what has been paid in, your statements and any `
       + `agreements waiting for a signature.\n\n`
-      + `Sign in at ${link('/')} with ${email}.\n\n`
+      + `Sign in at ${link()} with ${email}.\n\n`
       + `Your first password is not in this email — the office will give it to you directly. `
       + `You will be asked to replace it the first time you sign in, and after that nobody `
       + `here knows it.`,
@@ -255,7 +323,8 @@ export const TEMPLATES = {
     subject: 'An agreement is waiting for your signature',
     text: `${name ? `${name},\n\n` : ''}${title} is ready for you to read and sign.\n\n`
       + `${parties}\n\n`
-      + `Read it in full and sign here: ${link('/#/agreements')}\n\n`
+      + `Sign in and it is under Agreements — read it in full there, and sign at the `
+      + `bottom. ${link()}\n\n`
       + `Nothing is signed until you type your name and confirm it. If a company or trust is `
       + `the party, the signature asks for the person signing on its behalf as well.`,
   }),
@@ -268,7 +337,7 @@ export const TEMPLATES = {
       + (outstanding
         ? `${outstanding} ${outstanding === 1 ? 'party has' : 'parties have'} still to sign.`
         : `Every party has now signed. The executed copy has been filed against the entity.`)
-      + `\n\n${link('/#/agreements')}`,
+      + `\n\n${link()}`,
   }),
 
   capital_call: ({ name, amount, due, title, policies, note }) => ({
@@ -276,12 +345,75 @@ export const TEMPLATES = {
     text: `${name ? `${name},\n\n` : ''}${title}.\n\n`
       + `Your share is ${amount}, and it needs to be in the account by ${due}.\n\n`
       + `It covers ${policies} premium${policies === 1 ? '' : 's'} falling due. The policies `
-      + `and the dates are on your portal, and so is a button to tell us once you have sent `
-      + `it: ${link('/#/premiums')}\n\n`
+      + `and the dates are under Premiums when you sign in, and so is the button to tell `
+      + `us once you have sent it. ${link()}\n\n`
       + (note ? `${note}\n\n` : '')
       + `Wiring instructions have not changed. If you are not sure, telephone the office `
       + `rather than replying — an email asking you to send money to a new account is the `
       + `oldest trick there is, and we will never send you one.`,
+  }),
+
+  opportunity_shared: ({ name, headline, closes, rate }) => ({
+    subject: `A new opportunity: ${headline}`,
+    text: `${name ? `${name},\n\n` : ''}${headline} has been put in front of you.\n\n`
+      + (rate ? `At life expectancy it works out at ${rate}.\n\n` : '')
+      + (closes ? `The offer closes on ${closes}.\n\n` : '')
+      + `The full terms, the premium schedule and what is still available are on your `
+      + `portal under Opportunities, along with the button to ask for a share. ${link()}\n\n`
+      + `Asking for a piece is a request, not a commitment — the office confirms it.`,
+  }),
+
+  registration_received: ({ name }) => ({
+    subject: 'We have your registration',
+    text: `${name ? `${name},\n\n` : ''}Thank you — your registration for the Poel Capital `
+      + `investor portal has been received.\n\n`
+      + `Somebody here reads every one of these, so it is not instant. We will email you the `
+      + `moment your account is approved, and you can sign in with the password you chose `
+      + `at that point. There is nothing else for you to do in the meantime.\n\n`
+      + `If you did not register with us, tell us and we will remove it.`,
+  }),
+
+  registration_approved: ({ name, email }) => ({
+    subject: 'Your Poel Capital portal account is open',
+    text: `${name ? `${name},\n\n` : ''}Your registration has been approved and the portal `
+      + `is open to you.\n\n`
+      + `Sign in at ${link()} with ${email} and the password you chose when you `
+      + `registered. Nobody here knows that password, and nobody here can read it.\n\n`
+      + `You will see the positions you hold, what has been paid in against each, your `
+      + `statements, and any agreements or opportunities we put in front of you.`,
+  }),
+
+  agreement_declined: ({ title, who, note }) => ({
+    subject: `${who} is not signing ${title}`,
+    text: `${who} has declined to sign ${title}.\n\n`
+      + (note ? `What they said: ${note}\n\n` : 'They did not give a reason.\n\n')
+      + `Nothing has been deleted — they can still sign later if the position changes.\n\n`
+      + `${link()}`,
+  }),
+
+  investor_interest: ({ investor, pct, headline, note, remaining }) => ({
+    subject: `${investor} wants ${pct} of ${headline}`,
+    text: `${investor} has asked for ${pct} of ${headline}.\n\n`
+      + (note ? `They said: ${note}\n\n` : '')
+      + (remaining ? `${remaining} of the deal is still unspoken for.\n\n` : '')
+      + `It is a request until somebody here confirms or declines it, under `
+      + `Opportunities. ${link()}`,
+  }),
+
+  capital_call_paid: ({ investor, amount, title, note }) => ({
+    subject: `${investor} says ${amount} has been sent`,
+    text: `${investor} has marked their line on ${title} as paid — ${amount}.\n\n`
+      + (note ? `They said: ${note}\n\n` : '')
+      + `This is what they told us, not what we have seen. Confirm it once the money is in `
+      + `the account and the call updates — it is on the Servicing calendar. ${link()}`,
+  }),
+
+  registration_new: ({ name, email, entity, when }) => ({
+    subject: `${name} registered for portal access`,
+    text: `${name}${entity ? ` (${entity})` : ''} registered for access on ${when}.\n\n`
+      + `Email: ${email}\n\n`
+      + `They have been told we will email them when it is approved, so the queue is a `
+      + `promise rather than a list. It is on the Investors page. ${link()}`,
   }),
 
   test: ({ who }) => ({

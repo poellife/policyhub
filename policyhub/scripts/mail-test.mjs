@@ -92,7 +92,18 @@ console.log('\nAND THEN IT GOES');
    every assertion here is about THIS message rather than about the queue
    being empty. */
 const mine = () => received.filter((r) => r.body.to[0] === TO);
-const out = await flushMail({ limit: 100 });
+/* Drain rather than flush once: the outbox is shared with everything else
+   that has run against this database, and the worker takes them oldest
+   first. */
+const drain = async () => {
+  let last = { sent: 0 };
+  for (let i = 0; i < 40; i++) {
+    last = await flushMail({ limit: 100 });
+    if (!last.waiting) break;
+  }
+  return last;
+};
+const out = await drain();
 check('the worker sends what is due', out.sent >= 1, JSON.stringify(out));
 check('the provider got ours', mine().length === 1, `${mine().length} of ${received.length}`);
 const sentOne = mine()[0];
@@ -105,7 +116,7 @@ check('as text and as HTML — a mail client that will not render one shows the 
 check('the row is marked sent, with what the provider called it',
   (await outbox())[0].status === 'Sent' && (await outbox())[0].provider_id === 'stub-1');
 const settled = mine().length;
-await flushMail({ limit: 100 });
+await drain();
 check('and sending again does not send it twice', mine().length === settled,
   `${mine().length} vs ${settled}`);
 
@@ -150,10 +161,13 @@ check('after a bounded number of attempts', row.attempts === 5, String(row.attem
 console.log('\nWHAT SOMEBODY ASKED NOT TO HEAR');
 await wipe(); await clearPrefs();
 behaviour = { status: 200, body: { id: 'stub-2' } };
-await q(`INSERT INTO notification_prefs (user_id, kind, enabled) VALUES ($1,'portal_open',FALSE)`,
+/* A kind somebody can actually express an opinion about. The one-off kinds
+   — your account is open, your registration arrived — are sent before anybody
+   could have set a preference, so there is nothing to obey. */
+await q(`INSERT INTO notification_prefs (user_id, kind, enabled) VALUES ($1,'capital_call',FALSE)`,
   [me.id]);
-const off = await queueMail({ to: TO, userId: me.id, kind: 'portal_open',
-  subject: 'Ready', text: 'Should not go.' });
+const off = await queueMail({ to: TO, userId: me.id, kind: 'capital_call',
+  subject: 'Called', text: 'Should not go.' });
 check('it is not sent', off.skipped === 'switched off', JSON.stringify(off));
 check('but it is recorded as not sent, rather than vanishing',
   (await outbox())[0].status === 'Skipped');
@@ -196,11 +210,41 @@ check('nor a tax number', !/\b\d{3}-\d{2}-\d{4}\b/.test(everything));
 check('nor an insured’s name', !everything.includes('Eugene Kohn'));
 check('the portal-open message says the password is NOT in it',
   /not in this email/i.test(TEMPLATES.portal_open({ name: 'A', email: 'a@b.test' }).text));
-check('every template links to the portal, so nobody hunts for the address',
-  MAIL_KINDS.every((k) => /https:\/\/portal\.example\.test/.test(
-    TEMPLATES[k.kind]({ name: 'A', email: 'a@b.test', label: 'x', when: 'y', actor: 'z',
-      detail: 'd', title: 't', parties: 'p', who: 'w', outstanding: 0, }).text)
-    || k.kind === 'test'));
+/* One link, and it goes to the front door. A deep link into a portal that
+   requires signing in costs a step and teaches nothing — and a deep link that
+   is wrong reads as a broken product rather than a broken setting. */
+const links = MAIL_KINDS.map((k) => ({ kind: k.kind,
+  urls: (TEMPLATES[k.kind]({ name: 'A', email: 'a@b.test', label: 'x', when: 'y', actor: 'z',
+    detail: 'd', title: 't', parties: 'p', who: 'w', outstanding: 0, amount: '$1.00',
+    due: 'd', policies: 1, headline: 'h', investor: 'i', pct: '5%', entity: 'e' }).text
+    .match(/https?:\/\/\S+/g) || []) }));
+/* One kind deliberately carries none: somebody who has just registered
+   cannot sign in yet, and a link that lands them on a login screen they will
+   be refused by is worse than no link. */
+const NO_LINK = new Set(['registration_received']);
+check('every message somebody can act on carries a way in',
+  links.filter((l) => !NO_LINK.has(l.kind)).every((l) => l.urls.length >= 1),
+  links.filter((l) => !NO_LINK.has(l.kind) && !l.urls.length).map((l) => l.kind).join(', '));
+check('and the one that cannot be acted on yet carries none',
+  links.find((l) => l.kind === 'registration_received').urls.length === 0);
+check('and it is the sign-in screen, not a page inside the portal',
+  links.every((l) => l.urls.every((u) => u.replace(/[.,)]+$/, '') === 'https://portal.example.test')),
+  links.flatMap((l) => l.urls).filter((u) => u !== 'https://portal.example.test').join(' · '));
+
+console.log('\nA LINK NOBODY CAN FOLLOW');
+/* The address was left as the example from the README on the first
+   deployment, so every message pointed at https://your-policyhub-url. It is
+   said out loud at startup and on the Settings screen rather than discovered
+   by an investor clicking it. */
+const { appUrlProblem } = await import('../src/mail.js');
+const realUrl = process.env.APP_URL;
+for (const [value, expect] of [['', true], ['not-a-url', true],
+  ['https://your-policyhub-url', true], ['https://portal.example.test', false]]) {
+  process.env.APP_URL = value;
+  check(`${value || '(nothing)'} is ${expect ? 'called out' : 'accepted'}`,
+    !!appUrlProblem() === expect, appUrlProblem() || 'fine');
+}
+process.env.APP_URL = realUrl;
 
 console.log('\nOVER THE WIRE');
 const api = (p, o = {}) => fetch(`${BASE}/api${p}`, { ...o,

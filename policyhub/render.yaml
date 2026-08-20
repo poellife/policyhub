@@ -46,7 +46,9 @@ services:
       #  not been given one — not a reason to fail to start.
       #
       #  MAIL_FROM must be an address on a domain verified with the
-      #  provider, or every message bounces.
+      #  provider, or every message bounces. The display name is the firm,
+      #  not the software:
+      #      Poel Capital Policy Portal <notices@poelcapital.com>
       # ---------------------------------------------------------------
       - key: RESEND_API_KEY
         sync: false

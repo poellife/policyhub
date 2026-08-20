@@ -1182,9 +1182,22 @@ were three copies of the same four lines and had already drifted apart.
 
 ## Email
 
-The portal sends five kinds of message: a sign-in from a new place, a bulk
-export, a portal account being opened, an agreement going out for signature,
-and a signature arriving. Each is queued **inside the request that causes it**
+The portal sends thirteen kinds of message, in both directions.
+
+**To an investor:** their registration was received, their registration was
+approved, a portal account has been opened, an opportunity has been put in
+front of them, an agreement is waiting for their signature, a capital call.
+
+**To the firm** — the manager whose client it is, and the administrators:
+somebody registered, an investor asked for a piece of a deal, an investor
+signed an agreement, an investor declined to sign, an investor says a capital
+call has been paid. Plus the two security ones, a sign-in from a new place and
+a bulk export.
+
+"Their client" is not guessed: it is read from the entity a manager is scoped
+to, the investors an administrator has granted them, and the entities holding a
+policy that investor is in. Somebody who is both the manager and the person who
+issued the thing gets one message, not three. Each is queued **inside the request that causes it**
 and sent afterwards by a worker, so a provider being slow or down delays the
 post and nothing else. Queueing never throws: an investor who cannot be emailed
 is still an investor who was created.
@@ -1203,10 +1216,24 @@ office gives them that directly. `scripts/mail-test.mjs` hands every template a
 password, a tax number and an insured's name and checks that none of them comes
 out the other side.
 
+**Every link goes to the front door**, never to a page inside the portal. A
+deep link into something that requires signing in costs a step and teaches
+nothing — the person clicks, meets a login screen, signs in, and lands on the
+dashboard anyway. So the message says where to go in words ("it is under
+Agreements when you sign in") and the link goes to the sign-in screen. The one
+message that carries no link at all is the registration acknowledgement: they
+cannot sign in yet, and a link that refuses them is worse than none.
+
 Each person chooses what they hear about, on Settings → **Email**. Two kinds
 cannot be switched off: a sign-in from somewhere new, and somebody exporting the
 book. An administrator does not get to stop hearing the alert that matters
 precisely when it was not them.
+
+Three more are not offered as a choice at all, because there is nothing to
+choose: *your registration was received*, *your registration was approved* and
+*your account has been opened* are each sent once, before the recipient could
+possibly have expressed a preference about them. A tick box for a message that
+has already gone is theatre.
 
 ### Setting it up
 
@@ -1216,8 +1243,8 @@ queue and wait rather than the service failing to start:
 | Variable | What it is |
 |---|---|
 | `RESEND_API_KEY` | The provider key. Without it the worker does not start. |
-| `MAIL_FROM` | `PolicyHub <notices@yourdomain.com>` — must be a **verified** domain, or everything bounces. |
-| `APP_URL` | Where the links point. Without it they point at the default Render address, which works but reads like a stranger. |
+| `MAIL_FROM` | `Poel Capital Policy Portal <notices@yourdomain.com>` — must be a **verified** domain, or everything bounces. The display name is the firm, not the software: nobody outside this repository has heard of PolicyHub, and a message from a name the recipient does not recognise is one they are right to distrust. |
+| `APP_URL` | Where the links point — **your portal's real address**. A placeholder left here is invisible until an investor clicks it and lands nowhere, so the application says so at startup and on Settings → The post. |
 | `MAIL_REPLY_TO` | Optional, where a reply goes if not the sending address. |
 
 Settings → Email has **Send me a test**, which queues a message, sends it
