@@ -8,6 +8,7 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin } from './security.js';
+import { sendMail, flushMail, mailReady, MAIL_KINDS } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -609,6 +610,81 @@ router.get('/security/notices', authenticate, blockInvestors, requireRole('admin
    button's. */
 router.post('/exports', authenticate, blockInvestors, requireRole('admin'),
   wrap((req, res) => recordExport(req, res)));
+
+/* ------------------------------------------------------------------ *
+ * Email
+ *
+ * What each person hears about, and whether the sending works at all.
+ * Preferences are the caller's own; the health of the queue is an
+ * administrator's business.
+ * ------------------------------------------------------------------ */
+
+router.get('/me/notifications', authenticate, wrap(async (req, res) => {
+  const { rows } = await q(
+    'SELECT kind, enabled FROM notification_prefs WHERE user_id = $1', [req.user.uid]);
+  const off = new Set(rows.filter((r) => !r.enabled).map((r) => r.kind));
+  /* Only the kinds that would ever be addressed to somebody in this role —
+     an investor has no opinion to express about bulk exports. */
+  const mine = MAIL_KINDS.filter((k) => k.who === 'everyone'
+    || (k.who === 'investor' && req.user.role === 'investor')
+    || (k.who === 'admin' && req.user.role === 'admin')
+    || (k.who === 'staff' && !['investor'].includes(req.user.role)));
+  res.json({
+    email: req.user.email,
+    sending: mailReady(),
+    kinds: mine.map((k) => ({ ...k, enabled: k.forced || !off.has(k.kind) })),
+  });
+}));
+
+router.put('/me/notifications', authenticate, wrap(async (req, res) => {
+  const wanted = req.body?.kinds && typeof req.body.kinds === 'object' ? req.body.kinds : null;
+  if (!wanted) return res.status(400).json({ error: 'Nothing to change' });
+  for (const k of MAIL_KINDS) {
+    if (!(k.kind in wanted)) continue;
+    /* A forced kind cannot be switched off — an administrator does not get
+       to stop hearing that somebody signed in from a new country. */
+    const on = k.forced ? true : wanted[k.kind] !== false;
+    await q(
+      `INSERT INTO notification_prefs (user_id, kind, enabled) VALUES ($1,$2,$3)
+       ON CONFLICT (user_id, kind) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
+      [req.user.uid, k.kind, on]);
+  }
+  res.json({ ok: true });
+}));
+
+/** Is the post going out? Counts only — never the contents of a message. */
+router.get('/mail/health', authenticate, blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `SELECT status, COUNT(*)::int AS n, MAX(created_at) AS latest
+         FROM email_outbox GROUP BY status`);
+    const { rows: stuck } = await q(
+      `SELECT kind, to_email, last_error, attempts, created_at
+         FROM email_outbox WHERE status = 'Failed'
+        ORDER BY created_at DESC LIMIT 10`);
+    res.json({
+      configured: mailReady(),
+      from: process.env.MAIL_FROM || null,
+      counts: Object.fromEntries(rows.map((r) => [r.status, r.n])),
+      latest: rows.reduce((d, r) => (!d || r.latest > d ? r.latest : d), null),
+      failures: stuck,
+    });
+  }));
+
+/** Prove it end to end, to the address of whoever asks. */
+router.post('/mail/test', authenticate, blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    if (!mailReady())
+      return res.status(503).json({
+        error: 'No mail key is set on the server, so nothing can be sent yet. '
+          + 'Add RESEND_API_KEY and MAIL_FROM and restart.' });
+    const queued = await sendMail('test', {
+      to: req.user.email, userId: req.user.uid, who: req.user.name || req.user.email });
+    if (queued.error) return res.status(500).json({ error: queued.error });
+    const out = await flushMail({ limit: 5 });
+    await audit(req.user.uid, 'user', req.user.uid, 'update', 'sent a test email');
+    res.json({ ok: true, to: req.user.email, ...out });
+  }));
 
 const PREF_CLEANERS = { policy_columns: cleanArrangement };
 
@@ -3434,6 +3510,10 @@ router.post('/investors/:id/login', blockInvestors, canEdit, wrap(async (req, re
     await audit(req.user.uid, 'user', made.user.id, 'create',
       `${made.user.email} · investor login for ${rows[0].name}`
       + `${wanted.mustChange ? ' · password set by staff, must be changed on first sign-in' : ''}`);
+    /* Tells them the account exists and what address it is under. Never the
+       password — that goes down a telephone, not through a mail server. */
+    await sendMail('portal_open', { to: made.user.email, userId: made.user.id,
+      name: rows[0].name, email: made.user.email });
     res.status(201).json({ ok: true, email: made.user.email,
       must_change_password: !!wanted.mustChange });
   } catch (e) {
@@ -3492,6 +3572,8 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
       await audit(req.user.uid, 'user', made.user.id, 'create',
         `${made.user.email} · investor login for ${rows[0].name}`
         + `${wanted.mustChange ? ' · password set by staff, must be changed on first sign-in' : ''}`);
+      await sendMail('portal_open', { to: made.user.email, userId: made.user.id,
+        name: rows[0].name, email: made.user.email });
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -4502,6 +4584,21 @@ router.post('/agreements/:id/issue', blockInvestors, requireRole('admin', 'manag
         WHERE id = $3`, [a.current_hash, req.user.uid, req.params.id]);
     await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
       `issued to ${a.member_count} member(s) · ${a.current_hash.slice(0, 16)}`);
+
+    /* Each party who has a portal login is told it is waiting. An agreement
+       nobody knows about is an agreement nobody signs. */
+    const { rows: parties } = await q(
+      `SELECT u.id, u.email, s.name
+         FROM agreement_signers s
+         JOIN users u ON u.investor_id = s.investor_id AND u.is_active = TRUE
+        WHERE s.agreement_id = $1 AND s.role <> 'Manager'`, [req.params.id]);
+    for (const party of parties)
+      await sendMail('agreement_out', {
+        to: party.email, userId: party.id, name: party.name,
+        title: a.terms?.llc_name || a.title || 'An operating agreement',
+        parties: `${a.member_count} ${a.member_count === 1 ? 'member is' : 'members are'} `
+          + 'party to it, and the manager signs as well.',
+      });
     res.json({ ok: true, body_hash: a.current_hash, sent_to: a.member_count });
   }));
 
@@ -4657,6 +4754,20 @@ router.post('/agreements/:id/sign', wrap(async (req, res) => {
   await audit(req.user.uid, 'agreement', Number(req.params.id), 'update',
     `signed by ${typed}${entity ? ` (by ${byName}, ${byTitle})` : ''}${
       outstanding.length ? `, ${outstanding.length} to go` : ' — fully executed'}`);
+
+  /* Whoever sent it out is waiting on it, so they hear about each signature
+     rather than having to keep opening the page to look. */
+  if (a.issued_by) {
+    const { rows: issuer } = await q(
+      'SELECT id, email FROM users WHERE id = $1 AND is_active = TRUE', [a.issued_by]);
+    if (issuer[0])
+      await sendMail('agreement_signed', {
+        to: issuer[0].email, userId: issuer[0].id,
+        title: a.terms?.llc_name || a.title || 'the operating agreement',
+        who: `${typed}${entity ? ` (by ${byName}, ${byTitle})` : ''}`,
+        outstanding: outstanding.length,
+      });
+  }
   res.json({ ok: true, executed: !outstanding.length, outstanding: outstanding.length });
 }));
 

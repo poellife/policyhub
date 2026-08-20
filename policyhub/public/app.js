@@ -5903,7 +5903,8 @@ async function settingsView() {
   // Anything beyond the password panel is off-limits to scoped accounts.
   const accountOnly = isInvestorUser() || isManagerUser();
   const investorUser = accountOnly;
-  const [users, audit, funds, docs, investors, myPlaces, firmNotices] = await Promise.all([
+  const [users, audit, funds, docs, investors, myPlaces, firmNotices, mail, mailHealth]
+    = await Promise.all([
     isAdmin ? api('/users') : Promise.resolve([]),
     isAdmin ? api('/audit') : Promise.resolve([]),
     accountOnly ? Promise.resolve([]) : api('/funds'),
@@ -5915,6 +5916,8 @@ async function settingsView() {
     // administrator sees the firm's.
     api('/security/locations').catch(() => []),
     isAdmin ? api('/security/notices').catch(() => []) : Promise.resolve([]),
+    api('/me/notifications').catch(() => null),
+    isAdmin ? api('/mail/health').catch(() => null) : Promise.resolve(null),
   ]);
   state.funds = funds;
   const canPost = ['admin', 'editor', 'manager'].includes(state.user.role);
@@ -5983,6 +5986,64 @@ async function settingsView() {
           so it is safe to run twice.</span>
         </div>
       </div>`}
+
+      ${/* What lands in somebody's inbox, decided by them. A notice on a
+             screen only helps a person who is looking at the screen. */''}
+      ${mail ? `
+      <div class="card">
+        <div class="card-head"><h2>Email</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">${esc(mail.email)}</span></div>
+        <div class="card-body">
+          ${mail.sending ? '' : `<div class="notice-box" style="margin-bottom:14px">
+            The portal is not set up to send email yet, so these are what
+            <em>would</em> be sent. ${isAdmin
+              ? 'Add <code>RESEND_API_KEY</code> and <code>MAIL_FROM</code> to the service and restart.'
+              : 'An administrator has to finish setting it up.'}</div>`}
+          <div id="mailPrefs">
+            ${mail.kinds.map((k) => `
+              <label class="dlg-check" style="margin:0 0 12px">
+                <input type="checkbox" data-mail="${k.kind}" ${k.enabled ? 'checked' : ''}
+                  ${k.forced ? 'disabled' : ''}>
+                <span>${esc(k.label)}
+                  <span class="muted" style="display:block;font-size:12px">${esc(k.note)}${
+                    k.forced ? ' Always sent — it is the one that matters when it is not you.'
+                      : ''}</span></span>
+              </label>`).join('')}
+          </div>
+          <div id="mailMsg"></div>
+          <button class="btn-sm" id="saveMailPrefs">Save what I hear about</button>
+          ${isAdmin ? '<button class="btn-sm" id="testMail">Send me a test</button>' : ''}
+        </div>
+      </div>` : ''}
+
+      ${isAdmin && mailHealth ? `
+      <div class="card">
+        <div class="card-head"><h2>The post</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">${mailHealth.configured
+            ? esc(mailHealth.from || 'sending') : 'not configured'}</span></div>
+        <div class="table-wrap"><table class="data">
+          <tbody>
+            <tr><td>Sent</td><td class="num strong">${mailHealth.counts?.Sent || 0}</td></tr>
+            <tr><td>Waiting to go</td><td class="num strong">${mailHealth.counts?.Queued || 0}</td></tr>
+            <tr><td>Given up on</td><td class="num strong">${mailHealth.counts?.Failed || 0}</td></tr>
+            <tr><td>Not sent — switched off by the recipient</td>
+              <td class="num">${mailHealth.counts?.Skipped || 0}</td></tr>
+          </tbody>
+        </table></div>
+        ${mailHealth.failures?.length ? `
+        <div class="card-body" style="border-top:1px solid var(--grid)">
+          <div class="eyebrow" style="margin-bottom:8px">What went wrong</div>
+          ${mailHealth.failures.map((f) => `<div class="muted" style="font-size:12.5px">
+            ${fmtDateTime(f.created_at)} · ${esc(f.kind)} → ${esc(f.to_email)} ·
+            ${esc(f.last_error)}</div>`).join('')}
+        </div>` : ''}
+        <div class="card-body" style="border-top:1px solid var(--grid);padding-top:12px">
+          <span class="muted" style="font-size:12px">
+            Email is queued inside the request that causes it and sent afterwards, so a
+            provider being slow never makes the portal slow. A message that fails is retried
+            with a widening gap and then shown here rather than disappearing.</span>
+        </div>
+      </div>` : ''}
 
       ${/* Where this account has been used. Shown to everybody, including
              investors, because the person best placed to spot a sign-in they
@@ -6126,6 +6187,30 @@ async function settingsView() {
     html,
     after: () => {
       wireDocumentsCard(docs, funds, investors);
+
+      $('#saveMailPrefs')?.addEventListener('click', async () => {
+        const kinds = {};
+        document.querySelectorAll('[data-mail]').forEach((box) => {
+          if (!box.disabled) kinds[box.dataset.mail] = box.checked;
+        });
+        try {
+          await api('/me/notifications', { method: 'PUT', body: { kinds } });
+          $('#mailMsg').innerHTML = '<div class="ok-box">Saved.</div>';
+        } catch (err) {
+          $('#mailMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+        }
+      });
+      $('#testMail')?.addEventListener('click', async (e) => {
+        e.target.disabled = true;
+        try {
+          const out = await api('/mail/test', { method: 'POST' });
+          $('#mailMsg').innerHTML = `<div class="ok-box">Sent to ${esc(out.to)}${
+            out.failed ? ' — but the provider refused it; see The post below.' : ''}</div>`;
+        } catch (err) {
+          $('#mailMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+        }
+        e.target.disabled = false;
+      });
 
       $('#pwForm').addEventListener('submit', async (e) => {
         e.preventDefault();

@@ -11,6 +11,7 @@ import { initDb, explainDbError } from './db.js';
 import api, { wrap, storeDocument } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
+import { startMailWorker } from './mail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -161,6 +162,11 @@ app.use((err, req, res, _next) => {
 
 initDb()
   .then(() => {
+    /* Email leaves on its own schedule, not inside the request that caused
+       it: a provider outage delays the post and nothing else. With no key
+       set the worker does not start and messages simply queue, which is the
+       right behaviour for a deployment that has not been given one yet. */
+    startMailWorker();
     app.listen(PORT, () => console.log(`PolicyHub running on http://localhost:${PORT}`));
   })
   .catch((e) => {

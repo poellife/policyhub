@@ -59,6 +59,29 @@ const account = (key) => ({
   get password() { return need(`TEST_${key}_PASSWORD`); },
 });
 
+/**
+ * The database, for the one suite that needs to look inside it.
+ *
+ * Almost everything here talks to the application over HTTP, which is the
+ * right way round — a test that reaches past the API proves the API works
+ * only by accident. The exception is the outbox: "a message that fails is
+ * retried and then given up on" is a fact about rows, and the only honest
+ * way to check it is to look at them.
+ */
+export function databaseUrl() {
+  const url = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+  if (!url) {
+    console.error(
+      '\nMissing TEST_DATABASE_URL.\n' +
+      'One suite (mail-test) inspects the outbox directly. Point it at the same\n' +
+      'database the server under test is using, in .env.test:\n\n' +
+      '  TEST_DATABASE_URL=postgres://user:pass@localhost:5432/lifesettle\n'
+    );
+    process.exit(2);
+  }
+  return url;
+}
+
 export const ADMIN = account('ADMIN');
 export const MANAGER1 = account('MANAGER1');
 export const MANAGER2 = account('MANAGER2');

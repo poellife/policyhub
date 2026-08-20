@@ -974,3 +974,46 @@ UPDATE agreement_signers SET party_type = 'Entity'
     anybody changing their own.
    --------------------------------------------------------------------- */
 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+
+/* ---------------------------------------------------------------------
+    Email that has to go out.
+
+    A queue rather than a call in the middle of a request, for two
+    reasons. The provider being slow or down must not make signing in
+    slow or impossible — email is a courtesy, and the work in front of
+    somebody is not. And a message that fails to send should be visible
+    and retried rather than lost in a log line nobody reads.
+
+    Rows are kept after sending. "Did the investor get the capital call"
+    is a question somebody will ask, and the answer wants a record.
+   --------------------------------------------------------------------- */
+CREATE TABLE IF NOT EXISTS email_outbox (
+  id           SERIAL PRIMARY KEY,
+  to_email     TEXT NOT NULL,
+  to_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  kind         TEXT NOT NULL,
+  subject      TEXT NOT NULL,
+  body_text    TEXT NOT NULL,
+  body_html    TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'Queued',  -- Queued | Sent | Failed | Skipped
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT NOT NULL DEFAULT '',
+  provider_id  TEXT NOT NULL DEFAULT '',
+  next_try_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sent_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_email_outbox_pending
+  ON email_outbox (status, next_try_at) WHERE status = 'Queued';
+
+/* What each person wants to hear about.
+   A row exists only where somebody has switched something OFF — the
+   default for every kind is on, and a table of rows saying "yes" for
+   everybody would have to be backfilled every time a kind is added. */
+CREATE TABLE IF NOT EXISTS notification_prefs (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL,
+  enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, kind)
+);

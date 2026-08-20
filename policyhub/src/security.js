@@ -14,6 +14,7 @@
    ===================================================================== */
 import { createHash } from 'node:crypto';
 import { q, audit } from './db.js';
+import { sendMail } from './mail.js';
 
 /**
  * The address, blunted.
@@ -95,6 +96,12 @@ export async function noteSignIn(req, user) {
   );
   await audit(user.id, 'user', user.id, 'login',
     `signed in from a new location — ${label}`);
+  /* And by email, because a banner only helps somebody already looking at the
+     screen — and if this was not them, they are not. */
+  await sendMail('new_location', {
+    to: user.email, userId: user.id, name: user.full_name,
+    label, when: new Date().toISOString().replace('T', ' ').slice(0, 16),
+  });
   return { isNew: true, label };
 }
 
@@ -132,13 +139,18 @@ export async function recordExport(req, res) {
      they know — and not staff who cannot export anyway. An export nobody
      else sees is the one worth worrying about. */
   const { rows: admins } = await q(
-    `SELECT id FROM users WHERE role = 'admin' AND is_active = TRUE AND id <> $1`,
+    `SELECT id, email FROM users WHERE role = 'admin' AND is_active = TRUE AND id <> $1`,
     [req.user.uid]);
-  for (const a of admins)
+  for (const a of admins) {
     await q(
       `INSERT INTO security_notices (user_id, kind, detail, actor_id)
             VALUES ($1, 'bulk_export', $2, $3)`,
       [a.id, `${req.user.name || req.user.email} ${detail}`, req.user.uid]);
+    await sendMail('bulk_export', {
+      to: a.email, userId: a.id, actor: req.user.name || req.user.email,
+      detail, when: new Date().toISOString().replace('T', ' ').slice(0, 16),
+    });
+  }
 
   res.json({ ok: true });
 }
