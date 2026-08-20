@@ -8,7 +8,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 
 import { initDb, explainDbError } from './db.js';
-import api, { wrap, storeDocument } from './api.js';
+import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { startMailWorker } from './mail.js';
@@ -80,6 +80,15 @@ const docUpload = multer({
 });
 app.post('/api/documents', authenticate, requireRole('admin', 'editor', 'manager'),
   docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeDocument));
+
+/* A premium optimization is one workbook at a time, parsed and then filed —
+   closer to a document than to an import. It gets the document-sized limit
+   because sixty years of monthly rows in .xlsx runs past 5 MB less often
+   than a scanned K-1 does, but the same shape of upload. */
+app.post('/api/premium-streams/preview', authenticate, requireRole('admin', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(previewPremiumStream));
+app.post('/api/premium-streams', authenticate, requireRole('admin', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storePremiumStream));
 
 app.post('/api/import/preview', authenticate, canImport, oneAtATime, files,
   wrap(async (req, res) => {

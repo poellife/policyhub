@@ -1049,3 +1049,57 @@ ALTER TABLE capital_calls ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAU
 CREATE UNIQUE INDEX IF NOT EXISTS idx_capital_calls_signature
   ON capital_calls (signature)
   WHERE status = 'Open' AND signature <> '';
+
+/* ====================================================================
+   Premium optimization
+   ====================================================================
+
+   A servicing firm — ITM TwentyFirst and the like — is paid to work out
+   the smallest premium stream that keeps a policy alive to maturity, and
+   sends back a workbook: a header block naming the policy, then one row
+   per month from now until the maturity date, each with a premium and
+   the death benefit it buys.
+
+   This is REFERENCE. Nothing here is an obligation and nothing reads it
+   to decide what is due. A premium that has to be paid is an entry
+   somebody made on the servicing calendar, and it stays that way — the
+   optimizer's stream is what a person consults while deciding what to
+   put there. Wiring it into premiums due would mean sixty years of
+   monthly rows arriving as bills nobody had approved.
+
+   Two tables, for the same reason a capital call has two: the stream is
+   a document with a provenance, and its rows are the numbers inside it.
+   Uploading the same policy twice keeps both — a stream is dated advice,
+   and last year's is how you see what changed.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS premium_streams (
+  id             SERIAL PRIMARY KEY,
+  policy_id      INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+  -- Copied from the file rather than joined, so what the document said
+  -- about the policy stays readable even if the record moves on.
+  file_name      TEXT NOT NULL DEFAULT '',
+  policy_number  TEXT NOT NULL DEFAULT '',
+  insured_name   TEXT NOT NULL DEFAULT '',
+  carrier_name   TEXT NOT NULL DEFAULT '',
+  face_amount    NUMERIC(16,2),
+  effective_date DATE,
+  maturity_date  DATE,
+  premium_type   TEXT NOT NULL DEFAULT '',   -- e.g. Hybrid, Minimum, MinCOI
+  comments       TEXT NOT NULL DEFAULT '',
+  source         TEXT NOT NULL DEFAULT '',   -- who produced it, if the file says
+  note           TEXT NOT NULL DEFAULT '',   -- whatever the uploader wants to add
+  uploaded_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  uploaded_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_premium_streams_policy
+  ON premium_streams (policy_id, uploaded_at DESC);
+
+CREATE TABLE IF NOT EXISTS premium_stream_rows (
+  id             SERIAL PRIMARY KEY,
+  stream_id      INTEGER NOT NULL REFERENCES premium_streams(id) ON DELETE CASCADE,
+  due_date       DATE NOT NULL,
+  amount         NUMERIC(16,2) NOT NULL DEFAULT 0,
+  death_benefit  NUMERIC(16,2)
+);
+CREATE INDEX IF NOT EXISTS idx_premium_stream_rows
+  ON premium_stream_rows (stream_id, due_date);

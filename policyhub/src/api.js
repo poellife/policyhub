@@ -13,6 +13,7 @@ import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProbl
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
+import { readPremiumStream, byYear } from './premium-stream.js';
 import { renderAgreement, canonicalText, AGREEMENT_FIELDS } from '../public/agreement-template.js';
 import { agreementPdf } from './agreement-pdf.js';
 import { q, pool, audit } from './db.js';
@@ -68,13 +69,25 @@ const grantedInvestors = (req) =>
  * manager should not be able to hand a deal to — or allocate a policy to —
  * an investor they have no relationship with, even though guessing an id
  * costs nothing. Returns the ids that are out of bounds; empty means fine.
+ *
+ * The three grounds are exactly the three the investor directory admits, and
+ * they have to stay exactly the same three. This once recognised only two of
+ * them, and left out the plainest one — an investor an administrator filed
+ * under the manager's own entity. The effect was a dropdown that offered a
+ * name and a Save that refused it, which reads as a broken screen rather
+ * than as a rule: a manager could see their own client, and could not
+ * allocate a policy to them.
  */
 async function investorsOutOfScope(req, ids) {
   if (!isManager(req) || !ids.length) return [];
   const { rows } = await q(
     `SELECT inv.id FROM investors inv
       WHERE inv.id = ANY($1)
+        -- 1. filed under one of this manager's entities
+        AND (inv.fund_id IS NULL OR inv.fund_id <> ALL($2))
+        -- 2. granted to them by name
         AND inv.id <> ALL(COALESCE($3::int[], '{}'))
+        -- 3. already holding a position inside one of their entities
         AND NOT EXISTS (SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                          WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2))`,
     [ids, fundScope(req), grantedInvestors(req)]);
@@ -171,10 +184,22 @@ function blockInvestors(req, res, next) {
   next();
 }
 
-/** Blocks anyone who isn't full internal staff — used for the Settings surface. */
+/**
+ * Blocks anyone who isn't full internal staff — the Settings surface, the
+ * activity log, and creating or renaming an owner entity.
+ *
+ * The message names which kind of account was refused. "Not available on
+ * this account" is true but useless in front of somebody who cannot see
+ * what kind of account they have, and the one place this surfaces is a
+ * form — where an error that does not say what to do instead is just a
+ * dead end.
+ */
 function blockScoped(req, res, next) {
-  if (isInvestor(req) || isManager(req))
-    return res.status(403).json({ error: 'Not available on this account' });
+  if (isManager(req))
+    return res.status(403).json({
+      error: 'Not available on a portfolio manager account — an administrator has to do this' });
+  if (isInvestor(req))
+    return res.status(403).json({ error: 'Not available on an investor account' });
   next();
 }
 
@@ -3943,6 +3968,197 @@ router.get('/carry', blockInvestors, requireRole('admin'), wrap(async (req, res)
               charged: rows.filter((r) => r.carry_pct > 0).length },
     byFund: [...byFund.values()].sort((a2, b2) => (a2.fund_code < b2.fund_code ? -1 : 1)),
   });
+}));
+
+/* ------------------------------------------------------------------ *
+ * premium optimization
+ *
+ * A servicing firm is paid to work out the smallest premium stream that
+ * keeps a policy in force to maturity, and sends back a workbook: sixty
+ * years of monthly figures, with a note on the reasoning.
+ *
+ * It is filed here as REFERENCE and it stays reference. Nothing reads it
+ * to decide what is due — a premium that has to be paid is an entry
+ * somebody made on the servicing calendar, and it stays that way. Wiring
+ * a stream into premiums due would turn seven hundred rows of somebody
+ * else's model into seven hundred bills nobody approved.
+ *
+ * Administrators and managers only. It is working material for whoever
+ * decides what to fund; an investor is asked for money, not for an
+ * opinion on the actuarial model behind it.
+ * ------------------------------------------------------------------ */
+
+/** The policy a stream says it is about, if the reader may see it. */
+async function matchStreamPolicy(req, policyNumber) {
+  const wanted = String(policyNumber || '').replace(/[\s-]/g, '').toUpperCase();
+  if (!wanted) return null;
+  const { rows } = await q(
+    `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.status, pl.fund_code,
+            pl.face_amount,
+            COALESCE(pl.display_name,
+                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+              AS insured_name
+       FROM policy_latest pl
+      WHERE UPPER(REPLACE(REPLACE(pl.policy_number, ' ', ''), '-', '')) = $3
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      LIMIT 2`,
+    [scopeId(req), fundScope(req), wanted]);
+  /* Two policies with the same number is a data problem, not a match. Say
+     so rather than picking one. */
+  if (rows.length !== 1) return rows.length ? { ambiguous: true } : null;
+  return rows[0];
+}
+
+/**
+ * Read the file and say what it contains — without writing anything.
+ *
+ * The confirm step exists because a premium optimization is a document
+ * about one policy, and attaching it to the wrong one would put somebody
+ * else's numbers in front of whoever is deciding what to fund. So the
+ * parse comes back with the policy it matched and the insured's name, and
+ * a person says yes.
+ */
+export async function previewPremiumStream(req, res) {
+  const file = (req.files?.file || [])[0];
+  if (!file) return res.status(400).json({ error: 'No file uploaded' });
+  let read;
+  try {
+    read = readPremiumStream(file.buffer, file.originalname || '');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  if (!read.rows.length)
+    return res.status(400).json({ error: 'That file has no dated premiums in it' });
+
+  const match = await matchStreamPolicy(req, read.header.policy_number);
+  res.json({
+    ...read,
+    match: match && !match.ambiguous ? match : null,
+    matched: !!(match && !match.ambiguous),
+    ambiguous: !!match?.ambiguous,
+    years: byYear(read.rows).map((y) => ({ year: y.year, total: y.total, payments: y.payments })),
+  });
+}
+
+/** File it, against the policy the caller confirmed. */
+export async function storePremiumStream(req, res) {
+  const file = (req.files?.file || [])[0];
+  if (!file) return res.status(400).json({ error: 'No file uploaded' });
+  const policyId = int(req.body.policy_id);
+  if (!policyId) return res.status(400).json({ error: 'Choose the policy this belongs to' });
+  if (!(await assertPolicyInScope(req, policyId)))
+    return res.status(404).json({ error: 'Policy not found' });
+
+  let read;
+  try {
+    read = readPremiumStream(file.buffer, file.originalname || '');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  if (!read.rows.length)
+    return res.status(400).json({ error: 'That file has no dated premiums in it' });
+
+  const h = read.header;
+  const client = await pool.connect();
+  let streamId;
+  try {
+    await client.query('BEGIN');
+    const { rows: made } = await client.query(
+      `INSERT INTO premium_streams (policy_id, file_name, policy_number, insured_name,
+                                    carrier_name, face_amount, effective_date, maturity_date,
+                                    premium_type, comments, source, note, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+      [policyId, h.file_name, h.policy_number, h.insured_name, h.carrier_name,
+       h.face_amount, h.effective_date, h.maturity_date, h.premium_type, h.comments,
+       str(req.body.source), str(req.body.note), req.user.uid]);
+    streamId = made[0].id;
+    /* One statement rather than seven hundred round trips. */
+    const values = read.rows.map((_, i) =>
+      `($1, $${i * 3 + 2}, $${i * 3 + 3}, $${i * 3 + 4})`).join(',');
+    const params = [streamId];
+    for (const r of read.rows) params.push(r.due_date, r.amount, r.death_benefit);
+    await client.query(
+      `INSERT INTO premium_stream_rows (stream_id, due_date, amount, death_benefit)
+       VALUES ${values}`, params);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  await audit(req.user.uid, 'premium_stream', streamId, 'create',
+    `${h.file_name || 'premium optimization'} · ${h.policy_number || 'no policy number'} · `
+    + `${read.rows.length} dated premiums · ${h.premium_type || 'type not stated'}`);
+  res.status(201).json({ id: streamId, ...read.summary, skipped: read.problems.length });
+}
+
+router.get('/premium-streams', blockInvestors, adminOrManager, wrap(async (req, res) => {
+  const policyId = int(req.query.policy_id);
+  const { rows } = await q(
+    `SELECT s.id, s.policy_id, s.file_name, s.policy_number, s.insured_name, s.carrier_name,
+            s.face_amount, s.effective_date, s.maturity_date, s.premium_type, s.comments,
+            s.source, s.note, s.uploaded_at, u.full_name AS uploaded_by,
+            pl.policy_number AS on_policy_number, pl.carrier_name AS on_carrier,
+            pl.fund_code,
+            COALESCE(pl.display_name,
+                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+              AS on_insured,
+            (SELECT COUNT(*)::int FROM premium_stream_rows r WHERE r.stream_id = s.id) AS payments,
+            (SELECT MIN(r.due_date) FROM premium_stream_rows r WHERE r.stream_id = s.id) AS first_due,
+            (SELECT MAX(r.due_date) FROM premium_stream_rows r WHERE r.stream_id = s.id) AS last_due,
+            (SELECT COALESCE(SUM(r.amount),0) FROM premium_stream_rows r
+              WHERE r.stream_id = s.id AND r.due_date < CURRENT_DATE + 365) AS next_12mo
+       FROM premium_streams s
+       JOIN policy_latest pl ON pl.id = s.policy_id
+       LEFT JOIN users u ON u.id = s.uploaded_by
+      WHERE ($3::int IS NULL OR s.policy_id = $3)
+        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+      ORDER BY pl.insured_last, pl.policy_number, s.uploaded_at DESC`,
+    [scopeId(req), fundScope(req), policyId || null]);
+  res.json(rows);
+}));
+
+router.get('/premium-streams/:id', blockInvestors, adminOrManager, wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT s.*, u.full_name AS uploaded_by_name, pl.fund_code,
+            pl.policy_number AS on_policy_number,
+            COALESCE(pl.display_name,
+                     TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
+              AS on_insured
+       FROM premium_streams s
+       JOIN policy_latest pl ON pl.id = s.policy_id
+       LEFT JOIN users u ON u.id = s.uploaded_by
+      WHERE s.id = $3 AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}`,
+    [scopeId(req), fundScope(req), int(req.params.id)]);
+  const stream = rows[0];
+  if (!stream) return res.status(404).json({ error: 'Premium optimization not found' });
+
+  const { rows: paid } = await q(
+    `SELECT due_date, amount, death_benefit FROM premium_stream_rows
+      WHERE stream_id = $1 ORDER BY due_date`, [stream.id]);
+  const years = byYear(paid.map((r) => ({
+    due_date: String(r.due_date).slice(0, 10),
+    amount: Number(r.amount) || 0,
+    death_benefit: r.death_benefit === null ? null : Number(r.death_benefit),
+  })));
+  res.json({ ...stream, years,
+    payments: paid.length,
+    total: years.reduce((n, y) => n + y.total, 0) });
+}));
+
+router.delete('/premium-streams/:id', blockInvestors, adminOrManager, wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT s.id, s.file_name, s.policy_number FROM premium_streams s
+       JOIN policy_latest pl ON pl.id = s.policy_id
+      WHERE s.id = $3 AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}`,
+    [scopeId(req), fundScope(req), int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'Premium optimization not found' });
+  await q('DELETE FROM premium_streams WHERE id = $1', [rows[0].id]);
+  await audit(req.user.uid, 'premium_stream', rows[0].id, 'delete',
+    `${rows[0].file_name || 'premium optimization'} · ${rows[0].policy_number}`);
+  res.json({ ok: true });
 }));
 
 /* ------------------------------------------------------------------ *

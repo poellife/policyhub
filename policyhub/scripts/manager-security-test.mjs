@@ -183,6 +183,46 @@ const imp2 = await json(await fetch(`${BASE}/api/import/run`, { method: 'POST', 
 check('import into their own entity succeeds',
   (imp2.created + imp2.updated) === 1 && imp2.errors.length === 0, JSON.stringify(imp2));
 
+console.log('\nA NEW CLIENT FILED UNDER THE MANAGER\'S OWN ENTITY');
+/* The directory admits an investor on three grounds: filed under one of the
+   manager's entities, granted by name, or already holding a position inside
+   one of their entities. Naming one has to admit exactly the same three —
+   it once left out the first, which is the commonest of the three and the
+   only one that applies to a brand-new client who holds nothing yet. The
+   result was a dropdown that offered the name and a Save that refused it. */
+const lcg1 = (await json(await api(pm1, '/funds')))[0];
+const fresh = await json(await api(staff, '/investors', { method: 'POST', body: JSON.stringify({
+  name: 'MGRSCOPE New Client', investor_type: 'Individual', fund_id: lcg1.id }) }));
+check('an admin files a new investor under the manager\'s entity', !!fresh?.id,
+  JSON.stringify(fresh).slice(0, 100));
+check('they hold nothing yet',
+  ((await json(await api(staff, `/investors/${fresh.id}`))).positions || []).length === 0);
+
+const dir = await json(await api(pm1, '/investors'));
+check('the manager sees them in the directory', dir.some((i) => i.id === fresh.id),
+  `${dir.length} investors visible`);
+check('and can open the record',
+  (await api(pm1, `/investors/${fresh.id}`)).status === 200);
+
+let freshRoom = null;
+for (const p of await json(await api(pm1, '/policies'))) {
+  const d = await json(await api(pm1, `/policies/${p.id}`));
+  const used = (d.owners || []).reduce((sum, o) => sum + Number(o.pct), 0);
+  if (used < 98) { freshRoom = p; break; }
+}
+check('there is a policy of theirs with room in it', !!freshRoom);
+const firstAlloc = await api(pm1, `/policies/${freshRoom.id}/investors`, {
+  method: 'POST', body: JSON.stringify({ investor_id: fresh.id, pct: 1 }) });
+check('and can allocate a piece of a policy to them — what the directory offers, the save accepts',
+  firstAlloc.status === 201, `status ${firstAlloc.status} ${
+    firstAlloc.status !== 201 ? JSON.stringify(await json(firstAlloc)) : ''}`);
+if (firstAlloc.status === 201) {
+  const made = await json(firstAlloc);
+  await api(pm1, `/policy-investors/${made.id}`, { method: 'DELETE' });
+}
+await api(staff, `/investors/${fresh.id}`, { method: 'DELETE',
+  body: JSON.stringify({ confirm: 'MGRSCOPE New Client' }) });
+
 console.log('\nAN ADMIN CAN PUT AN INVESTOR IN A MANAGER\'S HANDS');
 /* The entity scope answers "whose money is already in my book". It cannot
    answer "who may I take this new deal to" — and a manager who cannot reach

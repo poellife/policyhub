@@ -84,6 +84,42 @@ check('investor directory is scoped', invRows >= 1 && invRows < adminInvCount,
   `${invRows} of ${adminInvCount}`);
 await pm.screenshot({path:`${S}/m4-manager-investors.png`,fullPage:true});
 
+console.log('\nFILING A NEW POLICY');
+/* A manager files policies under the entities an administrator put in their
+   hands. Creating an entity is not theirs to do — and an entity they made
+   would not be one they were assigned, so the policy would disappear the
+   moment they saved it. The dialog therefore must not offer it: an option
+   that always fails on Save is worse than no option, because the failure
+   arrives after the form has been filled in. */
+await pm.goto(`${BASE}/#/policies`);
+await pm.waitForSelector('table.data tbody tr'); await pm.waitForTimeout(500);
+await pm.click('#newPolicyBtn');
+await pm.waitForSelector('dialog[open] #fundSelect'); await pm.waitForTimeout(400);
+const fundOptions = await pm.$$eval('dialog[open] #fundSelect option',
+  (o) => o.map((x) => ({ value: x.value, label: x.textContent.trim() })));
+check('the owner entity list offers their own entities',
+  fundOptions.some((o) => o.value === 'LCG1'), fundOptions.map((o) => o.label).join(' | '));
+check('and does not offer to create one',
+  !fundOptions.some((o) => o.value === '__new__'), fundOptions.map((o) => o.label).join(' | '));
+check('nor to leave it unowned, which they could not see afterwards',
+  !fundOptions.some((o) => o.value === '' && /No owner/i.test(o.label)),
+  fundOptions.map((o) => o.label).join(' | '));
+check('choosing one is required', await pm.locator('dialog[open] #fundSelect')
+  .evaluate((el) => el.required));
+await pm.locator('dialog[open] button', { hasText: 'Cancel' }).first().click();
+await pm.waitForTimeout(400);
+
+/* And an admin still can create one from here — the option is scoped, not
+   removed. */
+const adminMaker = await session(ADMIN.email, ADMIN.password);
+await adminMaker.goto(`${BASE}/#/policies`);
+await adminMaker.waitForSelector('table.data tbody tr'); await adminMaker.waitForTimeout(500);
+await adminMaker.click('#newPolicyBtn');
+await adminMaker.waitForSelector('dialog[open] #fundSelect'); await adminMaker.waitForTimeout(300);
+check('an administrator is still offered a new entity',
+  await adminMaker.locator('dialog[open] #fundSelect option[value="__new__"]').count() === 1);
+await adminMaker.locator('dialog[open] button', { hasText: 'Cancel' }).first().click();
+
 console.log('\nADMIN STILL SEES EVERYTHING');
 const admin = await session(ADMIN.email,ADMIN.password);
 const anav = await admin.$$eval('.nav a', a=>a.map(x=>x.textContent.trim()));

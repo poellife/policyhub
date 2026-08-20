@@ -509,9 +509,8 @@ says when the **office** needs it in the account, split by who holds what —
 which is the only version an investor can act on.
 
 **Raise a capital call** is on the Servicing calendar, for administrators and
-managers. Choose a window (2 weeks to 6 months), and everything falling due
-inside it — carrier next-due dates and premiums posted to the schedule by hand
-— is split across the investors who hold those policies. The figures are shown
+managers. Choose a window (2 weeks to 6 months), and every premium **scheduled**
+inside it is split across the investors who hold those policies. The figures are shown
 before anything is sent, because this is the one message where being wrong
 costs somebody else money. Then one date the money has to be in by, and each
 investor is emailed **their own figure and that date**, never anybody else's.
@@ -533,6 +532,14 @@ Four properties, each of which is a way to get this wrong:
 - **An investor sees their own line.** They see the total of the call and what
   it covers, since that is how they check their own figure, and nothing about
   who else was asked or for how much.
+- **The same ask raised twice is one call.** A call carries a signature — what
+  it is for, the date the money is wanted, the entity, and the exact set of
+  premiums it covers. Raising it again folds into the call already open:
+  anybody already on it is left alone and is not emailed a second time, and
+  anybody newly ticked is added and told. Where duplicates already exist, the
+  Servicing page offers to **combine** them — the earliest survives, every
+  investor line moves onto it including anything already marked paid, and the
+  copies are cancelled rather than deleted.
 
 A call with money confirmed against it cannot be deleted — it is **cancelled**,
 which keeps the record of what was asked and what came in.
@@ -935,10 +942,74 @@ cost, capital invested) **are** visible to investors, as configured.
 
 ### Alert rules
 
-- **Critical** — premium past due, or account value covers under 3 months of cost of insurance
+Premium alerts are raised from the **servicing schedule** and nothing else — see
+*Where a premium due comes from* below.
+
+- **Critical** — a scheduled premium past due, or account value covers under 3 months of cost of insurance
 - **Serious** — account value covers 3–6 months of cost of insurance
-- **Warning** — premium due within 14 days
-- **Info** — premium due within 45 days, no value update in 120+ days, or no snapshot on file
+- **Warning** — a scheduled premium due within 14 days
+- **Info** — a scheduled premium due within 45 days, no value update in 120+ days, or no snapshot on file
+
+## Where a premium due comes from
+
+There are two places a premium figure could be read from, and only one of them
+is an obligation.
+
+The **policy form** carries an annual premium, a mode and a carrier due date.
+Those describe how the policy was written. They are typed in once, they drift,
+and on an imported book they are frequently blank or years stale. They are shown
+on the policy page labelled *reference*, and **nothing that says money is due
+reads them**.
+
+The **servicing schedule** carries dated premiums somebody entered while looking
+at a statement, each with the amount they expect to pay on that date. Add one
+with **Schedule next step** on a policy's Servicing tab. That entry — and only
+that entry — feeds:
+
+- the Servicing calendar and its alerts
+- an investor's **Premiums** page and the *next premium due* tile
+- the **premium forecast** report
+- what a **capital call** can be raised over, and for how much
+
+The consequence is worth stating plainly: a policy with nothing scheduled
+contributes nothing to the forecast. That is a data-entry job rather than a
+policy that owes nothing, and every empty state says so rather than quietly
+showing zero. Reading both sources meant one payment appearing twice at two
+different figures, and a forecast that disagreed with the capital call raised
+from it.
+
+## Premium optimization
+
+A servicing firm — ITM TwentyFirst and the like — is paid to work out the
+smallest premium stream that keeps a policy in force to maturity, and sends back
+a workbook: a header block naming the policy, then one row per month until the
+maturity date, then a note on the reasoning.
+
+**Servicing → Premium optimization** is where those land. Administrators and
+managers only; the tab does not exist for anybody else.
+
+Upload the workbook as it arrived (`.xlsx`) or a CSV of it. The header block is
+found **by its labels rather than by cell position**, so a file with the block a
+row lower or a column wider still reads, and the Comments tab comes through with
+it. What was read is shown back — insured, policy number, carrier, premium type,
+how many payments and over what dates, what the next twelve months come to, and
+the policy the number matched — **before anything is written**. A stream filed
+against the wrong policy would put somebody else's figures in front of whoever
+is deciding what to fund, so a person confirms it. If the number matches
+nothing, it says so and lets you pick.
+
+Filed streams are grouped by policy, newest badged *latest* — a stream is dated
+advice, and last year's is how you see what changed. Opening one gives
+year-by-year totals with a running cumulative, each year expandable to its
+months, to the cent.
+
+**It is reference and it stays reference.** Uploading one changes nothing about
+what is due, the premium forecast, or what a capital call asks for. Those still
+come from what somebody enters on a policy's Servicing tab. This is what they
+read while deciding what to put there.
+
+`node scripts/make-premium-stream-sample.js` writes a sample of the shape into
+`demo/`, in both formats.
 
 ---
 
@@ -979,6 +1050,12 @@ the simple-interest solver, an XIRR solver kept for reference, and
 a browser family, never a full address — and `security_notices` holds what a
 person needs to be *told*, as opposed to what the system needs to remember,
 which is why they are separate from the audit log.
+
+`premium_streams` and `premium_stream_rows` hold what a servicing firm advised —
+the document and the dated figures inside it, kept apart for the same reason a
+capital call keeps its items apart from its lines. Uploading the same policy
+twice keeps both rows: a stream is dated advice, not a current value. Nothing
+in the application reads either table to decide what is due.
 
 `user_prefs` holds how each person has arranged a screen, keyed to the user and
 dropped with the account. It is a name/value pair rather than a column per

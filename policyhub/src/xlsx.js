@@ -218,14 +218,28 @@ export function readWorkbook(buffer) {
   return sheets;
 }
 
+/* An element's attributes, then either "/>" or its content and closing tag.
+ *
+ * The lazy attribute group matters more than it looks. Written greedily,
+ * `[^>]*` swallows the slash of a self-closing tag, the "/>" alternative
+ * then fails, and the ">" alternative wins instead — so `<c r="A1" s="8"/>`
+ * is read as an OPENING tag whose content is the next cell. Every empty but
+ * styled cell would then eat its neighbour: the value landed one column to
+ * the left, carrying the wrong cell's number format with it, which turned
+ * dates back into serial numbers and shared strings back into their index.
+ * A workbook has thousands of those cells, so this is not an edge case.
+ */
+const elementRe = (tag) =>
+  new RegExp(`<${tag}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${tag}>)`, 'g');
+
 function parseSheet(xml, shared, styles, date1904) {
   const rows = [];
-  const rowRe = /<row\b([^>]*)>([\s\S]*?)<\/row>|<row\b[^>]*\/>/g;
+  const rowRe = elementRe('row');
   let r;
   while ((r = rowRe.exec(xml))) {
     const body = r[2] || '';
     const cells = [];
-    const cellRe = /<c\b([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g;
+    const cellRe = elementRe('c');
     let c;
     while ((c = cellRe.exec(body))) {
       const tag = c[1] || '';

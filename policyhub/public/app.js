@@ -2533,14 +2533,18 @@ function onClick(selector, handler, root = document) {
 }
 
 function openDialog(title, bodyHtml, onSubmit, submitLabel = 'Save') {
+  /* A dialog with nothing to submit is a dialog for reading. It gets one
+     button, and that button says Close rather than Cancel — there is
+     nothing to cancel. */
+  const readOnly = typeof onSubmit !== 'function';
   const dlg = document.createElement('dialog');
   dlg.innerHTML = `
     <form method="dialog" id="dlgForm">
       <div class="dialog-head">${esc(title)}</div>
       <div class="dialog-body"><div id="dlgError"></div>${bodyHtml}</div>
       <div class="dialog-foot">
-        <button type="button" id="dlgCancel">Cancel</button>
-        <button type="submit" class="primary">${esc(submitLabel)}</button>
+        <button type="button" id="dlgCancel">${readOnly ? 'Close' : 'Cancel'}</button>
+        ${readOnly ? '' : `<button type="submit" class="primary">${esc(submitLabel)}</button>`}
       </div>
     </form>`;
   document.body.appendChild(dlg);
@@ -2550,6 +2554,7 @@ function openDialog(title, bodyHtml, onSubmit, submitLabel = 'Save') {
   $('#dlgCancel', dlg).addEventListener('click', () => { dlg.close(); dlg.remove(); });
   $('#dlgForm', dlg).addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (readOnly) { dlg.close(); dlg.remove(); return; }
     const btn = $('button[type=submit]', dlg);
     btn.disabled = true;
     const hashBefore = location.hash;
@@ -2686,14 +2691,25 @@ async function openPolicyDialog(p = null) {
     <div class="field-row">
       ${selectField('Product type', 'product_type', p?.product_type || '', PRODUCT_TYPES)}
       ${moneyField('Face amount', 'face_amount', p?.face_amount)}
+      ${''/* A manager may only file a policy under one of the entities an
+             administrator has put in their hands. Creating an entity is not
+             theirs to do — and an entity they created would not be one they
+             were assigned, so the policy would vanish the moment they saved
+             it. So they are offered their own entities and nothing else,
+             rather than an option that fails on Save. */}
       <div class="field">
-        <label>Owner entity</label>
-        <select name="fund_code" id="fundSelect">
-          <option value="">— No owner —</option>
+        <label>Owner entity${isManagerUser() ? ' *' : ''}</label>
+        <select name="fund_code" id="fundSelect" ${isManagerUser() ? 'required' : ''}>
+          ${isManagerUser()
+            ? `<option value="">— Choose one —</option>`
+            : '<option value="">— No owner —</option>'}
           ${state.funds.map((f) => `<option value="${esc(f.code)}" ${p?.fund_code === f.code ? 'selected' : ''}>
             ${esc(f.code)}${f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
-          <option value="__new__">+ Add a new entity…</option>
+          ${isManagerUser() ? '' : '<option value="__new__">+ Add a new entity…</option>'}
         </select>
+        ${isManagerUser() && !state.funds.length ? `<span class="muted" style="font-size:12px">
+          No owner entity has been assigned to you yet. An administrator has to do that
+          on Settings before you can file a policy.</span>` : ''}
       </div>
     </div>
     <div class="field" id="newFundWrap" style="display:none">
@@ -3108,9 +3124,324 @@ function openTxnDialog(p, preset = {}) {
   });
 }
 
+/* ------------------------- premium optimization ----------------------- *
+ * A servicing firm is paid to work out the smallest premium stream that
+ * keeps a policy in force to maturity and sends back a workbook. This is
+ * where those land.
+ *
+ * Reference, and it says so on the page. Nothing filed here changes what
+ * is due, what the forecast says, or what a capital call asks for — a
+ * premium that has to be paid is still an entry somebody makes on the
+ * calendar. This is what they read while deciding what to put there.
+ * ------------------------------------------------------------------ */
+
+async function premiumOptimizationView() {
+  const streams = await api('/premium-streams').catch(() => []);
+
+  /* Grouped by policy, newest first inside each. A stream is dated advice
+     and the previous one is how you see what changed, so both stay. */
+  const byPolicy = new Map();
+  for (const s of streams) {
+    if (!byPolicy.has(s.policy_id)) byPolicy.set(s.policy_id, []);
+    byPolicy.get(s.policy_id).push(s);
+  }
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Servicing calendar</h1>
+        <div class="sub">${streams.length
+          ? `${streams.length} premium optimization${streams.length === 1 ? '' : 's'} on file
+             across ${byPolicy.size} ${byPolicy.size === 1 ? 'policy' : 'policies'}`
+          : 'No premium optimizations on file yet'}</div></div>
+      <div class="spacer"></div>
+      <button class="primary" id="uploadStreamBtn">Upload a premium optimization</button>
+    </div>
+
+    ${servicingTabs()}
+
+    <div class="notice-box" style="margin-bottom:14px">
+      <strong>Reference only.</strong> These are premium streams a servicing firm worked
+      out — the smallest premiums that keep each policy in force. Nothing here is an
+      obligation: it does not change what is due, the premium forecast, or what a capital
+      call asks for. Those still come from what somebody enters on a policy's
+      <strong>Servicing</strong> tab. This is what you read while deciding what to put there.
+    </div>
+
+    ${!streams.length ? `
+    <div class="card"><div class="card-body">
+      <div class="empty">Nothing uploaded yet. A premium optimization is the workbook a
+        servicing firm sends back — a header naming the policy, then a dated table of
+        premiums running to maturity. Both .xlsx and .csv are read.</div>
+    </div></div>` : [...byPolicy.entries()].map(([policyId, list]) => {
+      const top = list[0];
+      return `
+      <div class="card">
+        <div class="card-head">
+          <h2>${esc(top.on_insured || top.insured_name || 'Unnamed')}</h2>
+          <span class="muted" style="font-size:12px;margin-left:10px">${
+            esc(top.on_carrier || top.carrier_name || '')} ${esc(top.on_policy_number)}${
+            top.fund_code ? ` · ${esc(top.fund_code)}` : ''}</span>
+          <div class="spacer"></div>
+          <button class="btn-sm" data-open-policy="${policyId}">Open the policy</button>
+        </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Uploaded</th><th>Stream</th><th>Covers</th>
+            <th class="num">Payments</th><th class="num">Next 12 months</th>
+            <th>From the file</th><th></th></tr></thead>
+          <tbody>${list.map((s, i) => `<tr>
+            <td class="${i === 0 ? 'strong' : 'muted'}">${fmtDate(s.uploaded_at)}${
+              i === 0 && list.length > 1 ? ' <span class="badge">latest</span>' : ''}</td>
+            <td class="strong">${esc(s.premium_type || 'not stated')}</td>
+            <td class="secondary">${fmtDate(s.first_due)} — ${fmtDate(s.last_due)}</td>
+            <td class="num">${s.payments}</td>
+            <td class="num strong">${fmtExact(s.next_12mo)}</td>
+            <td class="secondary">${esc(s.file_name || '')}${s.uploaded_by
+              ? ` <span class="muted">· ${esc(s.uploaded_by)}</span>` : ''}</td>
+            <td style="white-space:nowrap">
+              <button class="btn-sm" data-stream="${s.id}">Open</button>
+              <button class="btn-sm danger" data-drop-stream="${s.id}">Remove</button></td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+        ${top.comments ? `<div class="card-body" style="border-top:1px solid var(--grid)">
+          <span class="muted" style="font-size:12.5px;line-height:1.6">
+            <strong>From the servicing firm:</strong> ${esc(top.comments)}</span></div>` : ''}
+      </div>`;
+    }).join('')}`;
+
+  return {
+    html,
+    after: () => {
+      wireServicingTabs();
+      onClick('#uploadStreamBtn', () => openStreamUploadDialog());
+      document.querySelectorAll('[data-open-policy]').forEach((b) =>
+        b.addEventListener('click', () => go(`#/policy/${b.dataset.openPolicy}`)));
+      const guard = (el, fn) => el.addEventListener('click', async (e) => {
+        try { await fn(e); } catch (err) { alert(err?.message || 'That did not work.'); }
+      });
+      document.querySelectorAll('[data-stream]').forEach((b) =>
+        guard(b, () => openStreamDialog(Number(b.dataset.stream))));
+      document.querySelectorAll('[data-drop-stream]').forEach((b) =>
+        guard(b, async () => {
+          if (!confirm('Remove this premium optimization? The file is not kept — you would '
+            + 'have to upload it again.')) return;
+          await api(`/premium-streams/${b.dataset.dropStream}`, { method: 'DELETE' });
+          toast('Removed');
+          render();
+        }));
+    },
+  };
+}
+
+/** The year table, with the months inside a year one click away. */
+function streamYears(years) {
+  let running = 0;
+  return `
+    <div class="table-wrap" style="max-height:340px;overflow:auto">
+    <table class="data">
+      <thead><tr><th>Year</th><th class="num">Payments</th><th class="num">Premium</th>
+        <th class="num">Cumulative</th><th></th></tr></thead>
+      <tbody>${years.map((y) => {
+        running += y.total;
+        return `
+        <tr>
+          <td class="strong">${esc(y.year)}</td>
+          <td class="num muted">${y.payments}</td>
+          <td class="num strong">${fmtExact(y.total)}</td>
+          <td class="num muted">${fmtExact(running)}</td>
+          ${''/* type=button, or the dialog's form submits and the whole
+                 thing closes the first time somebody opens a year. */}
+          <td><button type="button" class="btn-sm" data-year="${esc(y.year)}">Months</button></td>
+        </tr>
+        <tr class="year-months" data-months="${esc(y.year)}" style="display:none">
+          <td colspan="5" style="padding:0">
+            <table class="data" style="margin:0"><tbody>${y.rows.map((r) => `<tr>
+              <td style="padding-left:26px">${fmtDate(r.due_date)}</td>
+              ${''/* To the cent: these figures are the point of the document,
+                     and 40,848.50 rounded to 40,849 is not the same advice. */}
+              <td class="num">${fmtExact(r.amount)}</td>
+              <td class="num muted">${r.death_benefit == null ? '' : fmtExact(r.death_benefit)}</td>
+            </tr>`).join('')}</tbody></table>
+          </td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+}
+
+async function openStreamDialog(id) {
+  const s = await api(`/premium-streams/${id}`);
+  const row = (label, value) => value === '' || value == null ? ''
+    : `<dt>${label}</dt><dd>${value}</dd>`;
+  const dlg = openDialog(
+    `${s.on_insured || s.insured_name || 'Premium optimization'} — ${
+      s.premium_type || 'premium optimization'}`, `
+    <div class="notice-box" style="margin-bottom:12px">
+      Reference. Nothing on this page changes what is due or what anybody is asked for.
+    </div>
+    <dl class="kv">
+      ${row('Policy', `${esc(s.on_policy_number)}${s.policy_number
+        && s.policy_number !== s.on_policy_number
+          ? ` <span class="muted">· the file says ${esc(s.policy_number)}</span>` : ''}`)}
+      ${row('Carrier', esc(s.carrier_name || ''))}
+      ${row('Face amount', s.face_amount == null ? '' : fmtExact(s.face_amount))}
+      ${row('Effective', s.effective_date ? fmtDate(s.effective_date) : '')}
+      ${row('Runs to', s.maturity_date ? fmtDate(s.maturity_date) : '')}
+      ${row('Premium type', esc(s.premium_type || ''))}
+      ${row('Payments', `${s.payments} · ${fmtExact(s.total)} in total`)}
+      ${row('From', `${esc(s.file_name || 'a file')}${s.uploaded_by_name
+        ? `, uploaded by ${esc(s.uploaded_by_name)}` : ''} on ${fmtDate(s.uploaded_at)}`)}
+      ${row('Note', esc(s.note || ''))}
+    </dl>
+    ${s.comments ? `<div class="field" style="margin-top:10px">
+      <label>What the servicing firm said</label>
+      <div class="muted" style="font-size:13px;line-height:1.6">${esc(s.comments)}</div>
+    </div>` : ''}
+    <div class="dlg-section">Year by year</div>
+    ${streamYears(s.years)}`, null, null);
+
+  dlg.querySelectorAll('[data-year]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const months = dlg.querySelector(`[data-months="${b.dataset.year}"]`);
+      const open = months.style.display !== 'none';
+      months.style.display = open ? 'none' : '';
+      b.textContent = open ? 'Months' : 'Hide';
+    }));
+}
+
+/**
+ * Upload one.
+ *
+ * Two steps on purpose. A premium optimization is a document about ONE
+ * policy, and filing it against the wrong one would put somebody else's
+ * numbers in front of whoever is deciding what to fund — so the file is
+ * read first, and what it says is shown back with the policy it matched
+ * before anything is written.
+ */
+function openStreamUploadDialog() {
+  let read = null;
+  let file = null;
+  /* Only fetched when the number in the file matches nothing — which is the
+     uncommon case, and not worth a round trip on every upload. */
+  let pickable = [];
+
+  const summary = () => {
+    if (!read) return '';
+    const h = read.header;
+    const bad = !read.matched;
+    return `
+      <div class="dlg-section">What the file says</div>
+      <dl class="kv">
+        <dt>Insured</dt><dd>${esc(h.insured_name || '—')}</dd>
+        <dt>Policy number</dt><dd>${esc(h.policy_number || '—')}</dd>
+        <dt>Carrier</dt><dd>${esc(h.carrier_name || '—')}</dd>
+        <dt>Premium type</dt><dd>${esc(h.premium_type || 'not stated')}</dd>
+        <dt>Premiums</dt><dd>${read.summary.count} payments, ${
+          fmtDate(read.summary.first)} to ${fmtDate(read.summary.last)}</dd>
+        <dt>Next 12 months</dt><dd class="strong">${fmtExact(read.summary.next_12mo)}</dd>
+      </dl>
+      ${read.problems.length ? `<div class="notice-box" style="margin-top:10px">
+        ${read.problems.length} row${read.problems.length === 1 ? '' : 's'} could not be read
+        and ${read.problems.length === 1 ? 'was' : 'were'} left out — usually a total or a
+        footnote. First: ${esc(read.problems[0].text)}</div>` : ''}
+      ${bad ? `<div class="error-box" style="margin-top:10px">
+        ${read.ambiguous
+          ? 'More than one policy carries that number, so this cannot be filed automatically.'
+          : `No policy of yours has the number ${esc(h.policy_number || '(none given)')}.`}
+        Choose the policy it belongs to below.</div>
+        <div class="field"><label>Policy *</label>
+          <select name="policy_id" id="streamPolicy" required>
+            <option value="">— choose —</option>
+            ${pickable.map((p) => `<option value="${p.id}">${
+              esc(p.policy_number)} — ${esc(p.display_name
+                || `${p.insured_first || ''} ${p.insured_last || ''}`.trim())}</option>`).join('')}
+          </select></div>`
+        : `<div class="notice-box" style="margin-top:10px">
+        Matches <strong>${esc(read.match.policy_number)}</strong> —
+        ${esc(read.match.insured_name || '')}${read.match.fund_code
+          ? ` · ${esc(read.match.fund_code)}` : ''}. It will be filed against that policy.
+        <input type="hidden" name="policy_id" value="${read.match.id}"></div>`}`;
+  };
+
+  const dlg = openDialog('Upload a premium optimization', `
+    <div class="field">
+      <label>File *</label>
+      <input type="file" name="file" required accept=".xlsx,.xls,.csv">
+      <span class="muted" style="font-size:12px">The workbook as it arrived, or a CSV of it.
+        Up to 15 MB.</span>
+    </div>
+    ${inputField('Who produced it', 'source', '', 'text',
+      'placeholder="e.g. ITM TwentyFirst"')}
+    <div class="field"><label>Note</label>
+      <input name="note" type="text" placeholder="Optional — why this one, what changed"></div>
+    <div id="streamSummary"><div class="empty">Choose a file and it will be read here
+      before anything is saved.</div></div>
+  `, async (v) => {
+    if (!file) throw new Error('Choose a file.');
+    if (!read) throw new Error('Wait for the file to be read.');
+    const policyId = $('#streamPolicy', dlg)?.value
+      || dlg.querySelector('input[name=policy_id]')?.value;
+    if (!policyId) throw new Error('Choose the policy this belongs to.');
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('policy_id', policyId);
+    fd.append('source', v.source || '');
+    fd.append('note', v.note || '');
+    const res = await fetch('/api/premium-streams', { method: 'POST', body: fd,
+      credentials: 'same-origin' });
+    if (!res.ok) {
+      let msg = 'Upload failed.';
+      try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+      throw new Error(msg);
+    }
+    const saved = await res.json();
+    toast(`Filed ${saved.count} dated premiums`);
+    render();
+  }, 'File it');
+
+  const input = dlg.querySelector('input[type=file]');
+  input.addEventListener('change', async () => {
+    file = input.files?.[0] || null;
+    read = null;
+    if (!file) { $('#streamSummary', dlg).innerHTML = ''; return; }
+    $('#streamSummary', dlg).innerHTML = '<div class="empty"><span class="spin"></span></div>';
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/premium-streams/preview', { method: 'POST', body: fd,
+        credentials: 'same-origin' });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || 'That file could not be read.');
+      read = body;
+      if (!read.matched) pickable = await api('/policies').catch(() => []);
+      $('#streamSummary', dlg).innerHTML = summary();
+    } catch (err) {
+      $('#streamSummary', dlg).innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    }
+  });
+}
+
 /* ----------------------------- servicing ----------------------------- */
 
+/* Which half of Servicing is on screen.
+   A module variable rather than the URL, like the policy detail tabs: the
+   page is one screen with two things on it, not two addresses. */
+let svcTab = 'calendar';
+
+/** Who may see the premium optimizations at all. */
+const mayOptimize = () => ['admin', 'manager'].includes(state.user?.role);
+
+const servicingTabs = () => (!mayOptimize() ? '' : `
+  <div class="tabs" id="svcTabs">
+    <button data-svctab="calendar" class="${svcTab === 'calendar' ? 'active' : ''}">Calendar</button>
+    <button data-svctab="optimization" class="${svcTab === 'optimization' ? 'active' : ''}">Premium optimization</button>
+  </div>`);
+
+const wireServicingTabs = () => {
+  document.querySelectorAll('#svcTabs button').forEach((b) =>
+    b.addEventListener('click', () => { svcTab = b.dataset.svctab; render(); }));
+};
+
 async function servicingView() {
+  if (svcTab === 'optimization' && mayOptimize()) return premiumOptimizationView();
   const mayRaise = !isInvestorUser() && ['admin', 'manager'].includes(state.user.role);
   const [svc, funds, calls, dupes] = await Promise.all([
     api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
@@ -3160,6 +3491,8 @@ async function servicingView() {
       ${!investor && ['admin', 'manager'].includes(state.user.role)
         ? '<button class="primary" id="raiseCallBtn">Raise a capital call</button>' : ''}
     </div>
+
+    ${servicingTabs()}
 
     ${/* What has been asked for, and what has come back. A premium schedule
           says when the carrier wants the money; a call says when the office
@@ -3281,6 +3614,7 @@ async function servicingView() {
     html,
     after: () => {
       wireEntityPicker();
+      wireServicingTabs();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       onClick('#raiseCallBtn', () => openRaiseCallDialog());
