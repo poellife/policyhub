@@ -435,7 +435,8 @@ const noteRegistration = (ip) =>
 router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
 router.get('/auth/me', authenticate, wrap(async (req, res) => {
-  const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role };
+  const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role,
+                must_change_password: !!req.user.mustChangePassword };
   if (req.user.role === 'investor' && req.user.iid) {
     /* Only the last four digits of the tax number, and only so the Account
        page can say whether one is on file. An investor knows their own
@@ -3229,6 +3230,11 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
   const granted = grantedInvestors(req);
   const { rows } = await q(
     `SELECT inv.*, f.code AS fund_code, f.name AS fund_name,
+            /* Whether they can sign in, and as what. Staff-only — this route
+               already is — and it is the address, never anything about the
+               password. It is here so the investor form can say "already
+               signs in as…" rather than offering to open a second login. */
+            (SELECT u.email FROM users u WHERE u.investor_id = inv.id LIMIT 1) AS login_email,
             /* pl.id, not pi.id: the scope and status filters live on the
                join to policy_latest, so counting the link row would count
                a position held in somebody else's entity even while its
@@ -3343,8 +3349,121 @@ router.get('/investors/:id/tax-id', blockInvestors, requireRole('admin'), wrap(a
   res.json({ tax_id: value });
 }));
 
+/* ------------------------------------------------------------------ *
+ * Opening the portal for an investor
+ *
+ * An investor who registers themselves arrives with a login already —
+ * they chose the password and nobody else ever knew it. An investor the
+ * office opens an account for has no such thing, and used to need a
+ * second trip through Settings by an administrator, which a manager could
+ * not make at all. So the login is set up on the same screen as the
+ * record, by whoever is doing the setting up.
+ *
+ * Three things hold it in:
+ *
+ *   - only ever an INVESTOR login, tied to that investor. This is not a
+ *     way for a manager to create staff accounts; the role is not taken
+ *     from the request at all.
+ *   - only for an investor they may already work with, which for a manager
+ *     means their own entities.
+ *   - the password is marked as borrowed. Staff typed it, so staff know
+ *     it, and the account can do nothing until the investor replaces it.
+ * ------------------------------------------------------------------ */
+
+const LOGIN_MIN = 10;
+
+/** What was asked for, if anything, and whether it makes sense. */
+function loginRequest(body) {
+  const wanted = body?.login_email || body?.login_password || body?.create_login;
+  if (!wanted) return { none: true };
+  const email = String(body.login_email || '').trim().toLowerCase();
+  const password = String(body.login_password || '');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+    return { error: 'That is not an email address the portal can sign in with.' };
+  if (password.length < LOGIN_MIN)
+    return { error: `A password must be at least ${LOGIN_MIN} characters.` };
+  return {
+    email,
+    password,
+    /* Off only if somebody deliberately says so — for the case where the
+       investor is sitting there and typed it themselves. */
+    mustChange: body.must_change_password !== false && body.must_change_password !== 'false',
+  };
+}
+
+/** Create the login inside whatever transaction the caller is running. */
+async function openInvestorLogin(client, { email, password, mustChange }, investor) {
+  const { rows: clash } = await client.query(
+    'SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
+  if (clash.length) return { error: `${email} already has a login.` };
+  const hash = await hashPassword(password);
+  const { rows } = await client.query(
+    `INSERT INTO users (email, password_hash, full_name, role, investor_id,
+                        must_change_password)
+     VALUES ($1,$2,$3,'investor',$4,$5) RETURNING id, email`,
+    [email, hash, investor.name, investor.id, !!mustChange]);
+  return { user: rows[0] };
+}
+
+/** Who may hand out a login at all. */
+const mayOpenLogin = (req) => ['admin', 'manager'].includes(req.user.role);
+
+router.post('/investors/:id/login', blockInvestors, canEdit, wrap(async (req, res) => {
+  if (!mayOpenLogin(req))
+    return res.status(403).json({
+      error: 'Opening a login is for an administrator or the entity manager.' });
+  const wanted = loginRequest({ ...req.body, create_login: true });
+  if (wanted.error) return res.status(400).json({ error: wanted.error });
+
+  const { rows } = await q('SELECT id, name FROM investors WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+  if ((await investorsOutOfScope(req, [rows[0].id])).length)
+    return res.status(403).json({ error: 'That investor is not one of yours' });
+  const { rows: already } = await q(
+    'SELECT email FROM users WHERE investor_id = $1', [req.params.id]);
+  if (already[0])
+    return res.status(409).json({
+      error: `${rows[0].name} already signs in as ${already[0].email}.` });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const made = await openInvestorLogin(client, wanted, rows[0]);
+    if (made.error) { await client.query('ROLLBACK'); return res.status(409).json({ error: made.error }); }
+    await client.query('COMMIT');
+    await audit(req.user.uid, 'user', made.user.id, 'create',
+      `${made.user.email} · investor login for ${rows[0].name}`
+      + `${wanted.mustChange ? ' · password set by staff, must be changed on first sign-in' : ''}`);
+    res.status(201).json({ ok: true, email: made.user.email,
+      must_change_password: !!wanted.mustChange });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}));
+
 router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   if (!str(req.body.name)) return res.status(400).json({ error: 'A name is required' });
+
+  /* A login, if one was asked for on the same screen. Checked BEFORE the
+     record is written: an investor created and then refused a login because
+     the address was already taken leaves somebody half-set-up, and the next
+     attempt makes a duplicate investor. */
+  const wanted = loginRequest(req.body);
+  if (wanted.error) return res.status(400).json({ error: wanted.error });
+  if (!wanted.none && !mayOpenLogin(req))
+    return res.status(403).json({
+      error: 'Opening a login is for an administrator or the entity manager. '
+        + 'Save the investor without one and ask them to set it up.' });
+  if (!wanted.none) {
+    const { rows: clash } = await q(
+      'SELECT id FROM users WHERE lower(email) = lower($1)', [wanted.email]);
+    if (clash.length)
+      return res.status(409).json({ error: `${wanted.email} already has a login.` });
+  }
+
   const { cols, vals } = buildSet(INVESTOR_FIELDS, adminOnlyInvestorFields(req));
   const ph = cols.map((_, i) => `$${i + 1}`).join(',');
   const { rows } = await q(
@@ -3353,13 +3472,42 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   const bad = await applyTaxId(req, rows[0].id);
   if (bad) return res.status(400).json(bad);
   await audit(req.user.uid, 'investor', rows[0].id, 'create', rows[0].name);
+
+  let login = null;
+  if (!wanted.none) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const made = await openInvestorLogin(client, wanted, rows[0]);
+      if (made.error) {
+        await client.query('ROLLBACK');
+        /* The record stands — it is good work either way — and the message
+           says exactly what is missing so it can be finished from Edit. */
+        return res.status(409).json({
+          error: `${rows[0].name} was saved, but the login was not: ${made.error}`,
+          investor_id: rows[0].id });
+      }
+      await client.query('COMMIT');
+      login = made.user;
+      await audit(req.user.uid, 'user', made.user.id, 'create',
+        `${made.user.email} · investor login for ${rows[0].name}`
+        + `${wanted.mustChange ? ' · password set by staff, must be changed on first sign-in' : ''}`);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
   // Read it back rather than returning the row as it was inserted: the tax
   // number is sealed in a second statement, and a response that omitted it
   // would say the record has no number on it when it does.
   const { rows: fresh } = await q(
     `SELECT inv.*, f.code AS fund_code FROM investors inv
        LEFT JOIN funds f ON f.id = inv.fund_id WHERE inv.id = $1`, [rows[0].id]);
-  res.status(201).json(fresh[0]);
+  res.status(201).json({ ...fresh[0],
+    ...(login ? { login_email: login.email,
+                  must_change_password: !!wanted.mustChange } : {}) });
 }));
 
 router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {

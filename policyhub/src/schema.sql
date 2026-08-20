@@ -959,3 +959,18 @@ ALTER TABLE agreement_signers ADD COLUMN IF NOT EXISTS signed_by_title TEXT NOT 
    before this existed gets the same treatment as one drawn after it. */
 UPDATE agreement_signers SET party_type = 'Entity'
  WHERE role = 'Manager' AND party_type = 'Individual';
+
+/* ---------------------------------------------------------------------
+    A password somebody else chose.
+
+    When the office opens an investor's account for them, staff type the
+    first password and then have to tell the investor what it is — down a
+    phone line, in an email, on a note. That password is known to at least
+    two people from the moment it exists, so it is a way in rather than a
+    credential, and it is marked as one: the account cannot do anything
+    until the investor has replaced it with something only they know.
+
+    Off for an account that set its own password — a self-registration, or
+    anybody changing their own.
+   --------------------------------------------------------------------- */
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;

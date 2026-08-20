@@ -29,6 +29,12 @@ const SECRET = (() => {
   return crypto.randomBytes(48).toString('base64url');
 })();
 
+/* The only things an account with a borrowed password may do: find out who it
+   is, replace the password, read what it has been told, and leave. */
+const PASSWORD_RESET_PATHS = new Set([
+  '/auth/me', '/auth/password', '/auth/logout', '/me/notices',
+]);
+
 const COOKIE = 'ph_session';
 
 /* Two clocks on a session, and they answer different questions.
@@ -114,7 +120,8 @@ export async function loadScope(req, res, next) {
   // their 12-hour token expires, a role change applies at once, and a deleted
   // account cannot keep using a still-valid cookie.
   const { rows } = await q(
-    'SELECT is_active, role, investor_id, token_version FROM users WHERE id = $1', [req.user.uid]
+    `SELECT is_active, role, investor_id, token_version, must_change_password
+       FROM users WHERE id = $1`, [req.user.uid]
   );
   const u = rows[0];
   if (!u) {
@@ -140,6 +147,17 @@ export async function loadScope(req, res, next) {
     issueToken(res, { id: req.user.uid, email: req.user.email, role: u.role,
       full_name: req.user.name, investor_id: u.investor_id,
       token_version: u.token_version }, { expiresAt: req.user.abs });
+
+  /* A password the office set is good for exactly one thing: signing in and
+     replacing it. Enforced here rather than in the interface, because a
+     screen can be skipped and this cannot. */
+  req.user.mustChangePassword = !!u.must_change_password;
+  if (u.must_change_password && !PASSWORD_RESET_PATHS.has(req.path)
+      && req.method !== 'OPTIONS')
+    return res.status(409).json({
+      error: 'Choose your own password before using the portal. The one you were given '
+        + 'is known to whoever set it up.',
+      must_change_password: true });
 
   req.user.role = u.role;
   req.user.iid = u.investor_id;
@@ -375,7 +393,10 @@ export async function login(req, res) {
   }
   issueToken(res, user);
   res.json({ id: user.id, email: user.email, name: user.full_name, role: user.role,
-             new_location: origin.isNew ? origin.label : null });
+             new_location: origin.isNew ? origin.label : null,
+             /* A password somebody else chose is a way in, not a credential.
+                The account can do nothing until it has been replaced. */
+             must_change_password: !!user.must_change_password });
 }
 
 export async function changePassword(req, res) {
@@ -392,7 +413,8 @@ export async function changePassword(req, res) {
   // Retire every cookie issued under the old password, then hand this browser a
   // fresh one so the person changing it is not signed out of their own session.
   const { rows: bumped } = await q(
-    `UPDATE users SET password_hash = $1, token_version = token_version + 1
+    `UPDATE users SET password_hash = $1, token_version = token_version + 1,
+                      must_change_password = FALSE
       WHERE id = $2 RETURNING id, email, role, full_name, investor_id, token_version`,
     [hash, user.id]
   );

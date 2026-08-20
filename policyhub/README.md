@@ -743,6 +743,38 @@ ownership cap table showing each investor's share, the dollar value of that shar
 and any unallocated remainder. Allocations are refused if they would push a policy
 past 100%.
 
+### Opening the portal for an investor
+
+An investor who registers themselves arrives with a login already, and nobody
+here ever knew the password. One the office opens an account for used to need a
+second trip through Settings that only an administrator could make — so a
+manager could create the client and then not let them in.
+
+It is now one screen. **New investor** carries a *Portal access* section: tick
+it, and the sign-in address (starting from the contact email already typed) and
+a first password go in beside the rest of the record. There is a **Suggest**
+button that produces something like `harbour-lantern-thistle-47` — three words
+and a number, because a first password has to survive being read down a
+telephone, written on a note and typed back in. It is shown as you type for the
+same reason.
+
+Three things hold it in:
+
+- **It only ever makes an investor login**, tied to that investor. The role is
+  not read from the request at all, so this is not a side door for a manager to
+  create staff accounts.
+- **Only for somebody they may already work with** — for a manager, their own
+  entities.
+- **The password is marked as borrowed.** Staff typed it, so staff know it. The
+  account can sign in and do exactly one thing: replace it. Every other route
+  answers 409 until it has, which is enforced by the server rather than by the
+  screen that asks — a screen can be skipped. The investor lands on *Choose your
+  password*, which says why. Untick the box if they are sitting with you and
+  typing it themselves.
+
+An investor who already has a login is shown the address they sign in with
+rather than being offered a second one.
+
 ### The tax number is not asked for at sign-up
 
 A K-1 cannot be issued without a Social Security number or an EIN, but an
@@ -1247,6 +1279,8 @@ reach those rules correctly.
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
+| `investor-login-test.mjs` | opening a login with the record: that it only ever makes an investor account, who may do it, and that a staff-set password opens nothing until it is replaced |
+| `investor-login-ui-test.mjs` | the form not leading with passwords, the suggestion, and where an investor's first sign-in lands |
 | `search-ui-test.mjs` | typing slowly without losing the caret, typing through a slow answer, a late answer not winning, and one request per search |
 | `opp-delete-test.mjs` | who may clear a shelf of opportunities, what the preview promises, that a wrong count deletes nothing, and that a batch is all or nothing |
 | `entity-signing-test.mjs` | that a company, trust or IRA signs through a named person in a stated capacity, that an individual signs as before, and where the kind of party comes from |

@@ -382,6 +382,76 @@ function wireSearch(selector, apply) {
   });
 }
 
+/**
+ * The first thing somebody sees when the office set their password.
+ *
+ * A password typed by staff and read down a telephone is known to at least
+ * two people from the moment it exists, so it is a way in rather than a
+ * credential. The account can do nothing until it is replaced — the server
+ * refuses every other route — and this is the screen that says so, rather
+ * than letting somebody meet a wall of 409s.
+ */
+function firstPasswordView() {
+  return `
+  <div class="login-wrap">
+    <div class="card login-card">
+      <div class="card-body">
+        <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
+        <div class="login-head">Choose<br><span class="dim">your password.</span></div>
+        <div class="login-sub">${esc(state.user?.name || state.user?.email || '')}</div>
+        <div class="notice-box" style="margin-top:14px">
+          The password you were given was set up for you by the office, so somebody
+          else knows it. Choose one only you know and the portal opens.
+        </div>
+        <div id="firstPwError"></div>
+        <form id="firstPwForm">
+          <div class="field">
+            <label for="curPw">The password you were given</label>
+            <input id="curPw" name="currentPassword" type="password"
+                   autocomplete="current-password" required autofocus>
+          </div>
+          <div class="field">
+            <label for="newPw">Your own password (10 characters or more)</label>
+            <input id="newPw" name="newPassword" type="password" minlength="10"
+                   autocomplete="new-password" required>
+          </div>
+          <button class="primary" type="submit" style="width:100%;margin-top:6px">
+            Set it and continue</button>
+        </form>
+        <div class="login-alt"><span>Not you?</span>
+          <a href="#" id="firstPwOut">Sign out</a></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function wireFirstPassword() {
+  $('#firstPwForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#firstPwForm button');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Setting it…';
+    try {
+      await api('/auth/password', { method: 'POST', body: formValues(e.target) });
+      state.user = await api('/auth/me');
+      await loadPrefs();
+      location.hash = '#/dashboard';
+      toast('That is your password now');
+      await render();
+    } catch (err) {
+      $('#firstPwError').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Set it and continue';
+    }
+  });
+  $('#firstPwOut').addEventListener('click', async (e) => {
+    e.preventDefault();
+    await api('/auth/logout', { method: 'POST' }).catch(() => {});
+    state.user = null;
+    render();
+  });
+}
+
 /* ------------------------------ router ------------------------------- */
 
 function parseHash() {
@@ -586,11 +656,22 @@ async function showSecurityNotices() {
        other browser at once.`
     : `<strong>${esc(n.detail)}</strong> · ${fmtDateTime(n.created_at)}.`);
 
+  /* At most three across the top, whatever is waiting. A fortnight away and
+     a busy book can leave twenty notices, and a banner twenty lines deep
+     stops being a warning and becomes the page — the rest are on Settings,
+     which is where a list belongs. */
+  const SHOWN = 3;
+  const shown = data.unseen.slice(0, SHOWN);
+  const rest = data.unseen.length - shown.length;
+
   bar.innerHTML = `
     <div class="security-bar">
       <span class="security-mark" aria-hidden="true">!</span>
       <div class="security-text">
-        ${data.unseen.map((n) => `<div>${wording(n)}</div>`).join('')}
+        ${shown.map((n) => `<div>${wording(n)}</div>`).join('')}
+        ${rest ? `<div class="muted" style="font-size:12.5px;margin-top:3px">
+          and ${rest} more — the whole list is on
+          <a href="#/settings">Settings</a>.</div>` : ''}
         <div class="muted" style="font-size:12px;margin-top:4px">
           You are on ${esc(data.here)} right now.</div>
       </div>
@@ -662,7 +743,7 @@ function wireLogin() {
       state.user = await api('/auth/me');
       state.signedOutReason = null;
       noteActivity();
-      await loadPrefs();
+      if (!state.user.must_change_password) await loadPrefs();
       location.hash = '#/dashboard';
       await render();
     } catch (err) {
@@ -5171,10 +5252,36 @@ async function investorView() {
  * is encrypted; letting anybody else set either would quietly undo the
  * reason they are treated differently in the first place.
  */
+/**
+ * A first password worth reading down a telephone.
+ *
+ * Three short words and a number rather than a line of noise: it survives
+ * being spoken, written on a note and typed back in, which a password that
+ * has to be dictated actually has to do. It is also temporary by design —
+ * the account cannot do anything until the investor replaces it — so the
+ * bar is "not guessable in a day", not "resists an offline attack".
+ */
+function suggestPassword() {
+  const words = ['harbour', 'lantern', 'meadow', 'compass', 'thistle', 'quarry', 'beacon',
+    'juniper', 'anchor', 'marble', 'crimson', 'walnut', 'orchard', 'falcon', 'ledger',
+    'copper', 'willow', 'tundra', 'saffron', 'granite'];
+  const pick = () => words[Math.floor(Math.random() * words.length)];
+  const a = pick();
+  let b = pick(); while (b === a) b = pick();
+  let c = pick(); while (c === a || c === b) c = pick();
+  return `${a}-${b}-${c}-${Math.floor(Math.random() * 90 + 10)}`;
+}
+
 function openInvestorDialog(inv) {
   const isNew = !inv?.id;
   const isAdmin = state.user.role === 'admin';
   const funds = state.funds || [];
+  /* An investor who registers themselves arrives with a login already, and
+     nobody here ever knew the password. One the office opens an account for
+     has neither, so it is set up on this screen rather than in a second trip
+     through Settings that a manager could not make at all. */
+  const mayOpenLogin = ['admin', 'manager'].includes(state.user.role);
+  const hasLogin = !!inv?.login_email;
   const body = `
     <div class="field-row">
       ${inputField('Name *', 'name', inv?.name, 'text', 'required')}
@@ -5232,16 +5339,100 @@ function openInvestorDialog(inv) {
         <span class="muted" style="font-size:12px">Only an administrator can change it.</span></div>
     </div>`}
 
-    <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(inv?.notes || '')}</textarea></div>`;
+    <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(inv?.notes || '')}</textarea></div>
+
+    ${mayOpenLogin && !hasLogin ? `
+    <div class="dlg-section">Portal access</div>
+    <label class="dlg-check">
+      <input type="checkbox" id="wantLogin" name="create_login" value="yes">
+      <span>${isNew ? 'Give them a login now' : 'Open a login for them now'} — they can sign in
+        and see their own positions, statements and agreements.</span>
+    </label>
+    <div id="loginFields" style="display:none">
+      <div class="field-row">
+        ${inputField('Sign-in email', 'login_email', inv?.email, 'email',
+          'autocomplete=off placeholder="they sign in with this"')}
+        <div class="field">
+          <label>First password</label>
+          <div style="display:flex;gap:6px">
+            <input name="login_password" type="text" autocomplete="off" minlength="10"
+                   class="grow" placeholder="at least 10 characters">
+            <button type="button" class="btn-sm" id="suggestPw">Suggest</button>
+          </div>
+          <span class="muted" style="font-size:12px">Shown as you type, because you have to
+            read it out to them.</span>
+        </div>
+      </div>
+      <label class="dlg-check">
+        <input type="checkbox" name="must_change_password" value="yes" checked>
+        <span>Make them choose their own password the first time they sign in.
+          <span class="muted">Leave this on unless they are with you and typing it
+          themselves — a password you set is one you know.</span></span>
+      </label>
+    </div>` : ''}
+    ${hasLogin ? `
+    <div class="dlg-section">Portal access</div>
+    <div class="field">
+      <div class="strong" style="padding:2px 0">${esc(inv.login_email)}</div>
+      <span class="muted" style="font-size:12px">They already sign in with this address.
+        ${isAdmin ? 'A password reset is on Settings → Users.'
+          : 'An administrator can reset the password from Settings.'}</span>
+    </div>` : ''}`;
 
   const dlg = openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
     // An untouched tax box must not be read as "clear it".
     if (!String(v.tax_id || '').trim()) delete v.tax_id;
-    if (isNew) await api('/investors', { method: 'POST', body: v });
-    else await api(`/investors/${inv.id}`, { method: 'PUT', body: v });
+
+    const wantsLogin = v.create_login === 'yes';
+    const login = wantsLogin
+      ? { login_email: String(v.login_email || '').trim(),
+          login_password: String(v.login_password || ''),
+          must_change_password: v.must_change_password === 'yes' }
+      : {};
+    if (wantsLogin) {
+      if (!login.login_email) throw new Error('Give them an address to sign in with.');
+      if (login.login_password.length < 10)
+        throw new Error('A password must be at least 10 characters.');
+    }
+    /* The login fields are never sent as investor columns, whether or not one
+       was asked for — an unticked box must not write an empty password
+       anywhere. */
+    delete v.create_login; delete v.login_email;
+    delete v.login_password; delete v.must_change_password;
+
+    if (isNew) {
+      const made = await api('/investors', { method: 'POST', body: { ...v, ...login } });
+      toast(made.login_email ? `Investor created · signs in as ${made.login_email}`
+        : 'Investor created');
+    } else {
+      await api(`/investors/${inv.id}`, { method: 'PUT', body: v });
+      if (wantsLogin) {
+        await api(`/investors/${inv.id}/login`, { method: 'POST', body: login });
+        toast(`Investor updated · signs in as ${login.login_email}`);
+      } else {
+        toast('Investor updated');
+      }
+    }
     state.investors = await api('/investors');
-    toast(isNew ? 'Investor created' : 'Investor updated');
   }, isNew ? 'Create investor' : 'Save');
+
+  /* The fields appear only once somebody asks for a login, so the form is not
+     a wall of password boxes for the ordinary case of adding a record. */
+  const loginBox = $('#wantLogin', dlg);
+  loginBox?.addEventListener('change', () => {
+    const fields = $('#loginFields', dlg);
+    fields.style.display = loginBox.checked ? '' : 'none';
+    if (!loginBox.checked) return;
+    /* Start from the address already typed above. Somebody filling this in
+       has just written where to reach them, and asking for it twice is how
+       the two end up different. */
+    const signIn = $('input[name=login_email]', dlg);
+    if (!signIn.value.trim()) signIn.value = $('input[name=email]', dlg)?.value.trim() || '';
+    (signIn.value.trim() ? $('input[name=login_password]', dlg) : signIn).focus();
+  });
+  $('#suggestPw', dlg)?.addEventListener('click', () => {
+    $('input[name=login_password]', dlg).value = suggestPassword();
+  });
 
   $('#revealInvTax', dlg)?.addEventListener('click', async (e) => {
     e.preventDefault();
@@ -6977,6 +7168,14 @@ async function render({ soft = false } = {}) {
     }
     app.innerHTML = loginView();
     wireLogin();
+    return;
+  }
+
+  /* Before any of the application: an account whose password was set by
+     somebody else has exactly one thing it may do. */
+  if (state.user.must_change_password) {
+    app.innerHTML = firstPasswordView();
+    wireFirstPassword();
     return;
   }
 

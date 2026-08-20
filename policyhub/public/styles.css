@@ -1081,8 +1081,16 @@ dialog.wide { width: 760px; }
 .doc-break { border-top: 1px dashed var(--grid); margin: 30px 0 22px; }
 
 .dlg-list { margin: 6px 0 14px 20px; font-size: 13.5px; line-height: 1.7; }
-.dlg-check { display: flex; gap: 9px; align-items: flex-start; margin: 12px 0 14px; font-size: 13px; }
-.dlg-check input { margin-top: 3px; }
+/* A sentence beside a tick box, not a form label — so it opts out of the
+   uppercase mono micro-label treatment the dialogs use for field names, and
+   the box keeps its own size rather than stretching like a text input. */
+.dlg-check {
+  display: flex; gap: 9px; align-items: flex-start; margin: 12px 0 14px;
+  font-family: inherit; font-size: 13px; font-weight: 400; line-height: 1.5;
+  text-transform: none; letter-spacing: 0; color: var(--text-primary);
+}
+.dlg-check input[type=checkbox] { flex: none; width: 15px; height: 15px; margin: 2px 0 0; }
+.dlg-check > span { flex: 1; min-width: 0; }
 
 .party-row input, .party-row select { width: 100%; }
 
