@@ -2648,7 +2648,7 @@ router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res
      saying so is better than inventing an amount from a stale field. */
   const { rows: posted } = await q(
     `SELECT pl.id AS policy_id, pl.policy_number, pl.carrier_name,
-            COALESCE(pl.display_name,
+            COALESCE(NULLIF(pl.display_name, ''),
                      TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
               AS insured_name,
             r.due_date, r.amount, pl.fund_id, r.note
@@ -3030,7 +3030,7 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
     const policyIds = [...new Set(items.map((i) => int(i.policy_id)).filter(Boolean))];
     const { rows: allowed } = await q(
       `SELECT pl.id, pl.policy_number, pl.carrier_name,
-              COALESCE(pl.display_name,
+              COALESCE(NULLIF(pl.display_name, ''),
                        TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
                 AS insured_name
          FROM policy_latest pl
@@ -3995,7 +3995,7 @@ async function matchStreamPolicy(req, policyNumber) {
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.status, pl.fund_code,
             pl.face_amount,
-            COALESCE(pl.display_name,
+            COALESCE(NULLIF(pl.display_name, ''),
                      TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
               AS insured_name
        FROM policy_latest pl
@@ -4102,7 +4102,7 @@ router.get('/premium-streams', blockInvestors, adminOrManager, wrap(async (req, 
             s.source, s.note, s.uploaded_at, u.full_name AS uploaded_by,
             pl.policy_number AS on_policy_number, pl.carrier_name AS on_carrier,
             pl.fund_code,
-            COALESCE(pl.display_name,
+            COALESCE(NULLIF(pl.display_name, ''),
                      TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
               AS on_insured,
             (SELECT COUNT(*)::int FROM premium_stream_rows r WHERE r.stream_id = s.id) AS payments,
@@ -4124,7 +4124,7 @@ router.get('/premium-streams/:id', blockInvestors, adminOrManager, wrap(async (r
   const { rows } = await q(
     `SELECT s.*, u.full_name AS uploaded_by_name, pl.fund_code,
             pl.policy_number AS on_policy_number,
-            COALESCE(pl.display_name,
+            COALESCE(NULLIF(pl.display_name, ''),
                      TRIM(COALESCE(pl.insured_first,'') || ' ' || COALESCE(pl.insured_last,'')))
               AS on_insured
        FROM premium_streams s

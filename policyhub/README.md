@@ -985,8 +985,16 @@ smallest premium stream that keeps a policy in force to maturity, and sends back
 a workbook: a header block naming the policy, then one row per month until the
 maturity date, then a note on the reasoning.
 
-**Servicing → Premium optimization** is where those land. Administrators and
-managers only; the tab does not exist for anybody else.
+**Servicing → Premium optimization** is where those land, and the same material
+appears on each policy's own **Servicing** tab — which is where somebody
+actually is when they are deciding what to schedule. Administrators and managers
+only; neither exists for anybody else.
+
+**Drag the workbook onto the policy** and it is filed there. The card on the
+policy, and each policy's card on the Servicing screen, is a drop target;
+dropping opens the confirm step with the file already read. Clicking works the
+same way for anyone who would rather. Dropped onto a policy the file does not
+name, it says so and lets you decide.
 
 Upload the workbook as it arrived (`.xlsx`) or a CSV of it. The header block is
 found **by its labels rather than by cell position**, so a file with the block a

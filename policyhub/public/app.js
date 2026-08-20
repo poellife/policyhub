@@ -1565,6 +1565,10 @@ async function policyView() {
   const values = [...p.values].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
   // Only fetched when the tab is open — it replays the whole ledger.
   const irrData = detailTab === 'return' ? await api(`/policies/${p.id}/irr`) : null;
+  /* Same rule: only when the tab is open, and only for the people the
+     Premium optimization screen exists for at all. */
+  const streams = detailTab === 'servicing' && mayOptimize()
+    ? await api(`/premium-streams?policy_id=${p.id}`).catch(() => []) : null;
   const age = ageFrom(p.insured_dob);
   const coi = Number(p.cost_of_insurance) || 0;
   const av = Number(p.account_value) || 0;
@@ -1653,7 +1657,7 @@ async function policyView() {
       ${tabs.map(([k, label]) =>
         `<button data-tab="${k}" class="${detailTab === k ? 'active' : ''}">${label}</button>`).join('')}
     </div>
-    <div id="tabBody">${renderDetailTab(p, values, monthsCovered, irrData)}</div>`;
+    <div id="tabBody">${renderDetailTab(p, values, monthsCovered, irrData, streams)}</div>`;
 
   return {
     html,
@@ -1672,11 +1676,11 @@ async function policyView() {
   };
 }
 
-function renderDetailTab(p, values, monthsCovered, irrData) {
+function renderDetailTab(p, values, monthsCovered, irrData, streams) {
   if (detailTab === 'values') return isInvestorUser() ? overviewTab(p) : valuesTab(p, values);
   if (detailTab === 'transactions') return transactionsTab(p);
   if (detailTab === 'return') return returnTab(p, irrData);
-  if (detailTab === 'servicing') return servicingTab(p, monthsCovered);
+  if (detailTab === 'servicing') return servicingTab(p, monthsCovered, streams);
   return overviewTab(p, values);
 }
 
@@ -2002,7 +2006,7 @@ function nextPremium(p) {
   return options[0] || null;
 }
 
-function servicingTab(p, monthsCovered) {
+function servicingTab(p, monthsCovered, streams) {
   /* An investor gets the dates and what their share of each will cost, and
      nothing else. Lapse risk, stale carrier data and the follow-up work are
      the manager's job; an investor reading "account value covers 2.4 months"
@@ -2116,7 +2120,82 @@ function servicingTab(p, monthsCovered) {
         <div style="margin-top:10px">${done.map((r) => stepRow(r)).join('')}</div>
         </details></div>` : ''}
     </div>
+  </div>
+
+  ${streams === null ? '' : premiumOptimizationCard(p, streams)}`;
+}
+
+/**
+ * The premium optimizations filed against this policy, on the policy.
+ *
+ * The same material as the Servicing → Premium optimization screen, in
+ * the place somebody actually reaches for it: they are deciding what to
+ * schedule on THIS policy, and the servicing firm's stream is the thing
+ * they are deciding against. The whole card takes a dropped workbook.
+ */
+function premiumOptimizationCard(p, streams) {
+  const label = p.policy_number || 'this policy';
+  return `
+  <div class="card" id="policyStreams" data-drop-policy="${p.id}"
+       data-drop-label="${esc(label)}" style="margin-top:16px">
+    <div class="card-head"><h2>Premium optimization</h2>
+      <span class="muted" style="font-size:12px;margin-left:10px">reference · not a bill</span>
+      <div class="spacer"></div>
+      <button class="btn-sm primary" id="policyStreamUpload">Upload one</button>
+    </div>
+    ${!streams.length ? `
+    <div class="card-body">
+      <div class="dropzone" id="policyStreamDrop" style="padding:26px 18px">
+        <div style="font-weight:600;margin-bottom:4px">Drop a premium optimization here,
+          or click to choose</div>
+        <div class="muted" style="font-size:12.5px">The workbook a servicing firm sends back —
+          the smallest premiums that keep this policy in force. It is read and shown back
+          before anything is saved, and it changes nothing about what is due.</div>
+        <input type="file" id="policyStreamFile" accept=".xlsx,.xls,.csv" style="display:none">
+      </div>
+    </div>` : `
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Uploaded</th><th>Stream</th><th>Covers</th>
+        <th class="num">Payments</th><th class="num">Next 12 months</th>
+        <th>From the file</th><th></th></tr></thead>
+      <tbody>${streams.map((s, i) => `<tr>
+        <td class="${i === 0 ? 'strong' : 'muted'}">${fmtDate(s.uploaded_at)}${
+          i === 0 && streams.length > 1 ? ' <span class="badge">latest</span>' : ''}</td>
+        <td class="strong">${esc(s.premium_type || 'not stated')}</td>
+        <td class="secondary">${fmtDate(s.first_due)} — ${fmtDate(s.last_due)}</td>
+        <td class="num">${s.payments}</td>
+        <td class="num strong">${fmtExact(s.next_12mo)}</td>
+        <td class="secondary">${esc(s.file_name || '')}${s.uploaded_by
+          ? ` <span class="muted">· ${esc(s.uploaded_by)}</span>` : ''}</td>
+        <td style="white-space:nowrap">
+          <button class="btn-sm" data-stream="${s.id}">Open</button>
+          <button class="btn-sm danger" data-drop-stream="${s.id}">Remove</button></td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    ${streams[0].comments ? `<div class="card-body" style="border-top:1px solid var(--grid)">
+      <span class="muted" style="font-size:12.5px;line-height:1.6">
+        <strong>From the servicing firm:</strong> ${esc(streams[0].comments)}</span></div>` : ''}`}
   </div>`;
+}
+
+/** Wiring shared by the policy card and the Servicing screen's list. */
+function wireStreamRows(root = document) {
+  const guard = (el, fn) => el.addEventListener('click', async (e) => {
+    try { await fn(e); } catch (err) { alert(err?.message || 'That did not work.'); }
+  });
+  root.querySelectorAll('[data-stream]').forEach((b) =>
+    guard(b, () => openStreamDialog(Number(b.dataset.stream))));
+  root.querySelectorAll('[data-drop-stream]').forEach((b) =>
+    guard(b, async () => {
+      if (!confirm('Remove this premium optimization? The file is not kept — you would '
+        + 'have to upload it again.')) return;
+      await api(`/premium-streams/${b.dataset.dropStream}`, { method: 'DELETE' });
+      toast('Removed');
+      render();
+    }));
+  root.querySelectorAll('[data-drop-policy]').forEach((card) =>
+    dropOpensUpload(card, { policyId: Number(card.dataset.dropPolicy),
+      policyLabel: card.dataset.dropLabel }));
 }
 
 /**
@@ -2506,6 +2585,16 @@ function wireDetailTab(p, values, irrData) {
         toast('Removed from the schedule');
         render();
       }));
+
+    /* The premium optimizations filed against this policy. The card takes a
+       dropped workbook anywhere on it, and the upload is bound to THIS
+       policy rather than to whatever number the file happens to carry. */
+    const label = p.policy_number || 'this policy';
+    onClick('#policyStreamUpload',
+      () => openStreamUploadDialog({ policyId: p.id, policyLabel: label }));
+    attachDropZone($('#policyStreamDrop'), $('#policyStreamFile'),
+      (f) => openStreamUploadDialog({ policyId: p.id, policyLabel: label, file: f }));
+    wireStreamRows();
   }
 }
 
@@ -3168,14 +3257,20 @@ async function premiumOptimizationView() {
     </div>
 
     ${!streams.length ? `
-    <div class="card"><div class="card-body">
-      <div class="empty">Nothing uploaded yet. A premium optimization is the workbook a
-        servicing firm sends back — a header naming the policy, then a dated table of
-        premiums running to maturity. Both .xlsx and .csv are read.</div>
+    <div class="card" id="streamEmptyDrop"><div class="card-body">
+      <div class="dropzone" id="streamPageDrop" style="padding:34px 20px">
+        <div style="font-weight:600;margin-bottom:4px">Drop a premium optimization here,
+          or click to choose</div>
+        <div class="muted" style="font-size:12.5px">The workbook a servicing firm sends back —
+          a header naming the policy, then a dated table of premiums running to maturity.
+          Both .xlsx and .csv are read, and the policy is matched by the number in the file.</div>
+        <input type="file" id="streamPageFile" accept=".xlsx,.xls,.csv" style="display:none">
+      </div>
     </div></div>` : [...byPolicy.entries()].map(([policyId, list]) => {
       const top = list[0];
       return `
-      <div class="card">
+      <div class="card" data-drop-policy="${policyId}"
+           data-drop-label="${esc(top.on_policy_number || '')}">
         <div class="card-head">
           <h2>${esc(top.on_insured || top.insured_name || 'Unnamed')}</h2>
           <span class="muted" style="font-size:12px;margin-left:10px">${
@@ -3213,21 +3308,14 @@ async function premiumOptimizationView() {
     after: () => {
       wireServicingTabs();
       onClick('#uploadStreamBtn', () => openStreamUploadDialog());
+      /* Drop a workbook on the card for a policy and it is filed against
+         that policy; drop it on the empty page and the number in the file
+         decides. Either way the reading and the confirm still happen. */
+      wireStreamRows();
+      attachDropZone($('#streamPageDrop'), $('#streamPageFile'),
+        (f) => openStreamUploadDialog({ file: f }));
       document.querySelectorAll('[data-open-policy]').forEach((b) =>
         b.addEventListener('click', () => go(`#/policy/${b.dataset.openPolicy}`)));
-      const guard = (el, fn) => el.addEventListener('click', async (e) => {
-        try { await fn(e); } catch (err) { alert(err?.message || 'That did not work.'); }
-      });
-      document.querySelectorAll('[data-stream]').forEach((b) =>
-        guard(b, () => openStreamDialog(Number(b.dataset.stream))));
-      document.querySelectorAll('[data-drop-stream]').forEach((b) =>
-        guard(b, async () => {
-          if (!confirm('Remove this premium optimization? The file is not kept — you would '
-            + 'have to upload it again.')) return;
-          await api(`/premium-streams/${b.dataset.dropStream}`, { method: 'DELETE' });
-          toast('Removed');
-          render();
-        }));
     },
   };
 }
@@ -3308,6 +3396,63 @@ async function openStreamDialog(id) {
 }
 
 /**
+ * A drop target that is also a click target.
+ *
+ * Dragging a file onto the thing it belongs to is how everybody expects
+ * this to work, and clicking is how everybody who has just been handed a
+ * file dialog expects it to work. Both, on the same element, everywhere
+ * one of these appears.
+ */
+function attachDropZone(zone, input, onFile) {
+  if (!zone) return;
+  zone.addEventListener('click', () => input?.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('over');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) onFile(file);
+  });
+  input?.addEventListener('change', () => {
+    const file = input.files?.[0];
+    /* Clearing it means choosing the SAME file again still fires, which
+       matters when somebody fixes the spreadsheet and tries once more. */
+    input.value = '';
+    if (file) onFile(file);
+  });
+}
+
+/**
+ * A card that accepts a dropped file even though the drop zone is not
+ * visible on it — the whole card is the target.
+ *
+ * Used on the policy's Servicing tab and on the Premium optimization
+ * list: the natural gesture is to drag the workbook onto the policy it
+ * is about, not to go looking for a button first.
+ */
+function dropOpensUpload(el, opts = {}) {
+  if (!el) return;
+  const on = (e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    el.classList.add('drop-target');
+  };
+  el.addEventListener('dragover', on);
+  el.addEventListener('dragenter', on);
+  el.addEventListener('dragleave', (e) => {
+    if (!el.contains(e.relatedTarget)) el.classList.remove('drop-target');
+  });
+  el.addEventListener('drop', (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    el.classList.remove('drop-target');
+    if (!file) return;
+    e.preventDefault();
+    openStreamUploadDialog({ ...opts, file });
+  });
+}
+
+/**
  * Upload one.
  *
  * Two steps on purpose. A premium optimization is a document about ONE
@@ -3315,8 +3460,12 @@ async function openStreamDialog(id) {
  * numbers in front of whoever is deciding what to fund — so the file is
  * read first, and what it says is shown back with the policy it matched
  * before anything is written.
+ *
+ * Opened from a policy's Servicing tab, the destination is that policy
+ * and the reading still happens — if the file names a different policy,
+ * that is said plainly rather than quietly overridden.
  */
-function openStreamUploadDialog() {
+function openStreamUploadDialog({ policyId = null, policyLabel = '', file: dropped = null } = {}) {
   let read = null;
   let file = null;
   /* Only fetched when the number in the file matches nothing — which is the
@@ -3326,7 +3475,8 @@ function openStreamUploadDialog() {
   const summary = () => {
     if (!read) return '';
     const h = read.header;
-    const bad = !read.matched;
+    const onThisPolicy = policyId && read.match?.id === Number(policyId);
+    const wrongPolicy = policyId && !onThisPolicy;
     return `
       <div class="dlg-section">What the file says</div>
       <dl class="kv">
@@ -3342,7 +3492,16 @@ function openStreamUploadDialog() {
         ${read.problems.length} row${read.problems.length === 1 ? '' : 's'} could not be read
         and ${read.problems.length === 1 ? 'was' : 'were'} left out — usually a total or a
         footnote. First: ${esc(read.problems[0].text)}</div>` : ''}
-      ${bad ? `<div class="error-box" style="margin-top:10px">
+      ${policyId ? `
+        <input type="hidden" name="policy_id" value="${policyId}">
+        ${wrongPolicy ? `<div class="error-box" style="margin-top:10px">
+          This file names <strong>${esc(h.policy_number || '(no policy number)')}</strong>, which
+          is not ${esc(policyLabel || 'this policy')}. It will still be filed here — check it is
+          the right file before you do.</div>`
+        : `<div class="notice-box" style="margin-top:10px">
+          Filed against <strong>${esc(policyLabel || 'this policy')}</strong>, which is the policy
+          the file names.</div>`}`
+      : !read.matched ? `<div class="error-box" style="margin-top:10px">
         ${read.ambiguous
           ? 'More than one policy carries that number, so this cannot be filed automatically.'
           : `No policy of yours has the number ${esc(h.policy_number || '(none given)')}.`}
@@ -3354,35 +3513,39 @@ function openStreamUploadDialog() {
               esc(p.policy_number)} — ${esc(p.display_name
                 || `${p.insured_first || ''} ${p.insured_last || ''}`.trim())}</option>`).join('')}
           </select></div>`
-        : `<div class="notice-box" style="margin-top:10px">
+      : `<div class="notice-box" style="margin-top:10px">
         Matches <strong>${esc(read.match.policy_number)}</strong> —
         ${esc(read.match.insured_name || '')}${read.match.fund_code
           ? ` · ${esc(read.match.fund_code)}` : ''}. It will be filed against that policy.
         <input type="hidden" name="policy_id" value="${read.match.id}"></div>`}`;
   };
 
-  const dlg = openDialog('Upload a premium optimization', `
+  const dlg = openDialog(policyLabel
+    ? `Premium optimization for ${policyLabel}` : 'Upload a premium optimization', `
     <div class="field">
       <label>File *</label>
-      <input type="file" name="file" required accept=".xlsx,.xls,.csv">
-      <span class="muted" style="font-size:12px">The workbook as it arrived, or a CSV of it.
-        Up to 15 MB.</span>
+      <div class="dropzone" id="streamDrop" style="padding:26px 18px">
+        <div style="font-weight:600;margin-bottom:4px" id="streamDropName">
+          Drop the workbook here, or click to choose</div>
+        <div class="muted" style="font-size:12.5px">The file as it arrived from the servicing
+          firm — .xlsx or .csv, up to 15 MB.</div>
+        <input type="file" id="streamFile" accept=".xlsx,.xls,.csv" style="display:none">
+      </div>
     </div>
     ${inputField('Who produced it', 'source', '', 'text',
       'placeholder="e.g. ITM TwentyFirst"')}
     <div class="field"><label>Note</label>
       <input name="note" type="text" placeholder="Optional — why this one, what changed"></div>
-    <div id="streamSummary"><div class="empty">Choose a file and it will be read here
-      before anything is saved.</div></div>
+    <div id="streamSummary"></div>
   `, async (v) => {
     if (!file) throw new Error('Choose a file.');
     if (!read) throw new Error('Wait for the file to be read.');
-    const policyId = $('#streamPolicy', dlg)?.value
+    const target = $('#streamPolicy', dlg)?.value
       || dlg.querySelector('input[name=policy_id]')?.value;
-    if (!policyId) throw new Error('Choose the policy this belongs to.');
+    if (!target) throw new Error('Choose the policy this belongs to.');
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('policy_id', policyId);
+    fd.append('policy_id', target);
     fd.append('source', v.source || '');
     fd.append('note', v.note || '');
     const res = await fetch('/api/premium-streams', { method: 'POST', body: fd,
@@ -3397,26 +3560,29 @@ function openStreamUploadDialog() {
     render();
   }, 'File it');
 
-  const input = dlg.querySelector('input[type=file]');
-  input.addEventListener('change', async () => {
-    file = input.files?.[0] || null;
+  const readChosen = async (chosen) => {
+    file = chosen;
     read = null;
-    if (!file) { $('#streamSummary', dlg).innerHTML = ''; return; }
+    $('#streamDropName', dlg).textContent = chosen.name;
     $('#streamSummary', dlg).innerHTML = '<div class="empty"><span class="spin"></span></div>';
     try {
       const fd = new FormData();
-      fd.append('file', file);
+      fd.append('file', chosen);
       const res = await fetch('/api/premium-streams/preview', { method: 'POST', body: fd,
         credentials: 'same-origin' });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error || 'That file could not be read.');
       read = body;
-      if (!read.matched) pickable = await api('/policies').catch(() => []);
+      if (!policyId && !read.matched) pickable = await api('/policies').catch(() => []);
       $('#streamSummary', dlg).innerHTML = summary();
     } catch (err) {
       $('#streamSummary', dlg).innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
     }
-  });
+  };
+
+  attachDropZone($('#streamDrop', dlg), $('#streamFile', dlg), readChosen);
+  // Dropped onto a card rather than chosen here: read it straight away.
+  if (dropped) readChosen(dropped);
 }
 
 /* ----------------------------- servicing ----------------------------- */
