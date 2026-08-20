@@ -690,6 +690,36 @@ are absent from your own row. `scripts/user-admin-test.mjs` proves each of these
 against the API, holding a cookie issued *before* the change to confirm the
 immediacy.
 
+## Deleting an investor
+
+An administrator can, and it is deliberately not the same act as deleting a
+policy. A policy is a thing the firm owns; an investor is somebody it has a
+relationship with, who may have a signature on an executed document and money
+in an account.
+
+The **footprint** is shown first — positions and the capital on them, the
+portal login, capital call lines, opportunity requests, documents, draft
+agreements — so nobody deletes a name and discovers afterwards what went with
+it. Then:
+
+- **Nothing attached** — it goes, no ceremony. A record with an empty
+  footprint is a typo somebody is tidying up, and making them type a name to
+  remove it teaches people to type names without reading them.
+- **Something attached** — the name has to be typed. Their positions go with
+  them (the policies stay; that share simply becomes unallocated) and so does
+  their **login**: an investor account attached to nobody could still sign in,
+  which is worse than no account.
+- **Something that would be rewritten** — refused. An investor who has signed
+  an agreement that went out, or paid a capital call that was confirmed, cannot
+  be deleted at any confirmation. A signature that disappears from an executed
+  document, or money that arrives from nobody, is not a tidy-up; it is a
+  different set of facts.
+
+For that last case the answer offered is **Make inactive**, which is on the
+investor's page beside Delete: every figure and every signature stays exactly
+where it is, and they drop off the lists. It is an administrator's switch, like
+the owner entity.
+
 ## Opportunities
 
 A place to introduce a policy to investors before anybody owns it.
@@ -1235,6 +1265,31 @@ choose: *your registration was received*, *your registration was approved* and
 possibly have expressed a preference about them. A tick box for a message that
 has already gone is theatre.
 
+### Calling capital
+
+A capital call can be raised for either of the two things investors are asked
+for money for, and the notice says which:
+
+- **Premiums falling due** — everything inside a window, split by who holds
+  each policy.
+- **Buying a policy** — the asking price of a deal, split by what each
+  investor has been **confirmed** for. An acquisition has no cap table to
+  read, because nobody owns the thing yet, so the split comes from the
+  confirmed commitments. Somebody who has *asked* for a piece but not been
+  confirmed is listed separately and not called: a request is not an
+  allocation, and asking somebody for money against a share nobody granted
+  them is how a call becomes an argument.
+
+**Who gets asked is a choice.** Every investor the split produces is listed
+with their figure and a tick, and unticking somebody drops them from the call.
+Their share is *not* moved onto the others — nobody is ever asked for a
+percentage they did not agree to — so the total simply falls, and the dialog
+says how much is not being called.
+
+Not paying a premium call and not paying an acquisition call have very
+different consequences, which is why the two are labelled rather than left for
+the investor to work out.
+
 ### Setting it up
 
 Four environment variables, and the deployment runs without them — messages
@@ -1243,7 +1298,7 @@ queue and wait rather than the service failing to start:
 | Variable | What it is |
 |---|---|
 | `RESEND_API_KEY` | The provider key. Without it the worker does not start. |
-| `MAIL_FROM` | `Poel Capital Policy Portal <notices@yourdomain.com>` — must be a **verified** domain, or everything bounces. The display name is the firm, not the software: nobody outside this repository has heard of PolicyHub, and a message from a name the recipient does not recognise is one they are right to distrust. |
+| `MAIL_FROM` | `Poel Capital Portal <notices@yourdomain.com>` — must be a **verified** domain, or everything bounces. The display name is the firm, not the software: nobody outside this repository has heard of PolicyHub, and a message from a name the recipient does not recognise is one they are right to distrust. The application says so on Settings → The post if the name is still the software's. |
 | `APP_URL` | Where the links point — **your portal's real address**. A placeholder left here is invisible until an investor clicks it and lands nowhere, so the application says so at startup and on Settings → The post. |
 | `MAIL_REPLY_TO` | Optional, where a reply goes if not the sending address. |
 
@@ -1410,8 +1465,9 @@ reach those rules correctly.
 | `hardening-test.mjs` | session revocation, middleware ordering, import limits, CSV escaping, error opacity, throttling, headers |
 | `replace-ledger-test.mjs` | re-baselining a ledger from a file, that it touches only the policies named, and who may do it |
 | `carry-test.mjs` | the ten per cent: arithmetic by hand, no carry on a loss, no netting between cases, and that nothing in the portal names it |
-| `capital-call-test.mjs` | what would be asked before it is, that a raised call stops moving, that a claim is not a receipt, and that an investor sees their own line and nobody else's |
+| `capital-call-test.mjs` | both kinds of call — premiums and an acquisition — what would be asked before it is, that a raised call stops moving, that a claim is not a receipt, and that an investor sees their own line and nobody else's |
 | `mail-test.mjs` | the outbox: that queueing never throws, that failures are retried and then given up on, that a switched-off kind is not sent and a security alert is anyway, and that no password, tax number or insured's name survives a template |
+| `investor-delete-test.mjs` | who may delete an investor, what goes with them, that the login goes too, and that a signature on an executed agreement makes it a refusal rather than a confirmation |
 | `investor-login-test.mjs` | opening a login with the record: that it only ever makes an investor account, who may do it, and that a staff-set password opens nothing until it is replaced |
 | `investor-login-ui-test.mjs` | the form not leading with passwords, the suggestion, and where an investor's first sign-in lands |
 | `search-ui-test.mjs` | typing slowly without losing the caret, typing through a slow answer, a late answer not winning, and one request per search |

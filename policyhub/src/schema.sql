@@ -1017,3 +1017,13 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, kind)
 );
+
+/* What a capital call is FOR.
+   Premiums keep a policy alive; an acquisition buys one. They are asked for
+   the same way and answered the same way, but a notice that does not say
+   which is which leaves the investor to guess, and the two have very
+   different consequences for not paying. */
+ALTER TABLE capital_calls ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'Premiums';
+ALTER TABLE capital_call_items ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'Premium';
+ALTER TABLE capital_call_items ADD COLUMN IF NOT EXISTS opportunity_id INTEGER
+  REFERENCES opportunities(id) ON DELETE SET NULL;

@@ -27,11 +27,30 @@ const KEY = () => process.env.RESEND_API_KEY || '';
    and a message from a name the recipient does not recognise is a message
    they are right to distrust. */
 const FROM = () => process.env.MAIL_FROM
-  || 'Poel Capital Policy Portal <notices@poelcapital.com>';
+  || 'Poel Capital Portal <notices@poelcapital.com>';
 const APP = () => String(process.env.APP_URL || '').replace(/\/+$/, '');
 
 /* A link nobody can follow is worse than no link: it reads as a broken
    product rather than a missing setting. Said once, loudly, at startup. */
+/**
+ * The name on the envelope, checked.
+ *
+ * The address is the provider's business — an unverified domain bounces and
+ * says so. The DISPLAY NAME is nobody's business but ours, and it is the one
+ * thing every recipient reads before deciding whether the message is real.
+ * It has to be the firm. A name only this repository has heard of is a name
+ * an investor is right to distrust.
+ */
+export function mailFromProblem() {
+  const from = FROM();
+  if (/policy\s*hub/i.test(from))
+    return `Messages are going out as "${from}". MAIL_FROM still names the software rather `
+      + 'than the firm — set the display name to Poel Capital Portal.';
+  if (!/</.test(from))
+    return `MAIL_FROM (${from}) has no display name, so messages arrive from a bare address.`;
+  return null;
+}
+
 export function appUrlProblem() {
   const url = APP();
   if (!url) return 'APP_URL is not set, so messages will not carry a link at all.';
@@ -232,8 +251,8 @@ const pendingCount = async () => Number(
 
 /** The worker. Started by the server; stopped by returning the handle. */
 export function startMailWorker({ everyMs = 60_000 } = {}) {
-  const bad = appUrlProblem();
-  if (bad) console.warn(`[mail] ${bad}`);
+  for (const bad of [appUrlProblem(), mailFromProblem()])
+    if (bad) console.warn(`[mail] ${bad}`);
   if (!mailReady()) {
     console.warn('[mail] RESEND_API_KEY is not set — messages will queue and wait.');
     return null;
@@ -340,11 +359,17 @@ export const TEMPLATES = {
       + `\n\n${link()}`,
   }),
 
-  capital_call: ({ name, amount, due, title, policies, note }) => ({
+  capital_call: ({ name, amount, due, title, policies, note, purpose }) => ({
     subject: `Capital call — ${amount} by ${due}`,
     text: `${name ? `${name},\n\n` : ''}${title}.\n\n`
       + `Your share is ${amount}, and it needs to be in the account by ${due}.\n\n`
-      + `It covers ${policies} premium${policies === 1 ? '' : 's'} falling due. The policies `
+      /* What the money is for. Premiums keep a policy alive; an acquisition
+         buys one. Not paying has very different consequences, and an investor
+         should not have to work out which this is. */
+      + (purpose === 'Acquisition'
+        ? `It is for the purchase of ${policies === 1 ? 'a policy' : `${policies} policies`} `
+          + `you have been confirmed for. The terms `
+        : `It covers ${policies} premium${policies === 1 ? '' : 's'} falling due. The policies `)
       + `and the dates are under Premiums when you sign in, and so is the button to tell `
       + `us once you have sent it. ${link()}\n\n`
       + (note ? `${note}\n\n` : '')

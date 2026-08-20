@@ -8,8 +8,8 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
-import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem }
-  from './mail.js';
+import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
+  mailFromProblem } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -751,6 +751,7 @@ router.get('/mail/health', authenticate, blockInvestors, requireRole('admin'),
          investor clicks it and lands nowhere. */
       link: process.env.APP_URL || null,
       link_problem: appUrlProblem(),
+      from_problem: mailFromProblem(),
       counts: Object.fromEntries(rows.map((r) => [r.status, r.n])),
       latest: rows.reduce((d, r) => (!d || r.latest > d ? r.latest : d), null),
       failures: stuck,
@@ -2530,6 +2531,82 @@ const callVisible = async (req, id) => {
  * Nothing is written — this is what the form shows before anybody commits
  * to sending it.
  */
+/**
+ * Money for buying a policy, rather than for keeping one alive.
+ *
+ * An acquisition is the other half of this. The figures come from the
+ * opportunity — its asking price, and the percentages investors have
+ * actually been confirmed for — because those are the numbers everybody
+ * has already agreed to. Requests that have not been confirmed are left
+ * out: asking somebody for money against a share nobody has granted them
+ * is how a request becomes an argument.
+ */
+router.get('/capital-calls/draft/acquisition', blockInvestors, canEdit, wrap(async (req, res) => {
+  const oppId = int(req.query.opportunity_id);
+  if (!oppId) {
+    /* Nothing chosen yet: what there is to choose from. Anything still open
+       with a price on it and somebody confirmed against it. */
+    const funds = oppFundScope(req);
+    const { rows } = await q(
+      `SELECT o.id, o.policy_number, o.carrier_name, o.face_amount, o.asking_price,
+              o.insured_first_name, o.insured_last_name, o.expected_close, o.status,
+              f.code AS fund_code,
+              COALESCE((SELECT SUM(c.pct) FROM opportunity_commitments c
+                         WHERE c.opportunity_id = o.id AND c.status = 'Confirmed'), 0)
+                AS confirmed_pct,
+              (SELECT COUNT(*)::int FROM opportunity_commitments c
+                WHERE c.opportunity_id = o.id AND c.status = 'Confirmed') AS parties
+         FROM opportunities o LEFT JOIN funds f ON f.id = o.fund_id
+        WHERE o.status IN ('Open','Closed')
+          AND COALESCE(o.asking_price, 0) > 0
+          AND ($1::int[] IS NULL OR o.fund_id = ANY($1))
+        ORDER BY o.expected_close NULLS LAST, o.id DESC`, [funds]);
+    return res.json({ opportunities: rows });
+  }
+
+  if (!(await oppVisible(req, oppId)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const { rows: found } = await q(
+    `SELECT o.*, f.code AS fund_code FROM opportunities o
+       LEFT JOIN funds f ON f.id = o.fund_id WHERE o.id = $1`, [oppId]);
+  const o = found[0];
+  const price = Number(o.asking_price) || 0;
+  if (!price)
+    return res.status(400).json({
+      error: 'That deal has no asking price on it, so there is no figure to call for.' });
+
+  const { rows: committed } = await q(
+    `SELECT c.investor_id, c.pct, c.status, i.name
+       FROM opportunity_commitments c JOIN investors i ON i.id = c.investor_id
+      WHERE c.opportunity_id = $1 AND c.status IN ('Confirmed','Requested')
+      ORDER BY c.status, i.name`, [oppId]);
+  const confirmed = committed.filter((c) => c.status === 'Confirmed');
+  const label = [[o.insured_last_name, o.insured_first_name].filter(Boolean).join(', ')
+    || o.policy_number || 'a policy', o.carrier_name].filter(Boolean).join(' · ');
+
+  res.json({
+    opportunity: { id: o.id, label, asking_price: price, fund_id: o.fund_id,
+                   fund_code: o.fund_code, policy_number: o.policy_number,
+                   carrier_name: o.carrier_name,
+                   insured_name: [o.insured_last_name, o.insured_first_name]
+                     .filter(Boolean).join(', ') },
+    items: [{ opportunity_id: o.id, kind: 'Acquisition', policy_number: o.policy_number,
+              carrier_name: o.carrier_name,
+              insured_name: [o.insured_last_name, o.insured_first_name].filter(Boolean).join(', '),
+              amount: price, due_date: o.expected_close || null }],
+    investors: confirmed.map((c) => ({ investor_id: c.investor_id, name: c.name,
+      pct: Number(c.pct), amount: price * Number(c.pct) / 100, policies: 1 })),
+    /* Named rather than folded in: a request is not an allocation, and the
+       person raising the call is the one who should decide whether to wait
+       for it or to call what has been confirmed. */
+    unconfirmed: committed.filter((c) => c.status === 'Requested')
+      .map((c) => ({ investor_id: c.investor_id, name: c.name, pct: Number(c.pct),
+                     amount: price * Number(c.pct) / 100 })),
+    total: price,
+    unallocated: price * Math.max(0, 100 - confirmed.reduce((n, c) => n + Number(c.pct), 0)) / 100,
+  });
+}));
+
 router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res) => {
   const days = Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 30));
   const fund = str(req.query.fund);
@@ -2661,7 +2738,28 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
       return res.status(400).json({ error: 'That date has already passed' });
     const items = Array.isArray(req.body.items) ? req.body.items : [];
     if (!items.length)
-      return res.status(400).json({ error: 'A call has to cover at least one premium' });
+      return res.status(400).json({ error: 'A call has to cover at least one thing' });
+
+    /* What it is for. Premiums keep a policy alive and an acquisition buys
+       one; not paying has very different consequences, so the notice says
+       which it is rather than leaving the investor to work it out. */
+    const purpose = ['Premiums', 'Acquisition', 'Other'].includes(str(req.body.purpose))
+      ? str(req.body.purpose) : 'Premiums';
+
+    /* Who to ask.
+     *
+     * Two things, kept apart on purpose. `lines` is what each investor owes,
+     * which for an acquisition comes from what they were confirmed for rather
+     * than from a cap table that does not exist yet. `investor_ids` is who to
+     * actually call — somebody excluded is simply not asked, and their share
+     * is NOT spread over the others: nobody is ever asked for a percentage
+     * they did not agree to. */
+    const chosen = Array.isArray(req.body.investor_ids)
+      ? new Set(req.body.investor_ids.map((n) => int(n)).filter(Boolean)) : null;
+    const given = Array.isArray(req.body.lines)
+      ? req.body.lines.map((l) => ({ investorId: int(l.investor_id), amount: num(l.amount) }))
+        .filter((l) => l.investorId && l.amount > 0)
+      : null;
 
     const fundId = int(req.body.fund_id);
     const scoped = fundScope(req);
@@ -2670,6 +2768,9 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
 
     /* Every policy named has to be one this person may see. Otherwise a call
        is a way to read a premium out of somebody else's book. */
+    /* An acquisition has no policy yet — it is an opportunity, and the
+       figures are the ones confirmed against it. So the policy check runs
+       over whatever policies WERE named, which for an acquisition is none. */
     const policyIds = [...new Set(items.map((i) => int(i.policy_id)).filter(Boolean))];
     const { rows: allowed } = await q(
       `SELECT pl.id, pl.policy_number, pl.carrier_name,
@@ -2691,17 +2792,37 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
     const rows = [];
     for (const raw of items) {
       const policyId = int(raw.policy_id);
+      const oppId = int(raw.opportunity_id);
       const amount = num(raw.amount);
-      if (!policyId || !amount || amount <= 0) continue;
-      const p = byId.get(policyId);
-      rows.push({ policyId, amount, due: date(raw.due_date),
-        number: p.policy_number, carrier: p.carrier_name, insured: p.insured_name,
+      if (!amount || amount <= 0) continue;
+      if (!policyId && !oppId) continue;
+      const p = policyId ? byId.get(policyId) : null;
+      rows.push({ policyId, oppId, amount, due: date(raw.due_date),
+        kind: policyId ? (str(raw.kind) || 'Premium') : 'Acquisition',
+        number: p ? p.policy_number : str(raw.policy_number),
+        carrier: p ? p.carrier_name : str(raw.carrier_name),
+        insured: p ? p.insured_name : str(raw.insured_name),
         note: str(raw.note) });
-      for (const h of holders.filter((x) => x.policy_id === policyId))
-        lines.set(h.investor_id,
-          (lines.get(h.investor_id) || 0) + amount * Number(h.pct) / 100);
+      /* Only a policy has a cap table to read. An acquisition's split has to
+         come with the request, because the thing being bought is not owned
+         by anybody yet. */
+      if (policyId && !given)
+        for (const h of holders.filter((x) => x.policy_id === policyId))
+          lines.set(h.investor_id,
+            (lines.get(h.investor_id) || 0) + amount * Number(h.pct) / 100);
     }
-    if (!rows.length) return res.status(400).json({ error: 'None of those premiums had an amount' });
+    if (!rows.length) return res.status(400).json({ error: 'None of those had an amount' });
+
+    if (given) {
+      lines.clear();
+      for (const l of given) lines.set(l.investorId, (lines.get(l.investorId) || 0) + l.amount);
+      const barred = await investorsOutOfScope(req, [...lines.keys()]);
+      if (barred.length)
+        return res.status(403).json({ error: 'One of those investors is not one of yours' });
+    }
+    /* Anybody deselected is dropped here, at the end, so the arithmetic above
+       never has to know about it. */
+    if (chosen) for (const id of [...lines.keys()]) if (!chosen.has(id)) lines.delete(id);
     if (!lines.size)
       return res.status(400).json({
         error: 'Nobody holds a share of those policies, so there is nobody to ask.' });
@@ -2712,19 +2833,23 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
       await client.query('BEGIN');
       const { rows: made } = await client.query(
         `INSERT INTO capital_calls (reference, title, fund_id, due_date, covers_from, covers_to,
-                                    note, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-        [str(req.body.reference), str(req.body.title) || 'Premium capital call', fundId, due,
+                                    note, created_by, purpose)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+        [str(req.body.reference),
+         str(req.body.title) || (purpose === 'Acquisition'
+           ? 'Capital call — acquisition' : 'Premium capital call'), fundId, due,
          rows.reduce((d, r) => (!d || (r.due && r.due < d) ? r.due : d), null),
          rows.reduce((d, r) => (!d || (r.due && r.due > d) ? r.due : d), null),
-         str(req.body.note), req.user.uid]);
+         str(req.body.note), req.user.uid, purpose]);
       callId = made[0].id;
       for (const r of rows)
         await client.query(
-          `INSERT INTO capital_call_items (call_id, policy_id, policy_number, carrier_name,
-                                           insured_name, due_date, amount, note)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [callId, r.policyId, r.number, r.carrier, r.insured, r.due, r.amount, r.note]);
+          `INSERT INTO capital_call_items (call_id, policy_id, opportunity_id, policy_number,
+                                           carrier_name, insured_name, due_date, amount, note,
+                                           kind)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [callId, r.policyId || null, r.oppId || null, r.number, r.carrier, r.insured,
+           r.due, r.amount, r.note, r.kind]);
       for (const [investorId, amount] of lines)
         await client.query(
           `INSERT INTO capital_call_lines (call_id, investor_id, amount) VALUES ($1,$2,$3)`,
@@ -2751,7 +2876,7 @@ router.post('/capital-calls', blockInvestors, requireRole('admin', 'manager'),
       const sent = await sendMail('capital_call', {
         to, userId: line.user_id || null, name: line.investor_name,
         amount: `$${Number(line.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
-        due, title: call.title,
+        due, title: call.title, purpose,
         policies: rows.length, note: call.note,
       });
       if (sent.id) told++;
@@ -3856,6 +3981,10 @@ const INVESTOR_FIELDS = {
   postal_code: str, country: str,
   // Whose client they are. Only an administrator may set it.
   fund_id: int,
+  /* Whether they are still a client. The softer answer to "delete this
+     investor": every figure and every signature stays exactly where it is,
+     and they drop off the lists. Administrators only, like the entity. */
+  is_active: (v) => v === true || v === 'true',
 };
 
 router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
@@ -3952,7 +4081,9 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
  */
 const adminOnlyInvestorFields = (req) => {
   if (req.user.role === 'admin') return req.body;
-  const { fund_id: _drop, ...rest } = req.body || {};
+  /* Whose client they are, and whether they are still a client at all: both
+     decide what other people can see, so both are an administrator's. */
+  const { fund_id: _fund, is_active: _active, ...rest } = req.body || {};
   return rest;
 };
 
@@ -4180,21 +4311,131 @@ router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   res.json(rows[0]);
 }));
 
-router.delete('/investors/:id', blockScoped, requireRole('admin'), wrap(async (req, res) => {
-  const [{ rows: pos }, { rows: usr }] = await Promise.all([
-    q('SELECT COUNT(*)::int AS n FROM policy_investors WHERE investor_id = $1', [req.params.id]),
-    q('SELECT COUNT(*)::int AS n FROM users WHERE investor_id = $1', [req.params.id]),
+/**
+ * Everything that would go with an investor, before anything does.
+ *
+ * Deleting a person is not like deleting a policy: a policy is a thing the
+ * firm owns, and an investor is somebody the firm has a relationship with,
+ * with a signature on a document and money in an account. So this counts it
+ * all first, and separates what is merely attached from what is a RECORD —
+ * an executed agreement they signed, or a capital call they actually paid.
+ * Those cannot be quietly taken out of the filing cabinet.
+ */
+async function investorFootprint(id) {
+  const one = async (sql, params = [id]) => Number((await q(sql, params)).rows[0].n);
+  const [positions, logins, calls, paidCalls, agreements, signedAgreements,
+         documents, applications, commitments, shares, granted] = await Promise.all([
+    one('SELECT COUNT(*)::int AS n FROM policy_investors WHERE investor_id = $1'),
+    one('SELECT COUNT(*)::int AS n FROM users WHERE investor_id = $1'),
+    one('SELECT COUNT(*)::int AS n FROM capital_call_lines WHERE investor_id = $1'),
+    one(`SELECT COUNT(*)::int AS n FROM capital_call_lines
+          WHERE investor_id = $1 AND confirmed_at IS NOT NULL`),
+    one('SELECT COUNT(*)::int AS n FROM agreement_signers WHERE investor_id = $1'),
+    one(`SELECT COUNT(*)::int AS n FROM agreement_signers s
+           JOIN agreements a ON a.id = s.agreement_id
+          WHERE s.investor_id = $1 AND s.signed_at IS NOT NULL
+            AND a.status IN ('Executed','Out for signature')`),
+    one('SELECT COUNT(*)::int AS n FROM documents WHERE investor_id = $1'),
+    one(`SELECT COUNT(*)::int AS n FROM investor_applications
+          WHERE lower(email) IN (SELECT lower(email) FROM investors WHERE id = $1)
+            AND email <> ''`),
+    one('SELECT COUNT(*)::int AS n FROM opportunity_commitments WHERE investor_id = $1'),
+    one('SELECT COUNT(*)::int AS n FROM opportunity_shares WHERE investor_id = $1'),
+    one('SELECT COUNT(*)::int AS n FROM user_investors WHERE investor_id = $1'),
   ]);
-  if (pos[0].n > 0)
+  const { rows: money } = await q(
+    `SELECT COALESCE(SUM(pl.total_invested * pi.pct / 100.0), 0) AS invested,
+            COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * pi.pct / 100.0), 0)
+              AS death_benefit
+       FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
+      WHERE pi.investor_id = $1`, [id]);
+  return {
+    positions, logins, calls, paid_calls: paidCalls, agreements,
+    signed_agreements: signedAgreements, documents, applications,
+    commitments, shares, granted,
+    invested: Number(money[0].invested), death_benefit: Number(money[0].death_benefit),
+    /* The two things that make this a records question rather than a tidying
+       one. Everything else can go; these mean the answer is "make them
+       inactive", which keeps every figure and every signature exactly where
+       it is. */
+    keeps_records: signedAgreements > 0 || paidCalls > 0,
+  };
+}
+
+router.get('/investors/:id/footprint', blockScoped, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { rows } = await q('SELECT id, name, is_active FROM investors WHERE id = $1',
+      [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
+    res.json({ ...rows[0], ...(await investorFootprint(req.params.id)) });
+  }));
+
+/**
+ * Delete one.
+ *
+ * An administrator may, and the name has to be typed — this takes their
+ * positions, their login, their share of any capital call and their place on
+ * any draft agreement with it. What it will not do is rewrite history: an
+ * investor who has signed an agreement that went out, or paid a capital call
+ * that was confirmed, is made INACTIVE instead. A signature that disappears
+ * from an executed document, or money that arrives from nobody, is worse
+ * than a name left on a list.
+ */
+router.delete('/investors/:id', blockScoped, requireRole('admin'), wrap(async (req, res) => {
+  const { rows: found } = await q('SELECT id, name FROM investors WHERE id = $1',
+    [req.params.id]);
+  if (!found[0]) return res.status(404).json({ error: 'Investor not found' });
+  const investor = found[0];
+  const foot = await investorFootprint(req.params.id);
+
+  if (foot.keeps_records)
     return res.status(409).json({
-      error: `This investor holds ${pos[0].n} position${pos[0].n === 1 ? '' : 's'}. Remove them first.` });
-  if (usr[0].n > 0)
-    return res.status(409).json({
-      error: 'A login is still attached to this investor. Remove the login first.' });
-  const { rows } = await q('DELETE FROM investors WHERE id = $1 RETURNING name', [req.params.id]);
-  if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
-  await audit(req.user.uid, 'investor', Number(req.params.id), 'delete', rows[0].name);
-  res.json({ ok: true });
+      error: `${investor.name} has ${[
+        foot.signed_agreements ? `signed ${foot.signed_agreements} agreement${
+          foot.signed_agreements === 1 ? '' : 's'}` : '',
+        foot.paid_calls ? `paid ${foot.paid_calls} capital call${
+          foot.paid_calls === 1 ? '' : 's'}` : '',
+      ].filter(Boolean).join(' and ')}. Deleting them would take a signature off an executed `
+        + 'document, or make money arrive from nobody. Make them inactive instead — every '
+        + 'figure and every signature stays exactly where it is, and they drop off the lists.',
+      footprint: foot,
+    });
+
+  /* The name, typed — but only when there is something to lose. An investor
+     record with nothing attached is a typo somebody is tidying up, and making
+     them type a name to remove an empty row is friction that teaches people
+     to type names without reading them. */
+  const attached = foot.positions + foot.logins + foot.calls + foot.agreements
+    + foot.documents + foot.commitments + foot.shares;
+  if (attached > 0 && str(req.body?.confirm) !== investor.name)
+    return res.status(400).json({
+      error: `Type ${investor.name} exactly to confirm.`,
+      confirm_phrase: investor.name,
+      footprint: foot,
+    });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    /* The login goes explicitly rather than by cascade: `users.investor_id`
+       is ON DELETE SET NULL, which would otherwise leave an investor account
+       signed in and attached to nobody — able to reach the portal and see
+       whatever an investor with no investor sees. */
+    await client.query('DELETE FROM users WHERE investor_id = $1', [req.params.id]);
+    await client.query('DELETE FROM investors WHERE id = $1', [req.params.id]);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  await audit(req.user.uid, 'investor', Number(req.params.id), 'delete',
+    `${investor.name} · ${foot.positions} position(s) · ${foot.logins} login(s) · `
+    + `${foot.documents} document(s) · ${foot.commitments} opportunity request(s) · `
+    + `$${Number(foot.invested).toLocaleString('en-US', { maximumFractionDigits: 2 })} invested`);
+  res.json({ ok: true, removed: foot });
 }));
 
 /* ---- allocations on a policy ---- */

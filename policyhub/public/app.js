@@ -3258,57 +3258,113 @@ async function servicingView() {
 async function openRaiseCallDialog() {
   const soon = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
   let draft = null;
+  let mode = 'premiums';
+  /* Who is actually going to be asked. Held here rather than read off the
+     boxes at submit time, so it survives switching between the two sources
+     and back — and so an investor deselected on purpose stays deselected. */
+  let excluded = new Set();
+
+  const people = () => (draft?.investors || []).filter((i) => !excluded.has(i.investor_id));
+  const asked = () => people().reduce((n, i) => n + i.amount, 0);
+
+  const investorList = (d) => {
+    if (!d.investors?.length) return `<div class="error-box">
+      ${mode === 'premiums'
+        ? 'Nobody holds a share of those policies, so there is nobody to ask. Set the cap table on each policy first.'
+        : 'Nobody has been confirmed for that deal yet. Confirm the requests on the opportunity first — a request is not an allocation, and asking somebody for money against a share nobody has granted them is how a call becomes an argument.'}
+    </div>`;
+    return `
+    <div class="dlg-section">Who gets asked</div>
+    <div class="dlg-scroll" style="max-height:200px">
+      <table class="data dlg-list"><tbody>${d.investors.map((i) => `<tr>
+        <td style="width:26px"><input type="checkbox" data-ask="${i.investor_id}"
+          ${excluded.has(i.investor_id) ? '' : 'checked'}
+          aria-label="Ask ${esc(i.name)}"></td>
+        <td class="strong">${esc(i.name)}</td>
+        <td>${i.pct != null ? `${fmtPct(i.pct)} of it`
+          : `${i.policies} ${i.policies === 1 ? 'policy' : 'policies'}`}</td>
+        <td class="dlg-amt">${fmtExact(i.amount)}</td>
+      </tr>`).join('')}</tbody></table>
+    </div>
+    ${d.unconfirmed?.length ? `<div class="notice-box" style="margin-top:10px">
+      ${d.unconfirmed.map((u) => esc(u.name)).join(', ')}
+      ${d.unconfirmed.length === 1 ? 'has asked for a piece but has not been confirmed'
+        : 'have asked for pieces but have not been confirmed'}, so
+      ${d.unconfirmed.length === 1 ? 'they are' : 'they are'} not on this call. Confirm
+      ${d.unconfirmed.length === 1 ? 'them' : 'them'} on the opportunity first if you want
+      ${d.unconfirmed.length === 1 ? 'them' : 'them'} included.</div>` : ''}
+    <div class="field-row" style="margin-top:10px">
+      <div class="field"><label>Being asked for</label>
+        <div class="strong" style="padding:4px 0" id="askedTotal">${fmtExact(asked())}</div></div>
+      <div class="field"><label>Not being called</label>
+        <div class="strong" style="padding:4px 0" id="notCalled">${
+          fmtExact((d.total || 0) - asked())}</div>
+        <span class="muted" style="font-size:12px">Anybody unticked is simply not asked.
+          Their share is not moved onto anybody else.</span></div>
+    </div>`;
+  };
 
   const summary = (d) => {
     if (!d) return '<div class="empty"><span class="spin"></span></div>';
     if (d.error) return `<div class="error-box">${esc(d.error)}</div>`;
-    if (!d.items.length) return `
+    if (mode === 'premiums' && !d.items?.length) return `
       <div class="notice-box">
         Nothing falls due inside that window, so there is nothing to call for.
         Widen it above — or, if premiums are missing rather than absent, a policy needs
         a <strong>next premium due</strong> date and an amount before it can be called on.
-        The premium forecast lists the ones that are missing either.
       </div>`;
+    if (mode === 'acquisition' && !d.items?.length) return `
+      <div class="notice-box">Choose which deal the money is for.</div>`;
     return `
     <div class="field-row">
-      <div class="field"><label>Premiums covered</label>
-        <div class="strong" style="padding:6px 0">${d.items.length} ·
-          ${fmtExact(d.total)}</div></div>
-      <div class="field"><label>To be called from investors</label>
+      <div class="field"><label>${mode === 'acquisition' ? 'Purchase price' : 'Premiums covered'}</label>
+        <div class="strong" style="padding:6px 0">${mode === 'acquisition'
+          ? fmtExact(d.total)
+          : `${d.items.length} · ${fmtExact(d.total)}`}</div></div>
+      <div class="field"><label>Held by investors</label>
         <div class="strong" style="padding:6px 0">${fmtExact(
-          d.investors.reduce((n, i) => n + i.amount, 0))}</div></div>
+          (d.investors || []).reduce((n, i) => n + i.amount, 0))}</div></div>
     </div>
-    ${d.investors.length === 0 ? `<div class="error-box">
-      Nobody holds a share of those policies, so there is nobody to ask. Set the cap table
-      on each policy first.</div>` : ''}
     ${d.unallocated > 0.005 ? `<div class="notice-box" style="margin-bottom:12px">
       ${fmtExact(d.unallocated)} of this is on percentages nobody holds — the house's own
       share. Nobody is asked for it.</div>` : ''}
-    <div class="dlg-scroll" style="max-height:190px">
-      <table class="data dlg-list"><tbody>${d.investors.map((i) => `<tr>
-        <td class="strong">${esc(i.name)}</td>
-        <td>${i.policies} ${i.policies === 1 ? 'policy' : 'policies'}</td>
-        <td class="dlg-amt">${fmtExact(i.amount)}</td>
-      </tr>`).join('')}</tbody></table>
-    </div>`;
+    ${investorList(d)}`;
   };
 
   /* The dialog opens FIRST and fetches afterwards. Fetching first meant that
-     anything going wrong — a slow database, a refusal, a five-hundred —
-     rejected inside a click handler with nowhere to show itself, and the
-     button simply did nothing when pressed. A button that does nothing is
-     indistinguishable from a broken one, so now it always opens and the
-     dialog says what happened. */
+     anything going wrong rejected inside a click handler with nowhere to show
+     itself, and the button simply did nothing when pressed. */
   const dlg = openDialog('Raise a capital call', `
-    <p style="margin-top:0;font-size:14px">Everything falling due inside the window, split
-      by who holds each policy, with one date the money has to be in by.</p>
+    <div class="field">
+      <label>What the money is for</label>
+      <div class="rpt-picker" id="callMode">
+        <label class="rpt-choice selected">
+          <input type="radio" name="callFor" value="premiums" checked>
+          <span class="rpt-choice-name">Premiums falling due</span>
+          <span class="rpt-choice-blurb">Everything due inside a window, split by who holds
+            each policy.</span>
+        </label>
+        <label class="rpt-choice">
+          <input type="radio" name="callFor" value="acquisition">
+          <span class="rpt-choice-name">Buying a policy</span>
+          <span class="rpt-choice-blurb">The purchase price of a deal, split by what each
+            investor has been confirmed for.</span>
+        </label>
+      </div>
+    </div>
+
+    ${/* The date the money is needed by belongs to the call, not to one of
+          its two sources — it was inside the premium block, so choosing an
+          acquisition hid the only field that decides when to pay. */''}
     <div class="field-row">
-      <div class="field"><label>Premiums due within</label>
-        <select name="days" id="callDays">
+      <div class="field" id="premiumControls"><label>Premiums due within</label>
+        <select id="callDays">
           ${[[14, 'the next 2 weeks'], [30, 'the next 30 days'], [60, 'the next 60 days'],
              [90, 'the next 90 days'], [180, 'the next 6 months'], [365, 'the next year']]
             .map(([v, label]) => `<option value="${v}" ${v === 30 ? 'selected' : ''}>${label}</option>`).join('')}
         </select></div>
+      <div class="field" id="acquisitionControls" style="display:none"><label>Which deal</label>
+        <select id="callOpp"><option value="">— choose —</option></select></div>
       ${inputField('Money in by', 'due_date', soon(14), 'date', 'required')}
     </div>
     ${inputField('What to call it', 'title', 'Premium capital call', 'text', 'required')}
@@ -3318,28 +3374,94 @@ async function openRaiseCallDialog() {
     <span class="muted" style="font-size:12px">Everybody asked is emailed their own figure
       and this date. Nobody is told what anybody else was asked for.</span>
   `, async (v) => {
-    if (!draft?.items?.length) throw new Error('Nothing to call for in that window.');
-    if (!draft.investors.length) throw new Error('Nobody holds a share of those policies.');
+    if (!draft?.items?.length) throw new Error('There is nothing to call for yet.');
+    if (!people().length) throw new Error('Nobody is selected, so there is nobody to ask.');
     if (!v.due_date) throw new Error('Give the date the money has to be in by.');
     const made = await api('/capital-calls', { method: 'POST', body: {
-      title: v.title, note: v.note, due_date: v.due_date, items: draft.items } });
+      title: v.title, note: v.note, due_date: v.due_date,
+      purpose: mode === 'acquisition' ? 'Acquisition' : 'Premiums',
+      items: draft.items,
+      /* For an acquisition the split comes with the request: the thing being
+         bought has no cap table yet, because nobody owns it. */
+      ...(mode === 'acquisition'
+        ? { lines: draft.investors.map((i) => ({ investor_id: i.investor_id, amount: i.amount })) }
+        : {}),
+      investor_ids: people().map((i) => i.investor_id),
+    } });
     toast(`Called ${fmtExact(made.total)} from ${made.lines.length} ${
       made.lines.length === 1 ? 'investor' : 'investors'}${
       made.notified ? ` · ${made.notified} emailed` : ''}`);
   }, 'Raise it');
 
-  const load = async (days) => {
+  const paint = () => {
+    if (!dlg.isConnected) return;
+    $('#callSummary', dlg).innerHTML = summary(draft);
+    dlg.querySelectorAll('[data-ask]').forEach((box) =>
+      box.addEventListener('change', () => {
+        const id = Number(box.dataset.ask);
+        if (box.checked) excluded.delete(id); else excluded.add(id);
+        $('#askedTotal', dlg).textContent = fmtExact(asked());
+        $('#notCalled', dlg).textContent = fmtExact((draft.total || 0) - asked());
+      }));
+  };
+
+  const loadPremiums = async (days) => {
     $('#callSummary', dlg).innerHTML = summary(null);
     try {
       draft = await api(`/capital-calls/draft?days=${days}`
         + `&fund=${encodeURIComponent(entityFilter())}`);
-    } catch (err) {
-      draft = { error: err.message, items: [], investors: [] };
-    }
-    if (dlg.isConnected) $('#callSummary', dlg).innerHTML = summary(draft);
+    } catch (err) { draft = { error: err.message, items: [], investors: [] }; }
+    excluded = new Set();
+    paint();
   };
-  $('#callDays', dlg).addEventListener('change', (e) => load(e.target.value));
-  load(30);
+  const loadAcquisition = async (oppId) => {
+    if (!oppId) { draft = { items: [], investors: [] }; paint(); return; }
+    $('#callSummary', dlg).innerHTML = summary(null);
+    try {
+      draft = await api(`/capital-calls/draft/acquisition?opportunity_id=${oppId}`);
+      const box = $('input[name=title]', dlg);
+      if (!box.dataset.touched) box.value = `Acquisition — ${draft.opportunity.label}`;
+    } catch (err) { draft = { error: err.message, items: [], investors: [] }; }
+    excluded = new Set();
+    paint();
+  };
+
+  $('input[name=title]', dlg).addEventListener('input', (e) => {
+    e.target.dataset.touched = '1';
+  });
+  $('#callDays', dlg).addEventListener('change', (e) => loadPremiums(e.target.value));
+  $('#callOpp', dlg).addEventListener('change', (e) => loadAcquisition(e.target.value));
+
+  dlg.querySelectorAll('input[name=callFor]').forEach((radio) =>
+    radio.addEventListener('change', async () => {
+      mode = radio.value;
+      dlg.querySelectorAll('#callMode .rpt-choice').forEach((el) =>
+        el.classList.toggle('selected', el.querySelector('input').checked));
+      $('#premiumControls', dlg).style.display = mode === 'premiums' ? '' : 'none';
+      $('#acquisitionControls', dlg).style.display = mode === 'premiums' ? 'none' : '';
+      if (mode === 'premiums') {
+        $('input[name=title]', dlg).value = 'Premium capital call';
+        delete $('input[name=title]', dlg).dataset.touched;
+        return loadPremiums($('#callDays', dlg).value);
+      }
+      /* The deals worth calling for: open, priced, and with somebody
+         confirmed against them. */
+      draft = null; paint();
+      try {
+        const { opportunities } = await api('/capital-calls/draft/acquisition');
+        $('#callOpp', dlg).innerHTML = '<option value="">— choose —</option>'
+          + opportunities.map((o) => `<option value="${o.id}">${
+            esc([o.insured_last_name, o.insured_first_name].filter(Boolean).join(', ')
+              || o.policy_number)} · ${esc(o.carrier_name || '')} · ${
+            fmtExact(o.asking_price)}${o.parties ? ` · ${o.parties} confirmed` : ' · nobody confirmed'}
+            </option>`).join('');
+      } catch (err) {
+        draft = { error: err.message, items: [], investors: [] };
+        paint();
+      }
+    }));
+
+  loadPremiums(30);
   return dlg;
 }
 
@@ -5422,6 +5544,9 @@ async function investorView() {
       </div>
       <div class="spacer"></div>
       <button id="editInvestorBtn">Edit investor</button>
+      ${isAdminUser() ? `<button class="btn-sm" id="deactivateInvestorBtn">${
+        inv.is_active === false ? 'Make active' : 'Make inactive'}</button>
+        <button class="btn-danger" id="deleteInvestorBtn">Delete</button>` : ''}
     </div>
 
     <div class="kpi-row">
@@ -5482,6 +5607,13 @@ async function investorView() {
     html,
     after: () => {
       $('#editInvestorBtn').addEventListener('click', () => openInvestorDialog(inv));
+      onClick('#deactivateInvestorBtn', async () => {
+        await api(`/investors/${inv.id}`, { method: 'PUT', body: {
+          name: inv.name, is_active: inv.is_active === false } });
+        toast(inv.is_active === false ? 'Active again' : 'Made inactive');
+        render();
+      });
+      onClick('#deleteInvestorBtn', () => openDeleteInvestorDialog(inv));
       document.querySelectorAll('tr.clickable[data-id]').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
     },
@@ -5516,6 +5648,94 @@ function suggestPassword() {
   let b = pick(); while (b === a) b = pick();
   let c = pick(); while (c === a || c === b) c = pick();
   return `${a}-${b}-${c}-${Math.floor(Math.random() * 90 + 10)}`;
+}
+
+/**
+ * Deleting an investor.
+ *
+ * Not like deleting a policy. A policy is a thing the firm owns; an investor
+ * is somebody it has a relationship with, who may have a signature on an
+ * executed document and money in an account. So this shows the whole
+ * footprint first, and where a record would be rewritten it does not offer
+ * the choice at all — it offers the right one instead.
+ */
+async function openDeleteInvestorDialog(inv) {
+  const f = await api(`/investors/${inv.id}/footprint`);
+
+  const rows = [
+    ['Positions held', f.positions],
+    ['Capital invested', fmtExact(f.invested), true],
+    ['Death benefit held', fmtExact(f.death_benefit), true],
+    ['Portal logins', f.logins],
+    ['Capital call lines', f.calls],
+    ['Opportunity requests', f.commitments],
+    ['Opportunities shared with them', f.shares],
+    ['Documents filed against them', f.documents],
+    ['Draft agreements naming them', f.agreements],
+  ].filter(([, v]) => v && v !== '$0.00');
+
+  const footprint = `
+    <table class="data" style="margin-bottom:16px"><tbody>${
+      rows.length
+        ? rows.map(([label, value]) => `<tr><td>${label}</td>
+            <td class="num strong">${value}</td></tr>`).join('')
+        : '<tr><td colspan="2" class="muted">Nothing is attached to this record at all.</td></tr>'
+    }</tbody></table>`;
+
+  if (f.keeps_records) {
+    /* No delete button on this dialog. The answer is not "are you sure" — it
+       is that this is the wrong thing to do, and here is the right one. */
+    return openDialog(`${inv.name} cannot be deleted`, `
+      <p style="margin:0 0 14px;font-size:14px">
+        ${esc(inv.name)} has ${[
+          f.signed_agreements ? `signed ${f.signed_agreements} agreement${
+            f.signed_agreements === 1 ? '' : 's'} that went out` : '',
+          f.paid_calls ? `paid ${f.paid_calls} capital call${
+            f.paid_calls === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ')}.
+      </p>
+      <div class="error-box" style="margin-bottom:16px">
+        Deleting them would take a signature off an executed document, or make money
+        arrive from nobody. Neither is a tidy-up; both are a rewrite of what happened.
+      </div>
+      ${footprint}
+      <p style="margin:0;font-size:14px">Making them <strong>inactive</strong> does what you
+        probably want: every figure and every signature stays exactly where it is, and they
+        drop off the lists you work from.</p>
+    `, async () => {
+      await api(`/investors/${inv.id}`, { method: 'PUT', body: {
+        name: inv.name, is_active: false } });
+      toast('Made inactive');
+      go('#/investors');
+    }, 'Make them inactive');
+  }
+
+  return openDialog(`Delete ${inv.name}`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      This permanently deletes <strong>${esc(inv.name)}</strong> and everything attached to
+      the record. It cannot be undone.
+    </p>
+    ${footprint}
+    ${f.positions ? `<div class="error-box" style="margin-bottom:16px">
+      ${f.positions} ${f.positions === 1 ? 'position goes' : 'positions go'} with them —
+      ${fmtExact(f.invested)} of capital invested disappears from the cap tables of the
+      policies they are on. The policies themselves stay; their share simply becomes
+      unallocated.</div>` : ''}
+    ${f.logins ? `<div class="notice-box" style="margin-bottom:16px">
+      Their portal login is deleted too. An investor account attached to nobody could still
+      sign in, which is worse than no account.</div>` : ''}
+    <p style="margin:0 0 14px;font-size:13px" class="secondary">
+      If they are simply not a client any more, <strong>Make inactive</strong> is the better
+      answer — it keeps every figure and drops them off the lists.
+    </p>
+    ${inputField(`Type <b>${esc(inv.name)}</b> to confirm`, 'confirm', '', 'text',
+      'required autocomplete=off')}
+  `, async (v) => {
+    if (String(v.confirm || '').trim() !== inv.name)
+      throw new Error(`Type ${inv.name} exactly to confirm.`);
+    await api(`/investors/${inv.id}`, { method: 'DELETE', body: { confirm: v.confirm.trim() } });
+    toast(`${inv.name} deleted`);
+    go('#/investors');
+  }, 'Delete them');
 }
 
 function openInvestorDialog(inv) {
@@ -6267,6 +6487,8 @@ async function settingsView() {
         <div class="card-head"><h2>The post</h2><div class="spacer"></div>
           <span class="muted" style="font-size:12px">${mailHealth.configured
             ? esc(mailHealth.from || 'sending') : 'not configured'}</span></div>
+        ${mailHealth.from_problem ? `<div class="card-body" style="padding-bottom:0">
+          <div class="error-box">${esc(mailHealth.from_problem)}</div></div>` : ''}
         ${mailHealth.link_problem ? `<div class="card-body" style="padding-bottom:0">
           <div class="error-box">${esc(mailHealth.link_problem)}</div></div>` : `
           <div class="card-body" style="padding-bottom:0">
