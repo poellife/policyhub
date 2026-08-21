@@ -57,7 +57,17 @@ export const POLICY_FIELDS = [
   { key: 'premium_required', header: 'Premium', type: 'money', group: 'Premiums',
     default: true, total: true },
   { key: 'premium_mode', header: 'Mode', type: 'text', group: 'Premiums' },
-  { key: 'next_premium_due', header: 'Next premium', type: 'date', group: 'Premiums' },
+  { key: 'next_premium_due', header: 'Next premium (on the form)', type: 'date',
+    group: 'Premiums' },
+  /* What is actually scheduled on the servicing calendar, which is the only
+     thing any screen or report that says money is due may read. The two
+     fields above describe how the policy was written. */
+  { key: 'next_scheduled_due', header: 'Next premium scheduled', type: 'date',
+    group: 'Premiums', report: true },
+  { key: 'next_scheduled_amount', header: 'Next premium amount', type: 'money',
+    group: 'Premiums', total: true, report: true },
+  { key: 'scheduled_next_12mo', header: 'Scheduled, next 12 months', type: 'money',
+    group: 'Premiums', total: true },
   { key: 'grace_period_days', header: 'Grace days', type: 'int', group: 'Premiums' },
   { key: 'acquisition_date', header: 'Acquired', type: 'date', group: 'Money' },
   { key: 'acquisition_cost', header: 'Purchase price', type: 'money', group: 'Money', total: true },
@@ -94,6 +104,24 @@ export const POLICY_FIELDS = [
   { key: 'updated_at', header: 'Last changed', type: 'date', group: 'Status' },
 ];
 
+/**
+ * What the Policy Schedule report opens with.
+ *
+ * Not the same set as the grid. The grid is a working screen — carrier
+ * values, statement dates, the things somebody is chasing. The report is a
+ * document that goes to a reader: who is insured, what it is worth, what it
+ * costs to keep, and where it stands. A field carries `report: true` when
+ * it belongs on that document as well as, or instead of, the grid.
+ */
+const REPORT_DEFAULT_KEYS = new Set([
+  'insured_last', 'insured_first', 'insured_dob', 'age', 'insured_gender',
+  'carrier_name', 'product_type', 'policy_number', 'issue_date',
+  'death_benefit', 'fund_code',
+  'next_scheduled_amount', 'premium_mode', 'next_scheduled_due',
+  'account_value', 'cash_surrender_value', 'cost_of_insurance',
+  'status',
+]);
+
 export const POLICY_FIELD_KEYS = POLICY_FIELDS.map((f) => f.key);
 export const POLICY_GROUPS = [...new Set(POLICY_FIELDS.map((f) => f.group))];
 
@@ -123,8 +151,14 @@ export const fieldsFor = (investor) => POLICY_FIELDS.filter((f) => (investor
  *     always obeyed, and for a field they did arrange `hidden` is the whole
  *     truth, so a non-default column they switched on stays on.
  */
-export function arrangeFields(pref, { investor = false } = {}) {
+export function arrangeFields(pref, { investor = false, forReport = false } = {}) {
   const allowed = fieldsFor(investor);
+  /* Which fields are on by default for somebody who has never arranged
+     this particular surface. The grid and the report are arranged
+     separately and neither inherits the other's choices. */
+  const isDefault = (f) => (forReport
+    ? REPORT_DEFAULT_KEYS.has(f.key) || !!f.report
+    : !!f.default);
   const byKey = new Map(allowed.map((f) => [f.key, f]));
   const wanted = Array.isArray(pref?.order) ? pref.order : null;
   const hidden = new Set(Array.isArray(pref?.hidden) ? pref.hidden : []);
@@ -141,7 +175,7 @@ export function arrangeFields(pref, { investor = false } = {}) {
   return [...named, ...rest].map((f) => ({
     ...f,
     visible: hidden.has(f.key) ? false
-      : wanted && seen.has(f.key) ? true : !!f.default,
+      : wanted && seen.has(f.key) ? true : isDefault(f),
   }));
 }
 

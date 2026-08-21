@@ -652,6 +652,11 @@ The boundary is enforced in SQL and in route middleware, not by hiding buttons:
 - CSV import is checked row by row; a row whose Owner is outside their entities is
   rejected with that reason, and a policy that currently belongs to another entity
   cannot be overwritten
+- An investor a manager **creates** is granted to that manager on the spot. They
+  can open a login for them and allocate them a share of a policy in their own
+  entities the same day, with no administrator step. Without that grant the
+  record they had just typed in would vanish from their directory on the next
+  page load, since a brand new investor holds nothing yet
 - The investor directory is filtered to the investors assigned to their entities,
   the investors holding positions in their entities, and any granted to them by
   name; investor login details are withheld. Somebody visible for a relationship
@@ -969,7 +974,17 @@ that entry — feeds:
 - the Servicing calendar and its alerts
 - an investor's **Premiums** page and the *next premium due* tile
 - the **premium forecast** report
+- the **Policy Schedule** report's premium columns, the **fact sheets**, the
+  portfolio summary's *premiums, next 12 months*, and the premium column on an
+  investor statement
 - what a **capital call** can be raised over, and for how much
+
+There is a second way in. **Add snapshot** on a policy's Value history tab has a
+*next premium* date and amount at the bottom — it is on the same carrier
+statement you are already typing in, and closing the dialog to enter it on a
+different tab is how schedules end up empty. Give both and it writes the same
+scheduled premium `Schedule next step` would, noting which statement it came
+from.
 
 The consequence is worth stating plainly: a policy with nothing scheduled
 contributes nothing to the forecast. That is a data-entry job rather than a
@@ -977,6 +992,54 @@ policy that owes nothing, and every empty state says so rather than quietly
 showing zero. Reading both sources meant one payment appearing twice at two
 different figures, and a forecast that disagreed with the capital call raised
 from it.
+
+## Both rates, named
+
+Every return in the application is solved twice from the same dated cash flows.
+
+**Simple** is profit divided by dollar-years — what a dollar earned per year it
+was actually out. It is how a life settlement is quoted and how the office's own
+workbook computes it, and it is the headline everywhere.
+
+**Compounded** is the internal rate of return, which is what somebody comparing
+this against a bond or a fund will reach for.
+
+On a policy held four years the two can differ by half again, so a figure
+labelled only *return* invites the reader to assume it is whichever one suits
+them. Administrators and managers see both, side by side and named: a second
+tile on a policy's Return tab, a second column on the Maturities register and on
+the two return reports, and the compounded rate beside the simple one on the
+dashboard tile. CSV exports carry both columns.
+
+An investor's screens keep the simple rate alone. It is what their statements
+and agreements are written in, and an unexplained second figure on a document
+raises a question the document cannot answer.
+
+## Reading the book one policy at a time
+
+The policy page has **Previous** and **Next** beside *All policies*, and walks
+the grid in the order the grid is in — filtered and sorted the same way, so if
+you searched for a carrier, *next* is the next one of that carrier's. Left and
+right arrow keys do the same, except while you are typing in a field or reading
+a dialog. Where you are in the list is printed beside the buttons.
+
+The insured's **date of birth and age** sit next to their name in the heading.
+Everything on the page turns on how old this person is, and reading it off a
+tile further down is a step nobody should have to take.
+
+## Choosing a report's columns
+
+The **Policy Schedule** report is built from the same field catalogue as the
+policies grid, arranged separately. Press **Columns** beside *Generate report*:
+tick what belongs on the document, drag to set the order, and it is remembered
+against your login. Neither arrangement affects the other — the grid is a
+working screen and the schedule is a document that goes to somebody else, so
+they want different things on them.
+
+Capital invested and the other cost-basis columns come off unless *Include cost
+basis* is ticked, whatever the arrangement says. Totals follow the columns
+rather than a fixed layout, so moving them around cannot leave the footer a cell
+out of step with the figures above it.
 
 ## Premium optimization
 

@@ -11,6 +11,18 @@
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
 import { fmtRate } from './irr.js';
 
+/* What this module needs from the application shell.
+   app.js imports this file, so this file cannot import back; the two
+   functions it needs — the column catalogue as this person has arranged
+   it, and the picker that changes it — are handed over once at load. */
+let host = {
+  columns: () => [],
+  pick: () => {},
+  save: async () => {},
+  reset: async () => {},
+};
+export const wireReports = (fns) => { host = { ...host, ...fns }; };
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -62,6 +74,9 @@ const MONEY_KEYS = [
   'face_amount', 'death_benefit', 'account_value', 'cash_surrender_value',
   'cost_of_insurance', 'premium_required', 'total_invested', 'total_acquisition',
   'total_premiums', 'acquisition_cost', 'loan_balance', 'proceeds_amount',
+  // Scheduled premiums are money the investor will be asked for, so their
+  // column is their percentage of it, like every other figure here.
+  'next_scheduled_amount', 'scheduled_next_12mo',
 ];
 
 function scaleRow(p) {
@@ -215,7 +230,8 @@ function buildSummary(d, o) {
         ? tile('Unrealized gain', fmtExact(dbTotal - invested),
             `death benefit less capital invested${invested ? ` · ${(dbTotal / invested).toFixed(2)}×` : ''}`)
         : tile('Cash surrender value', fmtExact(t.total_csv), `Account value ${fmtExact(t.total_av)}`)}
-      ${tile('Annual premium', fmtExact(t.annual_premium), `Cost of insurance ${fmtExact(t.monthly_coi)}/mo`)}
+      ${tile('Premiums, next 12 months', fmtExact(t.scheduled_12mo),
+        `From the servicing schedule · cost of insurance ${fmtExact(t.monthly_coi)}/mo`)}
       ${o.showBasis ? tile('Capital invested', fmtExact(invested),
           `${fmtExact(t.total_acquisition)} acquisition · ${fmtExact(t.total_premiums)} premium`) : ''}
       ${o.showBasis ? tile('Benefit multiple', invested ? `${(dbTotal / invested).toFixed(2)}×` : '—',
@@ -244,67 +260,90 @@ function buildSummary(d, o) {
     ${footer('Portfolio Summary')}`;
 }
 
-function buildSchedule(rows, o) {
-  // Carrier mechanics are staff columns; see the note on the app's policy list.
-  const mine = !!o.investorShare;
-  const tot = rows.reduce((a, p) => {
-    a.face += Number(p.face_amount) || 0;
-    a.db += Number(p.death_benefit ?? p.face_amount) || 0;
-    a.prem += Number(p.premium_required) || 0;
-    a.av += Number(p.account_value) || 0;
-    a.csv += Number(p.cash_surrender_value) || 0;
-    a.coi += Number(p.cost_of_insurance) || 0;
-    a.inv += Number(p.total_invested) || 0;
-    return a;
-  }, { face: 0, db: 0, prem: 0, av: 0, csv: 0, coi: 0, inv: 0 });
+/**
+ * The Policy Schedule, built from whichever columns the reader chose.
+ *
+ * The columns are the same catalogue the policies grid uses, arranged
+ * separately: the grid is a working screen and this is a document that
+ * goes to somebody else, so they want different things on them. What the
+ * reader ticked is theirs alone and follows their login.
+ *
+ * Every cell renderer lives here rather than in the catalogue, because
+ * paper is not a screen — no badges, no coloured dots, and a date that
+ * wraps costs a row.
+ */
+const scheduleCell = (f, p) => {
+  const v = p[f.key];
+  switch (f.type) {
+    case 'money': return money(v);
+    case 'pct': return v == null ? '—' : `${Number(v).toFixed(4).replace(/\.?0+$/, '')}%`;
+    case 'date': return fmtDate(v);
+    case 'age': return ageFrom(p.insured_dob) ?? '—';
+    case 'int': return v == null || v === '' ? '—' : Number(v).toLocaleString('en-US');
+    case 'sex': return esc(v || '—');
+    case 'status': case 'product': case 'owner': case 'strong': case 'text':
+    default: return esc(v ?? '') || '—';
+  }
+};
+const NUMERIC = new Set(['money', 'pct', 'age', 'int']);
+
+export function buildSchedule(rows, o, fields) {
+  /* Death benefit falls back to the face amount, which is what the old
+     fixed layout did and what a reader expects on a policy with no carrier
+     statement yet. */
+  const value = (f, p) => (f.key === 'death_benefit'
+    ? (p.death_benefit ?? p.face_amount) : p[f.key]);
+
+  const cols = (fields || []).filter((f) => f.visible);
+  /* Capital invested is confidential and comes off unless the reader asked
+     for the cost basis, whatever their column arrangement says. */
+  const shown = cols.filter((f) => o.showBasis
+    || !['total_invested', 'total_acquisition', 'acquisition_cost', 'total_premiums']
+      .includes(f.key));
+
+  const totals = new Map();
+  for (const f of shown.filter((x) => x.total))
+    totals.set(f.key, rows.reduce((s, p) => s + (Number(value(f, p)) || 0), 0));
 
   return `
-    ${letterhead('Policy Schedule', `${rows.length} policies${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
+    ${letterhead('Policy Schedule', `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${
+      o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
     ${confidential(o.showBasis, o)}
-    <table class="rpt-table rpt-table-tight">
+    ${shown.length === 0 ? `
+    <div class="rpt-block"><p class="rpt-note">
+      No columns are switched on. Use <strong>Columns</strong> above to choose what
+      this schedule should show.</p></div>`
+    : `<table class="rpt-table rpt-table-tight">
       <thead><tr>
-        <th>#</th><th>Last name</th><th>First name</th><th>DOB</th><th class="num">Age</th>
-        <th>Carrier</th><th>Type</th><th>Policy no.</th><th>Issued</th>
-        <th class="num">Death benefit</th>${mine ? '' : '<th>Owner</th>'}
-        <th class="num">Premium</th><th>Mode</th><th>Next due</th>
-        ${mine ? '' : '<th class="num">AV</th><th class="num">CSV</th><th class="num">COI</th>'}
-        ${o.showBasis ? '<th class="num">Invested</th>' : ''}
-        <th>Status</th>
+        <th>#</th>
+        ${shown.map((f) => `<th class="${NUMERIC.has(f.type) ? 'num' : ''}">${
+          esc(f.header)}</th>`).join('')}
       </tr></thead>
       <tbody>
         ${rows.map((p, i) => `<tr>
           <td class="muted">${i + 1}</td>
-          <td class="strong">${esc(p.insured_last || '—')}</td>
-          <td>${esc(p.insured_first || '')}</td>
-          <td>${fmtDate(p.insured_dob)}</td>
-          <td class="num">${ageFrom(p.insured_dob) ?? '—'}</td>
-          <td>${esc(p.carrier_name)}</td>
-          <td>${esc(p.product_type || '—')}</td>
-          <td class="rpt-nowrap">${esc(p.policy_number)}</td>
-          <td class="rpt-nowrap">${fmtDate(p.issue_date)}</td>
-          <td class="num">${money(p.death_benefit ?? p.face_amount)}</td>
-          ${mine ? '' : `<td>${esc(p.fund_code || '—')}</td>`}
-          <td class="num">${money(p.premium_required)}</td>
-          <td>${esc(p.premium_mode || '—')}</td>
-          <td class="rpt-nowrap">${fmtDate(p.next_premium_due)}</td>
-          ${mine ? '' : `<td class="num">${money(p.account_value)}</td>
-          <td class="num">${money(p.cash_surrender_value)}</td>
-          <td class="num">${money(p.cost_of_insurance)}</td>`}
-          ${o.showBasis ? `<td class="num">${money(p.total_invested)}</td>` : ''}
-          <td>${esc(p.status)}</td>
+          ${shown.map((f) => `<td class="${NUMERIC.has(f.type) ? 'num' : ''}${
+            f.type === 'strong' || f.key === 'insured_last' ? ' strong' : ''}${
+            f.type === 'date' || f.key === 'policy_number' ? ' rpt-nowrap' : ''}">${
+            f.key === 'death_benefit' ? money(p.death_benefit ?? p.face_amount)
+              : scheduleCell(f, p)}</td>`).join('')}
         </tr>`).join('')}
       </tbody>
-      <tfoot><tr>
-        <td colspan="9">Totals — ${rows.length} policies</td>
-        <td class="num">${money(tot.db)}</td>${mine ? '' : '<td></td>'}
-        <td class="num">${money(tot.prem)}</td><td colspan="2"></td>
-        ${mine ? '' : `<td class="num">${money(tot.av)}</td>
-        <td class="num">${money(tot.csv)}</td>
-        <td class="num">${money(tot.coi)}</td>`}
-        ${o.showBasis ? `<td class="num">${money(tot.inv)}</td>` : ''}
-        <td></td>
-      </tr></tfoot>
-    </table>
+      ${''/* The label runs up to the first column that carries a total,
+             then every remaining column gets a cell — its total or an empty
+             one. Counting cells rather than assuming a fixed layout is what
+             lets the reader move the columns around without the footer
+             sliding out of step with the figures above it. */}
+      ${totals.size ? (() => {
+        const first = shown.findIndex((f) => totals.has(f.key));
+        return `<tfoot><tr>
+          <td colspan="${1 + first}">Totals — ${rows.length} ${
+            rows.length === 1 ? 'policy' : 'policies'}</td>
+          ${shown.slice(first).map((f) => `<td class="${NUMERIC.has(f.type) ? 'num' : ''}">${
+            totals.has(f.key) ? money(totals.get(f.key)) : ''}</td>`).join('')}
+        </tr></tfoot>`;
+      })() : ''}
+    </table>`}
     ${footer('Policy Schedule')}`;
 }
 
@@ -603,7 +642,14 @@ function buildReturn(d, o, { realized }) {
     ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
-      ${tile(realized ? 'Realized return' : 'Return if matured today', fmtRate(p.rate), weightedNote)}
+      ${tile(`${realized ? 'Realized return' : 'Return if matured today'}${
+        o.investorShare ? '' : ' · simple'}`, fmtRate(p.rate), weightedNote)}
+      ${''/* Both rates on a staff report, named. An investor's copy keeps
+             the simple one alone — it is what their statements are written
+             in, and an unexplained second figure raises a question the
+             document cannot answer. */}
+      ${o.investorShare || p.compound_rate == null ? '' : tile('Compounded (IRR)',
+        fmtRate(p.compound_rate), 'the same cash flows, compounded rather than simple')}
       ${tile(realized ? 'Proceeds' : 'Death benefit', fmtExact(p.returned),
         realized
           ? (assumed > 0
@@ -639,7 +685,9 @@ function buildReturn(d, o, { realized }) {
           ${realized ? '<th>Matured</th><th>Paid</th>' : ''}
           <th class="num">${realized ? 'Proceeds' : 'Death benefit'}</th>
           ${o.showBasis ? '<th class="num">Invested</th><th class="num">Profit</th><th class="num">Multiple</th>' : ''}
-          <th class="num">Days</th><th class="num">Return</th>
+          <th class="num">Days</th>
+          <th class="num">${o.investorShare ? 'Return' : 'Return · simple'}</th>
+          ${o.investorShare ? '' : '<th class="num">Compounded</th>'}
         </tr></thead>
         <tbody>${rows.length === 0
           ? `<tr><td colspan="14">No ${realized ? 'matured' : 'in-force'} policies to report.</td></tr>`
@@ -659,6 +707,7 @@ function buildReturn(d, o, { realized }) {
               <td class="num">${r.multiple ? `${r.multiple.toFixed(2)}×` : '—'}</td>` : ''}
             <td class="num">${r.days.toLocaleString('en-US')}</td>
             <td class="num strong">${fmtRate(r.rate)}${flag(r)}</td>
+            ${o.investorShare ? '' : `<td class="num">${fmtRate(r.compound_rate)}</td>`}
           </tr>`).join('')}</tbody>
         ${rows.length ? `<tfoot><tr>
           <td colspan="${6 + (realized ? 2 : 0)}">Totals — ${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>
@@ -668,6 +717,7 @@ function buildReturn(d, o, { realized }) {
             <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
           <td class="num">${p.days.toLocaleString('en-US')}</td>
           <td class="num">${fmtRate(p.rate)}</td>
+          ${o.investorShare ? '' : `<td class="num">${fmtRate(p.compound_rate)}</td>`}
         </tr></tfoot>` : ''}
       </table>
     </div>
@@ -767,9 +817,15 @@ function buildInvestorReport(d, o) {
         <div class="rpt-tile"><div class="rpt-tile-label">Capital paid in</div>
           <div class="rpt-tile-value">${fmtExact(t.invested)}</div>
           <div class="rpt-tile-note">${t.multiple ? `${t.multiple.toFixed(2)}× on benefit` : '—'}</div></div>
-        <div class="rpt-tile"><div class="rpt-tile-label">Premiums a year</div>
-          <div class="rpt-tile-value">${fmtExact(t.annual_premium)}</div>
-          <div class="rpt-tile-note">${fmtExact(row.upcoming_12mo)} due in the next 12 months</div></div>
+        ${''/* From the servicing schedule, not from the annual figure on
+               each policy form — this is what they will actually be asked
+               for, and an empty schedule reads as nothing owed rather than
+               quietly showing a number nobody checked. */}
+        <div class="rpt-tile"><div class="rpt-tile-label">Premiums, next 12 months</div>
+          <div class="rpt-tile-value">${fmtExact(row.upcoming_12mo)}</div>
+          <div class="rpt-tile-note">${row.upcoming?.length
+            ? `${row.upcoming.length} scheduled ${row.upcoming.length === 1 ? 'date' : 'dates'}`
+            : 'nothing scheduled'}</div></div>
         <div class="rpt-tile"><div class="rpt-tile-label">Portfolio return</div>
           <div class="rpt-tile-value">${fmtRate(t.rate)}</div>
           <div class="rpt-tile-note">${t.short_period
@@ -784,7 +840,7 @@ function buildInvestorReport(d, o) {
             ${o.fund ? '' : '<th>Owner</th>'}
             <th class="num">Share</th><th class="num">Death benefit</th>
             ${o.showBasis ? '<th class="num">Paid in</th>' : ''}
-            <th class="num">Premium</th><th>Next due</th>
+            <th class="num">Next premium</th><th>Due</th>
             <th class="num">Return</th>
           </tr></thead>
           <tbody>${live.length === 0
@@ -798,15 +854,16 @@ function buildInvestorReport(d, o) {
                 <td class="num">${pctOf(p.pct)}</td>
                 <td class="num">${money(p.death_benefit)}</td>
                 ${o.showBasis ? `<td class="num">${money(p.invested)}</td>` : ''}
-                <td class="num">${money(p.premium_required)}</td>
-                <td class="rpt-nowrap">${fmtDate(p.next_premium_due)}</td>
+                <td class="num">${money(p.next_scheduled_amount)}</td>
+                <td class="rpt-nowrap">${p.next_scheduled_due
+                  ? fmtDate(p.next_scheduled_due) : '—'}</td>
                 <td class="num strong">${fmtRate(p.rate)}</td>
               </tr>`).join('')}</tbody>
           ${live.length ? `<tfoot><tr>
             <td colspan="${o.fund ? 5 : 6}">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
             <td class="num">${money(t.live_death_benefit)}</td>
             ${o.showBasis ? `<td class="num">${money(live.reduce((s, p) => s + p.invested, 0))}</td>` : ''}
-            <td class="num">${money(t.annual_premium)}</td>
+            <td class="num">${money(live.reduce((s, p) => s + (Number(p.next_scheduled_amount) || 0), 0))}</td>
             <td></td><td class="num">${fmtRate(t.rate)}</td>
           </tr></tfoot>` : ''}
         </table>
@@ -933,13 +990,18 @@ function buildFactSheets(sheets, o) {
           : `<div class="rpt-tile"><div class="rpt-tile-label">Cash surrender value</div>
               <div class="rpt-tile-value">${fmtExact(p.cash_surrender_value)}</div>
               <div class="rpt-tile-note">AV ${fmtExact(p.account_value)}</div></div>`}
-        <div class="rpt-tile"><div class="rpt-tile-label">Annual premium</div>
-          <div class="rpt-tile-value">${fmtExact(p.premium_required)}</div>
-          <div class="rpt-tile-note">${esc(p.premium_mode || '')}</div></div>
+        ${''/* Scheduled, not written into the policy form. What has to be
+               found is what somebody put on the servicing calendar. */}
+        <div class="rpt-tile"><div class="rpt-tile-label">Premiums, next 12 months</div>
+          <div class="rpt-tile-value">${fmtExact(p.scheduled_next_12mo)}</div>
+          <div class="rpt-tile-note">${p.scheduled_next_12mo
+            ? 'from the servicing schedule' : 'nothing scheduled'}</div></div>
         ${mine
           ? `<div class="rpt-tile"><div class="rpt-tile-label">Next premium due</div>
-              <div class="rpt-tile-value">${fmtDate(p.next_premium_due)}</div>
-              <div class="rpt-tile-note">${fmtExact(p.premium_required)} · your share</div></div>`
+              <div class="rpt-tile-value">${p.next_scheduled_due
+                ? fmtDate(p.next_scheduled_due) : '—'}</div>
+              <div class="rpt-tile-note">${p.next_scheduled_amount
+                ? `${fmtExact(p.next_scheduled_amount)} · your share` : 'nothing scheduled'}</div></div>`
           : `<div class="rpt-tile"><div class="rpt-tile-label">Coverage runway</div>
               <div class="rpt-tile-value">${runway ? `${runway} mo` : '—'}</div>
               <div class="rpt-tile-note">Account value ÷ monthly COI</div></div>`}
@@ -965,9 +1027,13 @@ function buildFactSheets(sheets, o) {
         <div class="rpt-block avoid-break">
           <h3 class="rpt-h3">Premium &amp; servicing</h3>
           <table class="rpt-kv">
-            <tr><td>Premium required</td><td>${money(p.premium_required)}</td></tr>
-            <tr><td>Mode</td><td>${esc(p.premium_mode || '—')}</td></tr>
-            <tr><td>Next due</td><td>${fmtDate(p.next_premium_due)}</td></tr>
+            <tr><td>Next premium scheduled</td><td>${p.next_scheduled_due
+              ? `${fmtDate(p.next_scheduled_due)}${p.next_scheduled_amount
+                  ? ` · ${money(p.next_scheduled_amount)}` : ''}`
+              : 'nothing scheduled'}</td></tr>
+            <tr><td>Scheduled, next 12 months</td><td>${money(p.scheduled_next_12mo)}</td></tr>
+            <tr><td>Premium on the policy</td><td>${money(p.premium_required)}
+              <span class="rpt-dim">${esc(p.premium_mode || '')} · reference</span></td></tr>
             <tr><td>Grace period</td><td>${p.grace_period_days || 61} days</td></tr>
             ${mine ? '' : `<tr><td>Last withdrawal</td><td>${fmtDate(p.date_of_last_withdrawal)}</td></tr>
             <tr><td>Values as of</td><td>${fmtDate(p.value_as_of)}</td></tr>`}
@@ -1399,6 +1465,12 @@ export async function reportsView(api, state) {
 
         <div style="display:flex;gap:8px;margin-top:6px">
           <button class="primary" id="rptGenerate">Generate report</button>
+          ${''/* Only the Policy Schedule is a column table. The others are
+                 documents with a shape of their own — tiles, prose, a chart
+                 — and a column picker on them would promise something they
+                 cannot do. */}
+          <button id="rptColumns" style="${r.type === 'schedule' ? '' : 'display:none'}"
+            title="Choose which columns this schedule shows">Columns</button>
           <button id="rptPrint" disabled>Save as PDF</button>
         </div>
       </div>
@@ -1419,6 +1491,7 @@ export async function reportsView(api, state) {
         r.type = document.querySelector('input[name=rptType]:checked').value;
         $('#rptMonthsField').style.display = r.type === 'forecast' ? '' : 'none';
         $('#rptDetailField').style.display = r.type === 'forecast' ? '' : 'none';
+        $('#rptColumns').style.display = r.type === 'schedule' ? '' : 'none';
         $('#rptPolicyField').style.display = r.type === 'factsheet' ? '' : 'none';
         $('#rptInvestorField').style.display = r.type === 'investor' ? '' : 'none';
         document.querySelectorAll('.rpt-choice').forEach((el) =>
@@ -1426,6 +1499,32 @@ export async function reportsView(api, state) {
       };
       document.querySelectorAll('input[name=rptType]').forEach((el) =>
         el.addEventListener('change', sync));
+
+      // Coming back from the column picker with a report already on screen.
+      if (r.regenerate) { r.regenerate = false; setTimeout(() => $('#rptGenerate').click(), 0); }
+
+      /* Applying the picker regenerates whatever is on screen, so the
+         choice is seen immediately rather than on the next Generate. */
+      $('#rptColumns').addEventListener('click', () => host.pick({
+        fields: host.columns(),
+        title: 'Columns on the Policy Schedule',
+        where: 'on the schedule',
+        blurb: 'Tick a field to put it on the schedule. Drag a row, or use the arrows, '
+          + 'to change the order — the order here is the order left to right on the page. '
+          + 'This is separate from the policies grid, and yours alone.',
+        /* The dialog re-renders the screen when it closes, which clears
+           whatever was on it. So the choice is remembered and the report
+           rebuilt on the way back in, rather than rebuilt here and then
+           thrown away a moment later. */
+        onApply: async (fields) => {
+          r.regenerate = !!$('#rptOutput')?.innerHTML.trim();
+          await host.save(fields);
+        },
+        onReset: async () => {
+          r.regenerate = !!$('#rptOutput')?.innerHTML.trim();
+          await host.reset();
+        },
+      }));
 
       $('#rptGenerate').addEventListener('click', async () => {
         const btn = $('#rptGenerate');
@@ -1462,7 +1561,8 @@ export async function reportsView(api, state) {
           } else if (r.type === 'schedule') {
             const raw = await api(`/policies?fund=${encodeURIComponent(o.fund)}&status=`);
             const rows = investorUser ? raw.map(scaleRow) : raw;
-            out.innerHTML = `<div class="rpt-sheet">${buildSchedule(rows, o)}</div>`;
+            out.innerHTML = `<div class="rpt-sheet">${
+              buildSchedule(rows, o, host.columns())}</div>`;
 
           } else if (r.type === 'forecast') {
             const [, , window] = forecastHorizon(r.horizon);

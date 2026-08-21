@@ -3,7 +3,7 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
-import { reportsView, buildOpportunitySheet } from './reports.js';
+import { reportsView, buildOpportunitySheet, wireReports } from './reports.js';
 // The agreement's clauses live in one file, read by the browser for preview
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
@@ -78,6 +78,7 @@ async function loadPrefs() {
   try {
     const prefs = await api('/me/prefs');
     state.policyCols = prefs?.policy_columns || null;
+    state.reportCols = prefs?.report_columns || null;
   } catch {
     state.policyCols = null;
   }
@@ -531,6 +532,40 @@ const MANAGER_NAV = STAFF_NAV
 
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
+/**
+ * A keyboard shortcut that belongs to the screen currently rendered.
+ *
+ * One listener on the document, and each render replaces what it points
+ * at. Adding a listener per render instead would leave the previous
+ * screen's shortcuts still firing — the Maturities page paging through
+ * policies, and getting worse every time somebody navigated.
+ */
+/**
+ * The two rates, and why both are shown.
+ *
+ * Every return in here is solved twice from the same dated cash flows.
+ *
+ *   simple      profit divided by dollar-years — what a dollar earned per
+ *               year it was actually out, which is how a life settlement is
+ *               quoted and how the office's own workbook computes it.
+ *   compounded  the IRR, which is what somebody comparing this against a
+ *               bond or a fund will reach for.
+ *
+ * On a policy held four years they can differ by half again, and a figure
+ * labelled only "return" is an invitation to assume it is whichever one
+ * flatters the reader's expectation. Staff see both, side by side, named.
+ * An investor's screens keep the simple rate alone: it is the one their
+ * statements and agreements are written in, and two rates on a page with
+ * no explanation is worse than one that is labelled.
+ */
+const showsBothRates = () => !isInvestorUser();
+const compoundNote = (a) => (!showsBothRates() || !a || a.compound_rate == null
+  ? '' : `${fmtRate(a.compound_rate)} compounded`);
+
+let screenKeys = null;
+const onKey = (fn) => { screenKeys = fn; };
+document.addEventListener('keydown', (e) => screenKeys?.(e));
+
 const canEditData    = () => ['admin', 'editor', 'manager'].includes(state.user?.role);
 
 /**
@@ -1003,9 +1038,10 @@ async function dashboardView() {
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
       <div class="stat">
-        <div class="label">Portfolio return</div>
+        <div class="label">Portfolio return${showsBothRates() ? ' · simple' : ''}</div>
         <div class="value">${fmtRate(sum.rate?.rate)}</div>
-        <div class="note">${sum.rate?.days
+        <div class="note">${compoundNote(sum.rate)
+          ? `${compoundNote(sum.rate)} · ` : ''}${sum.rate?.days
           ? `if every policy matured today · ${(sum.rate.days / 365).toFixed(1)} yr span`
           : 'no dated cash flows yet'}</div>
       </div>
@@ -1164,8 +1200,22 @@ const asColumn = (f) => ({
 });
 
 /** Every column this person may see, arranged the way they arranged it. */
+/* Reports is imported by this module, so it cannot import back. What it
+   needs from here — the column catalogue as this person has arranged it,
+   and the picker to change it — is handed over once at load instead. */
+wireReports({
+  columns: () => reportFieldList(),
+  pick: (opts) => openColumnsDialog(opts),
+  save: (fields) => saveReportColumns(fields),
+  reset: () => resetReportColumns(),
+});
+
 const policyFieldList = () =>
   arrangeFields(state.policyCols, { investor: isInvestorUser() });
+
+/** The same catalogue, arranged for the Policy Schedule report instead. */
+const reportFieldList = () =>
+  arrangeFields(state.reportCols, { investor: isInvestorUser(), forReport: true });
 
 /** The ones actually on the grid. */
 const policyColumns = () => policyFieldList().filter((f) => f.visible).map(asColumn);
@@ -1180,6 +1230,24 @@ async function savePolicyColumns(fields) {
     await api('/me/prefs/policy_columns', { method: 'PUT', body: state.policyCols });
   } catch (e) {
     console.warn('column arrangement not saved:', e.message);
+  }
+}
+
+async function saveReportColumns(fields) {
+  state.reportCols = packArrangement(fields);
+  try {
+    await api('/me/prefs/report_columns', { method: 'PUT', body: state.reportCols });
+  } catch (e) {
+    console.warn('report columns not saved:', e.message);
+  }
+}
+
+async function resetReportColumns() {
+  state.reportCols = null;
+  try {
+    await api('/me/prefs/report_columns', { method: 'DELETE' });
+  } catch (e) {
+    console.warn('report columns not reset:', e.message);
   }
 }
 
@@ -1203,8 +1271,23 @@ async function resetPolicyColumns() {
  * The list is the order. Hiding a column does not move it, so switching one
  * back on puts it back where it was rather than at the end.
  */
-function openColumnsDialog() {
-  const fields = policyFieldList();
+/**
+ * The column picker, serving whichever surface asked for it.
+ *
+ * The grid and the Policy Schedule report are arranged from the same
+ * catalogue and by the same dialog, remembered separately. One dialog
+ * because "which columns, in what order" is one question however it is
+ * asked, and two implementations of it would drift.
+ */
+function openColumnsDialog({
+  fields: given = null,
+  title = 'Columns',
+  blurb = null,
+  onApply = savePolicyColumns,
+  onReset = resetPolicyColumns,
+  where = 'on the grid',
+} = {}) {
+  const fields = given || policyFieldList();
   const row = (f, i) => `
     <li class="col-pick" draggable="true" data-key="${f.key}" data-i="${i}">
       <span class="grip" aria-hidden="true">⋮⋮</span>
@@ -1221,9 +1304,9 @@ function openColumnsDialog() {
 
   const body = `
     <p class="muted" style="font-size:12.5px;margin:0 0 10px">
-      Tick a field to put it on the grid. Drag a row, or use the arrows, to change
+      ${blurb || `Tick a field to put it ${where}. Drag a row, or use the arrows, to change
       the order — the order here is the order left to right. Yours alone: it follows
-      your login, and nobody else's screen moves.
+      your login, and nobody else's screen moves.`}
     </p>
     <div class="toolbar" style="margin-bottom:8px">
       <input class="grow" id="colSearch" placeholder="Find a field…">
@@ -1234,8 +1317,8 @@ function openColumnsDialog() {
     <ul class="col-pick-list" id="colList">${fields.map(row).join('')}</ul>
     <div class="muted" style="font-size:12px;margin-top:8px" id="colCount"></div>`;
 
-  const dlg = openDialog('Columns', body, async () => {
-    await savePolicyColumns(read());
+  const dlg = openDialog(title, body, async () => {
+    await onApply(read());
   }, 'Apply');
 
   const list = $('#colList', dlg);
@@ -1247,7 +1330,7 @@ function openColumnsDialog() {
   const tally = () => {
     const on = read().filter((f) => f.visible).length;
     $('#colCount', dlg).textContent =
-      `${on} of ${fields.length} ${on === 1 ? 'column' : 'columns'} on the grid`;
+      `${on} of ${fields.length} ${on === 1 ? 'column' : 'columns'} ${where}`;
   };
   tally();
 
@@ -1305,7 +1388,7 @@ function openColumnsDialog() {
   $('#colNone', dlg).addEventListener('click', () => setAll(false));
   $('#colReset', dlg).addEventListener('click', async () => {
     dlg.close(); dlg.remove();
-    await resetPolicyColumns();
+    await onReset();
   });
   return dlg;
 }
@@ -1574,6 +1657,24 @@ async function policyView() {
   const av = Number(p.account_value) || 0;
   const monthsCovered = coi > 0 ? av / coi : null;
 
+  /* One policy at a time, in the order the grid is in.
+   *
+   * The book is worked through case by case — open one, read it, move on —
+   * and going back to the list to find your place each time is the whole
+   * job. So the neighbours come from the same sorted, filtered list the
+   * grid shows: if you searched for a carrier, next means the next one of
+   * that carrier's. Landing here from a link or a reload has no list to
+   * walk, so one is fetched. */
+  if (!state.policies.length && !isInvestorUser())
+    state.policies = await api(
+      `/policies?search=${encodeURIComponent(state.filters.search)}`
+      + `&status=${encodeURIComponent(state.filters.status)}`
+      + `&fund=${encodeURIComponent(state.filters.fund)}`).catch(() => []);
+  const walk = sortPolicies(state.policies || []);
+  const here = walk.findIndex((x) => x.id === p.id);
+  const prev = here > 0 ? walk[here - 1] : null;
+  const next = here >= 0 && here < walk.length - 1 ? walk[here + 1] : null;
+
   // Value history is entirely account value, cash surrender value and cost of
   // insurance — carrier administration, not investment performance. There is
   // nothing left of the tab once those are taken out, so it goes.
@@ -1585,8 +1686,24 @@ async function policyView() {
   const html = `
     <div class="page-head">
       <div>
-        <div class="sub"><a href="#/policies">← All policies</a></div>
-        <h1>${esc(insuredName(p))}</h1>
+        <div class="sub policy-walk">
+          <a href="#/policies">← All policies</a>
+          ${here >= 0 ? `
+            <button class="btn-sm" id="prevPolicyBtn" ${prev ? '' : 'disabled'}
+              title="${prev ? esc(`${insuredName(prev)} · ${prev.policy_number}`)
+                : 'This is the first one'}">← Previous</button>
+            <button class="btn-sm" id="nextPolicyBtn" ${next ? '' : 'disabled'}
+              title="${next ? esc(`${insuredName(next)} · ${next.policy_number}`)
+                : 'This is the last one'}">Next →</button>
+            <span class="muted">${here + 1} of ${walk.length}</span>` : ''}
+        </div>
+        ${''/* The date of birth belongs beside the name: everything on this
+               page — the life expectancy, the premium, the price — turns on
+               how old this person is, and reading it off a tile further down
+               is a step nobody should have to take. */}
+        <h1>${esc(insuredName(p))}${p.insured_dob
+          ? ` <span class="h1-dob">${fmtDate(p.insured_dob)}${
+              age == null ? '' : ` · ${age}`}</span>` : ''}</h1>
         <div class="sub">${esc(p.carrier_name)} · Policy ${esc(p.policy_number)}
           ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}</div>
       </div>
@@ -1662,6 +1779,21 @@ async function policyView() {
   return {
     html,
     after: () => {
+      $('#prevPolicyBtn')?.addEventListener('click', () => prev && go(`#/policy/${prev.id}`));
+      $('#nextPolicyBtn')?.addEventListener('click', () => next && go(`#/policy/${next.id}`));
+      /* Left and right walk the book too — but not while somebody is typing
+         in a field or reading a dialog, which is the other thing arrow keys
+         do. */
+      onKey((e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (document.querySelector('dialog[open]')) return;
+        const el = document.activeElement;
+        if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+        const to = e.key === 'ArrowLeft' ? prev : next;
+        if (to) { e.preventDefault(); go(`#/policy/${to.id}`); }
+      });
+
       document.querySelectorAll('.tabs button').forEach((b) =>
         b.addEventListener('click', () => { detailTab = b.dataset.tab; render(); }));
       wireShareToggle();
@@ -1922,7 +2054,9 @@ function valuesTab(p, values) {
                 <td class="num">${money(scaled(v.loan_balance, p), 2)}</td>
                 <td>${fmtDate(v.date_of_last_withdrawal)}</td>
                 <td class="muted">${esc(v.source)}</td>
-                <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-value="${v.id}">Delete</button>` : ''}</td>
+                <td style="white-space:nowrap">${canEditData() ? `
+                  <button class="btn-sm" data-edit-value="${v.id}">Edit</button>
+                  <button class="btn-sm btn-danger" data-del-value="${v.id}">Delete</button>` : ''}</td>
               </tr>`).join('')}
         </tbody>
       </table>
@@ -2281,11 +2415,23 @@ function returnTab(p, d) {
   return `
     <div class="kpi-row">
       <div class="stat">
-        <div class="label">${settled ? 'Realized return' : d.status === 'Matured' ? 'Return if collected today' : 'Return if matured today'}</div>
+        <div class="label">${settled ? 'Realized return' : d.status === 'Matured' ? 'Return if collected today' : 'Return if matured today'}${
+          showsBothRates() ? ' · simple' : ''}</div>
         <div class="value hero">${fmtRate(r.rate)}</div>
         <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
           r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
       </div>
+      ${''/* The same cash flows, compounded. Its own tile rather than a
+             footnote: it is a different number and the difference matters,
+             so it gets a label of its own and cannot be misread as the one
+             beside it. */}
+      ${showsBothRates() && r.compound_rate != null ? `
+      <div class="stat">
+        <div class="label">Compounded (IRR)</div>
+        <div class="value hero">${fmtRate(r.compound_rate)}</div>
+        <div class="note">the same dated cash flows, solved as an internal rate of
+          return rather than as simple interest on dollar-years</div>
+      </div>` : ''}
       <div class="stat">
         <div class="label">Capital invested</div>
         <div class="value">${fmtExact(r.invested)}</div>
@@ -2526,6 +2672,11 @@ function wireDetailTab(p, values, irrData) {
     lineChart($('#chartDb'), { points, series: [{ key: 'db', name: 'Death benefit' }], height: 180 });
 
     $('#addValueBtn')?.addEventListener('click', () => openValueDialog(p));
+    document.querySelectorAll('[data-edit-value]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const v = (p.values || []).find((x) => String(x.id) === b.dataset.editValue);
+        if (v) openValueDialog(p, v);
+      }));
     document.querySelectorAll('[data-del-value]').forEach((b) =>
       b.addEventListener('click', async () => {
         if (!confirm('Delete this snapshot?')) return;
@@ -3082,27 +3233,77 @@ function openInsuredDialog(ins, onSaved) {
   });
 }
 
-function openValueDialog(p) {
+/**
+ * A carrier statement, typed in.
+ *
+ * Editing rather than only adding, because a statement filed under the
+ * wrong month or a figure fat-fingered is a correction to that row, not a
+ * reason to delete it and lose that it was ever there.
+ *
+ * The next premium is on this screen because it is on the statement. It is
+ * the same piece of paper, read at the same sitting, and making somebody
+ * close this dialog and open a different one on a different tab to enter a
+ * figure they are already looking at is how schedules end up empty. What it
+ * writes is a scheduled premium on the servicing calendar — the one place
+ * a premium due is read from — so entering it here and entering it there
+ * are the same act.
+ */
+function openValueDialog(p, existing = null) {
+  const editing = !!existing;
+  const money0 = (v) => (v === null || v === undefined || v === '' ? '' : v);
   const body = `
-    ${inputField('As of date *', 'as_of_date', today(), 'date', 'required')}
+    ${inputField('As of date *', 'as_of_date',
+      editing ? dateInput(existing.as_of_date) : today(), 'date', 'required')}
     <div class="field-row">
-      ${moneyField('Account value (AV)', 'account_value', '')}
-      ${moneyField('Cash surrender value (CSV)', 'cash_surrender_value', '')}
+      ${moneyField('Account value (AV)', 'account_value', money0(existing?.account_value))}
+      ${moneyField('Cash surrender value (CSV)', 'cash_surrender_value',
+        money0(existing?.cash_surrender_value))}
     </div>
     <div class="field-row">
-      ${moneyField('Cost of insurance (COI)', 'cost_of_insurance', '')}
-      ${moneyField('Death benefit', 'death_benefit', p.death_benefit ?? p.face_amount)}
+      ${moneyField('Cost of insurance (COI)', 'cost_of_insurance',
+        money0(existing?.cost_of_insurance))}
+      ${moneyField('Death benefit', 'death_benefit',
+        editing ? money0(existing.death_benefit) : (p.death_benefit ?? p.face_amount))}
     </div>
     <div class="field-row">
-      ${moneyField('Loan balance', 'loan_balance', '')}
-      ${inputField('Date of last withdrawal', 'date_of_last_withdrawal', '', 'date')}
+      ${moneyField('Loan balance', 'loan_balance', money0(existing?.loan_balance))}
+      ${inputField('Date of last withdrawal', 'date_of_last_withdrawal',
+        dateInput(existing?.date_of_last_withdrawal), 'date')}
     </div>
-    ${inputField('Notes', 'notes')}`;
+    ${inputField('Notes', 'notes', existing?.notes || '')}
 
-  openDialog('Add value snapshot', body, async (v) => {
-    await api(`/policies/${p.id}/values`, { method: 'POST', body: v });
-    toast('Snapshot saved');
-  });
+    <div class="dlg-section">The next premium, as the statement gives it</div>
+    <div class="field-row">
+      ${inputField('Next premium due', 'next_premium_due', '', 'date')}
+      ${moneyField('Amount', 'next_premium_amount', '')}
+    </div>
+    <span class="muted" style="font-size:12px">
+      Optional, and only recorded if you give both. This goes on the policy's servicing
+      calendar, which is the only thing the premium forecast and a capital call read —
+      entering it here and entering it under <strong>Schedule next step</strong> are the
+      same act. Leave it blank if the statement does not say.
+    </span>`;
+
+  openDialog(editing ? 'Edit value snapshot' : 'Add value snapshot', body, async (v) => {
+    const due = String(v.next_premium_due || '').trim();
+    const amount = String(v.next_premium_amount || '').replace(/,/g, '').trim();
+    if ((due && !amount) || (amount && !due))
+      throw new Error('A scheduled premium needs both a date and an amount. '
+        + 'Clear both if the statement does not give them.');
+    delete v.next_premium_due; delete v.next_premium_amount;
+
+    if (editing) await api(`/values/${existing.id}`, { method: 'PUT', body: v });
+    else await api(`/policies/${p.id}/values`, { method: 'POST', body: v });
+
+    if (due && amount) {
+      await api(`/policies/${p.id}/reminders`, { method: 'POST', body: {
+        kind: 'Premium', due_date: due, amount,
+        note: `Per the carrier statement of ${fmtDate(v.as_of_date)}` } });
+      toast(editing ? 'Snapshot updated · premium scheduled' : 'Snapshot saved · premium scheduled');
+    } else {
+      toast(editing ? 'Snapshot updated' : 'Snapshot saved');
+    }
+  }, editing ? 'Save' : 'Add');
 }
 
 /**
@@ -5387,7 +5588,8 @@ function maturityColumns(m, investorView) {
       cell: (r) => (gain(r) == null ? dash
         : `<span style="color:${gain(r) >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${
             fmtExact(gain(r))}</span>`) },
-    { key: 'rate', header: 'Return', cls: 'num', value: (r) => r.rate,
+    { key: 'rate', header: investorView ? 'Return' : 'Return · simple', cls: 'num',
+      value: (r) => r.rate,
       cell: (r) => `<span title="${paid(r) == null
         ? 'Provisional — assumes the death benefit is collected today'
         : r.rate_short ? 'Held under 90 days — an annualised rate is unreliable here'
@@ -5395,6 +5597,14 @@ function maturityColumns(m, investorView) {
         : `${r.rate_days} days held`}">${fmtRate(r.rate)}${
         r.rate != null && (paid(r) == null || r.rate_short || r.rate_ambiguous)
           ? '<span class="muted"> *</span>' : ''}</span>` },
+    /* Beside it rather than instead of it, and sortable on its own: a
+       register ordered by simple return and one ordered by compounded
+       return are not the same list, and which one somebody wants depends
+       on the question they came with. */
+    ...(investorView ? [] : [{ key: 'compound_rate', header: 'Return · compounded',
+      cls: 'num', value: (r) => r.compound_rate,
+      cell: (r) => `<span class="muted" title="Internal rate of return on the same dated cash flows">${
+        fmtRate(r.compound_rate)}</span>` }]),
   ];
 }
 
@@ -5655,8 +5865,11 @@ async function maturitiesView() {
              not folded in at today's date — it has had no time to run, so it
              would flatter the rate. That projection is still here, under the
              figure and named for what it is. */''}
-        <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}</div>
+        <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}${
+          showsBothRates() ? ' · simple' : ''}</div>
         <div class="value">${fmtRate(paidCount ? m.realized?.rate : m.portfolio?.rate)}</div>
+        ${showsBothRates() && compoundNote(paidCount ? m.realized : m.portfolio)
+          ? `<div class="note">${compoundNote(paidCount ? m.realized : m.portfolio)}</div>` : ''}
         <div class="note">${paidCount
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
              received${unpaidCount ? ` · ${fmtRate(m.portfolio?.rate)} with the other ${unpaidCount}
@@ -5763,7 +5976,10 @@ async function maturitiesView() {
           { header: 'Date Funded', key: 'proceeds_received_on' },
           { header: 'Gain', get: (r) => (r.proceeds_amount == null ? ''
             : (Number(r.proceeds_amount) - Number(r.total_invested || 0)) * shareFactor(r)) },
-          { header: 'Return %', get: (r) => (r.rate == null ? '' : (r.rate * 100).toFixed(4)) },
+          { header: 'Return % (simple)',
+            get: (r) => (r.rate == null ? '' : (r.rate * 100).toFixed(4)) },
+          { header: 'Return % (compounded)',
+            get: (r) => (r.compound_rate == null ? '' : (r.compound_rate * 100).toFixed(4)) },
           { header: 'Days Held', key: 'rate_days' },
         ], 'maturities'));
     },
@@ -8304,6 +8520,7 @@ function restoreFocus(f) {
  * A filter changes what is in the table and nothing else, so it redraws that.
  */
 async function render({ soft = false } = {}) {
+  screenKeys = null;
   const app = $('#app');
 
   if (!state.user) {

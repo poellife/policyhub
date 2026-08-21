@@ -58,6 +58,22 @@ const FURNITURE = `
   #vidCard .mark { width: 10px; height: 10px; border-radius: 50%; background: #0a0a0a; margin-bottom: 26px; }
   #vidCard h1 { margin: 0; font-size: 58px; font-weight: 700; letter-spacing: -0.04em; color: #0a0a0a; }
   #vidCard h2 { margin: 18px 0 0; font-size: 20px; font-weight: 400; color: #5c5c5c; letter-spacing: -0.01em; max-width: 720px; line-height: 1.5; }
+  /* The one line that asks the viewer to do something. Held back from the
+     body copy so it reads as an instruction rather than as more prose. */
+  #vidCard .cta {
+    margin-top: 30px; font-size: 22px; font-weight: 600; color: #0a0a0a;
+    letter-spacing: -0.01em; opacity: 0; transition: opacity 420ms ease;
+  }
+  #vidCard .cta.on { opacity: 1; }
+  /* Swapping one card's words for the next: the TYPE fades, the card does
+     not. Fading the card itself shows the application through it for a
+     quarter of a second, which is the flash the closing titles used to
+     have — a transition that reads as a fault. */
+  #vidCard .mark, #vidCard .eyebrow, #vidCard h1, #vidCard h2 {
+    transition: opacity 240ms ease;
+  }
+  #vidCard.swap .mark, #vidCard.swap .eyebrow,
+  #vidCard.swap h1, #vidCard.swap h2, #vidCard.swap .cta { opacity: 0; }
   #vidCard .eyebrow {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     text-transform: uppercase; letter-spacing: 0.18em; color: #8f8f8f; margin-bottom: 20px;
@@ -96,24 +112,65 @@ async function furnish() {
       const cur = document.createElement('div'); cur.id = 'vidCursor';
       document.body.appendChild(cur);
       const card = document.createElement('div'); card.id = 'vidCard';
-      card.innerHTML = '<div class="mark"></div><div class="eyebrow"></div><h1></h1><h2></h2>';
+      card.innerHTML = '<div class="mark"></div><div class="eyebrow"></div><h1></h1>'
+        + '<h2></h2><div class="cta"></div>';
       document.body.appendChild(card);
     }
   });
 }
 
-/** A full-screen brand card, held for `hold` ms, then faded out. */
-async function card(eyebrow, title, sub, hold = 2600) {
+/**
+ * A full-screen brand card, held for `hold` ms.
+ *
+ * `keep` is what stops the flash. Two cards in a row used to fade the first
+ * one out, hold on whatever page happened to be underneath for half a
+ * second, and fade the second one in — so the closing titles were
+ * interrupted by a glimpse of the statements screen. With `keep` the card
+ * stays up and only its words change, which is what a title sequence
+ * actually does.
+ */
+async function card(eyebrow, title, sub, hold = 2600, { keep = false, cta = '' } = {}) {
   await furnish();
-  await p.evaluate(([e, t, s]) => {
+  await hideCursor();
+  await p.evaluate(([e, t, s, k]) => {
     const c = document.getElementById('vidCard');
-    c.querySelector('.eyebrow').textContent = e;
-    c.querySelector('h1').textContent = t;
-    c.querySelector('h2').textContent = s;
-    c.classList.add('on');
-  }, [eyebrow, title, sub]);
+    const already = c.classList.contains('on');
+    const set = () => {
+      c.querySelector('.eyebrow').textContent = e;
+      c.querySelector('h1').textContent = t;
+      c.querySelector('h2').textContent = s;
+      const cta = c.querySelector('.cta');
+      cta.textContent = k;
+      cta.classList.toggle('on', !!k);
+    };
+    if (already) {
+      // The card stays exactly where it is; only its words change.
+      c.classList.add('swap');
+      setTimeout(() => { set(); c.classList.remove('swap'); }, 250);
+    } else {
+      set();
+      c.classList.remove('swap');
+      c.classList.add('on');
+    }
+  }, [eyebrow, title, sub, cta]);
   await wait(hold);
-  await p.evaluate(() => document.getElementById('vidCard').classList.remove('on'));
+  if (keep) return;
+  await p.evaluate(() => {
+    const c = document.getElementById('vidCard');
+    c.classList.remove('swap');
+    c.classList.remove('on');
+  });
+  await wait(560);
+}
+
+/** Fade a card that was held open with `keep` back out to the page. */
+async function closeCard() {
+  await p.evaluate(() => {
+    const c = document.getElementById('vidCard');
+    if (!c) return;
+    c.classList.remove('swap');
+    c.classList.remove('on');
+  });
   await wait(560);
 }
 
@@ -128,13 +185,8 @@ async function card(eyebrow, title, sub, hold = 2600) {
 async function caption(text, hold = 2400) {
   await furnish();
   const start = at();
-  await p.evaluate((t) => {
-    const c = document.getElementById('vidCap');
-    c.textContent = t; c.classList.add('on');
-  }, text);
   await wait(hold);
   subtitles.push({ text, start, end: at() });
-  await p.evaluate(() => document.getElementById('vidCap').classList.remove('on'));
   await wait(260);
 }
 
@@ -142,20 +194,16 @@ async function caption(text, hold = 2400) {
 async function say(text) {
   await furnish();
   const start = at();
-  await p.evaluate((t) => {
-    const c = document.getElementById('vidCap');
-    c.textContent = t; c.classList.add('on');
-  }, text);
-  return async () => {
-    subtitles.push({ text, start, end: at() });
-    await p.evaluate(() => document.getElementById('vidCap').classList.remove('on'));
-  };
+  return async () => { subtitles.push({ text, start, end: at() }); };
 }
 
-/* A full-screen card is a subtitle too, as far as somebody reading is
-   concerned — it is the words on screen at that second. */
+/* A full-screen card is a subtitle too, as far as somebody reading captions
+   is concerned — it is the words on screen at that second, and a caption
+   track that goes silent through the titles has lost them. Marked as a card
+   so the burned-in version can leave it out: the card is already saying it
+   in 58-point type, and repeating it along the bottom is noise. */
 const cardSub = (title, sub, start, end) =>
-  subtitles.push({ text: sub ? `${title} — ${sub}` : title, start, end });
+  subtitles.push({ text: sub ? `${title} — ${sub}` : title, start, end, card: true });
 
 /** Move the on-screen pointer to an element, then click it for real. */
 async function point(selector, { click = true, nth = 0 } = {}) {
@@ -204,16 +252,42 @@ async function glide(to, ms = 1500) {
  * see the figure it is about.
  * -------------------------------------------------------------------- */
 
-await p.goto(BASE);
-await p.waitForSelector('#loginForm');
-await wait(500);
+/* The recorder starts rolling the moment the page exists, which is a second
+   or so before anything has been asked to appear on it — so the first thing
+   the film showed was the sign-in screen painting itself, with the title
+   card arriving on top of it afterwards. A veil, installed before the
+   document's own scripts run, holds a plain white frame until the title is
+   up and we take it away deliberately. */
+await p.addInitScript(() => {
+  try { if (sessionStorage.getItem('vidVeil')) return; } catch { /* no storage yet */ }
+  const veil = document.createElement('div');
+  veil.id = 'vidVeil';
+  veil.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:99990;pointer-events:none';
+  const put = () => {
+    (document.documentElement || document).appendChild(veil);
+    try { sessionStorage.setItem('vidVeil', '1'); } catch { /* fine */ }
+  };
+  if (document.documentElement) put();
+  else document.addEventListener('readystatechange', put, { once: true });
+});
 
+await p.goto(BASE);
+await p.waitForSelector('#loginForm', { state: 'attached' });
+await wait(300);
+
+/* The name first, then the door. Whoever is watching should know whose
+   portal this is before they are shown a login box — a film that opens on
+   a password field has asked for something before it has said hello. */
 let t = at();
-await card('Poel Capital · Investor access', 'Your money, in plain sight',
+await card('Poel Capital', 'Investor Portal',
   'Everything you hold, what it has returned, and what is being asked of you — '
-  + 'up to the minute, whenever you want to look.', 4200);
-cardSub('Your money, in plain sight',
+  + 'up to the minute, whenever you want to look.', 4400, { keep: true });
+cardSub('Poel Capital Investor Portal',
   'Everything you hold and what it has returned — up to the minute.', t, at());
+/* Taken away underneath the card, so the sign-in screen is simply there when
+   the title lifts rather than arriving as a second event. */
+await p.evaluate(() => document.getElementById('vidVeil')?.remove());
+await closeCard();
 
 let done = await say('Your own login. Nobody sees your book but you and us.');
 await point('#email');
@@ -359,18 +433,33 @@ await wait(3000);
 await done();
 await glide(0, 900);
 
-/* ------------------------------ closing ----------------------------- */
+/* ------------------------------ closing -----------------------------
+ *
+ * Two cards, one background. `keep` holds the white card up between them
+ * so the words change and nothing else does — the earlier cut dropped
+ * back to the statements screen for half a second in between, which read
+ * as a fault in the film rather than as a transition.
+ */
+await hideCursor();
+await glide(0, 700);
+await wait(400);
+
 t = at();
 await card('', 'Nothing you have to ask for',
   'It is your money. The portal is simply where it is all written down — '
-  + 'open at any hour, current to the minute.', 4600);
+  + 'open at any hour, current to the minute.', 4600, { keep: true });
 cardSub('Nothing you have to ask for',
   'It is your money — open at any hour, current to the minute.', t, at());
 
 t = at();
-await card('', 'Poel Capital', 'Life settlement portfolio management · Southfield, Michigan', 3200);
-cardSub('Poel Capital', 'Life settlement portfolio management', t, at());
-await wait(600);
+await card('', 'Poel Capital',
+  'Life settlement portfolio management · Southfield, Michigan', 4600,
+  { keep: true, cta: 'Visit poelcapital.com to learn more' });
+cardSub('Poel Capital · Life settlement portfolio management',
+  'Visit poelcapital.com to learn more', t, at());
+/* Held to the last frame. Fading the card out here would end the film on
+   whatever page was behind it, which is the flash all over again. */
+await wait(900);
 
 await ctx.close();
 await br.close();
@@ -382,8 +471,8 @@ fs.renameSync(`${OUT}/${file}`, `${OUT}/raw.webm`);
 /* Written from the times the lines were actually on the screen, not from a
    guess at reading speed. Two small corrections: a line that overlaps the
    next is trimmed to end where the next begins, and a line too brief to
-   read is given a floor of 1.2 seconds — the burned-in caption has already
-   gone by then, but a caption track that flashes is unreadable. */
+   read is given a floor of 1.2 seconds — a caption track that flashes is
+   unreadable. */
 const stamp = (ms) => {
   const t = Math.max(0, Math.round(ms));
   const h = String(Math.floor(t / 3600000)).padStart(2, '0');
@@ -392,7 +481,7 @@ const stamp = (ms) => {
   return `${h}:${m}:${s},${String(t % 1000).padStart(3, '0')}`;
 };
 
-const cues = subtitles
+const tidy = (list) => list
   .filter((c) => c.text && c.end > c.start)
   .sort((a, b) => a.start - b.start)
   .map((c, i, all) => {
@@ -402,26 +491,45 @@ const cues = subtitles
     return { ...c, end };
   });
 
-const srt = cues.map((c, i) =>
+const srtOf = (list) => list.map((c, i) =>
   `${i + 1}\n${stamp(c.start)} --> ${stamp(c.end)}\n${c.text}\n`).join('\n');
-fs.writeFileSync(`${OUT}/investor-portal.srt`, srt);
 
-/* ------------------------------- the file ----------------------------- */
-/* webm is what the recorder produces; mp4 is what plays everywhere a person
-   might open it — a phone, a mail client, a slide. The re-encode is also the
-   only chance to fix the frame rate, which the recorder varies. */
+/* Two tracks from one set of timings.
+   The full one is the caption file that ships beside the film — it includes
+   the title cards, because somebody reading captions rather than hearing
+   them still needs to know what the titles said. The burn-in track leaves
+   the cards out: they are already on screen in 58-point type, and printing
+   them along the bottom as well just covers the picture twice. */
+const all = tidy(subtitles);
+const burnCues = tidy(subtitles.filter((c) => !c.card));
+fs.writeFileSync(`${OUT}/investor-portal.srt`, srtOf(all));
+fs.writeFileSync(`${OUT}/investor-portal.burned.srt`, srtOf(burnCues));
+
+/* ------------------------------- the files ---------------------------- */
+/* The recording is clean — no captions are drawn into the page — so the
+   plain cut is the master and the subtitled one is the same frames with
+   the track burned over them. Rendering both from one take is the only
+   way they can be frame-for-frame the same film; recording twice would
+   drift, and the two versions would not match. */
 const { execFileSync } = await import('node:child_process');
-execFileSync('ffmpeg', [
-  '-y', '-i', `${OUT}/raw.webm`,
+const { burn } = await import('./burn-subtitles.mjs');
+
+const CLEAN = `${OUT}/investor-portal.mp4`;
+const SUBBED = `${OUT}/investor-portal-subtitled.mp4`;
+
+/* 30fps because the recorder's frame rate varies; faststart because the
+   commonest way this gets watched is a click in a mail client. */
+execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', `${OUT}/raw.webm`,
   '-r', '30', '-c:v', 'libx264', '-preset', 'slow', '-crf', '20',
-  '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an',
-  `${OUT}/investor-portal.mp4`,
-], { stdio: 'inherit' });
+  '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', CLEAN], { stdio: 'inherit' });
+
+burn(CLEAN, SUBBED, burnCues);
 
 const seconds = Number(execFileSync('ffprobe', [
   '-v', 'error', '-show_entries', 'format=duration',
-  '-of', 'default=nw=1:nk=1', `${OUT}/investor-portal.mp4`,
-]).toString().trim());
+  '-of', 'default=nw=1:nk=1', CLEAN]).toString().trim());
 
-console.log(`recorded ${OUT}/investor-portal.mp4 — ${seconds.toFixed(1)}s, `
-  + `${cues.length} subtitles`);
+console.log(`recorded ${seconds.toFixed(1)}s`);
+console.log(`  ${CLEAN}`);
+console.log(`  ${SUBBED}  (${burnCues.length} burned-in lines)`);
+console.log(`  ${OUT}/investor-portal.srt  (${all.length} cues, titles included)`);

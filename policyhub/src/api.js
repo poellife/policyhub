@@ -822,7 +822,13 @@ router.post('/mail/test', authenticate, blockInvestors, requireRole('admin'),
     res.json({ ok: true, to: req.user.email, ...out });
   }));
 
-const PREF_CLEANERS = { policy_columns: cleanArrangement };
+/* Two surfaces arranged separately by the same machinery: the policies
+   grid somebody works from, and the Policy Schedule report they hand to
+   somebody else. Different jobs, different columns, one validator. */
+const PREF_CLEANERS = {
+  policy_columns: cleanArrangement,
+  report_columns: cleanArrangement,
+};
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
   const { rows } = await q(
@@ -1241,6 +1247,23 @@ router.get('/policies', wrap(async (req, res) => {
             ${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)', 'pl.total_invested', 4)}
                                                      AS death_benefit,
             ${afterCarry('pl.proceeds_amount', 'pl.total_invested', 4)} AS proceeds_amount,
+            /* The next premium actually scheduled against this policy.
+               premium_required and next_premium_due on the record beside
+               them describe how the policy was written; these are what
+               somebody entered on the servicing calendar, which is the only
+               thing any screen or report that says money is due may read. */
+            (SELECT r.due_date FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+              ORDER BY r.due_date LIMIT 1)            AS next_scheduled_due,
+            (SELECT r.amount FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+              ORDER BY r.due_date LIMIT 1)            AS next_scheduled_amount,
+            (SELECT COALESCE(SUM(r.amount), 0) FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+                AND r.due_date < CURRENT_DATE + 365)  AS scheduled_next_12mo,
             ${shareOf('pl.id', 4)} AS my_pct
        FROM policy_latest pl
       WHERE ($1 = '' OR pl.policy_number ILIKE '%'||$1||'%'
@@ -1269,6 +1292,23 @@ router.get('/policies/:id', wrap(async (req, res) => {
             ${afterCarry('COALESCE(pl.death_benefit, pl.face_amount)', 'pl.total_invested', 2)}
                                                      AS death_benefit,
             ${afterCarry('pl.proceeds_amount', 'pl.total_invested', 2)} AS proceeds_amount,
+            /* The next premium actually scheduled against this policy.
+               premium_required and next_premium_due on the record beside
+               them describe how the policy was written; these are what
+               somebody entered on the servicing calendar, which is the only
+               thing any screen or report that says money is due may read. */
+            (SELECT r.due_date FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+              ORDER BY r.due_date LIMIT 1)            AS next_scheduled_due,
+            (SELECT r.amount FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+              ORDER BY r.due_date LIMIT 1)            AS next_scheduled_amount,
+            (SELECT COALESCE(SUM(r.amount), 0) FROM policy_reminders r
+              WHERE r.policy_id = pl.id AND r.kind = 'Premium' AND r.done_at IS NULL
+                AND r.due_date >= CURRENT_DATE
+                AND r.due_date < CURRENT_DATE + 365)  AS scheduled_next_12mo,
             ${shareOf('pl.id', 2)} AS my_pct
        FROM policy_latest pl
       WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
@@ -1861,6 +1901,46 @@ router.post('/policies/:id/values', blockInvestors, canEdit, inPolicyScope('id')
   );
   await audit(req.user.uid, 'policy_value', rows[0].id, 'create', `policy ${req.params.id}`);
   res.status(201).json(rows[0]);
+}));
+
+/**
+ * Correct one.
+ *
+ * A carrier statement gets typed in wrong, or the same statement arrives
+ * again with a figure restated. Deleting the row and entering it afresh
+ * loses the fact that it was ever there — and on a date that already has a
+ * snapshot, re-entering it is a conflict rather than a correction.
+ *
+ * The date may move: a statement filed under the wrong month is one of the
+ * commoner mistakes, and the row that fixes it is the same row.
+ */
+router.put('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows: cur } = await q('SELECT * FROM policy_values WHERE id = $1', [req.params.id]);
+  if (!cur[0] || !(await assertPolicyInScope(req, cur[0].policy_id)))
+    return res.status(404).json({ error: 'Snapshot not found' });
+
+  const { sets, vals, next } = buildSet(VALUE_FIELDS, req.body);
+  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+
+  try {
+    const { rows } = await q(
+      `UPDATE policy_values SET ${sets.join(',')} WHERE id = $${next} RETURNING *`,
+      [...vals, req.params.id]);
+    const moved = String(rows[0].as_of_date) !== String(cur[0].as_of_date);
+    await audit(req.user.uid, 'policy_value', rows[0].id, 'update',
+      `policy ${cur[0].policy_id} · ${moved
+        ? `moved ${String(cur[0].as_of_date).slice(0, 10)} → ${String(rows[0].as_of_date).slice(0, 10)}`
+        : String(rows[0].as_of_date).slice(0, 10)}`);
+    res.json(rows[0]);
+  } catch (e) {
+    /* One snapshot per policy per date, which is what makes re-importing a
+       statement an update rather than a duplicate. Moving a row onto a date
+       that already has one has to be refused, not silently merged. */
+    if (e.code === '23505')
+      return res.status(409).json({
+        error: 'This policy already has a snapshot on that date.' });
+    throw e;
+  }
 }));
 
 router.delete('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
@@ -4222,7 +4302,13 @@ router.get('/maturities', wrap(async (req, res) => {
   const withReturn = rows.rows.map((r) => {
     const a = analyzeFlows(byPolicy.get(r.id) || []);
     return { ...r, rate: a.rate, rate_days: a.days, rate_short: a.short_period,
-             rate_ambiguous: a.ambiguous, multiple: a.multiple };
+             rate_ambiguous: a.ambiguous, multiple: a.multiple,
+             /* Both, always. Simple interest is the headline because it is
+                what the office quotes; the compounded rate is what an
+                investor comparing this against a bond will reach for, and
+                sending only one invites somebody to assume it is the
+                other. */
+             compound_rate: a.compound_rate };
   });
 
   /* Two different questions, and the headline is the first one.
@@ -4739,6 +4825,25 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   if (bad) return res.status(400).json(bad);
   await audit(req.user.uid, 'investor', rows[0].id, 'create', rows[0].name);
 
+  /* A manager's own investor, theirs from the moment they enter it.
+   *
+   * A manager sees the investors who hold a position in one of their
+   * entities, plus whoever an administrator has put in their hands by name.
+   * A brand new investor is neither — they hold nothing yet — so without
+   * this the record a manager had just typed in disappeared from their
+   * directory on the next page load, and they could not give them a login
+   * or allocate them anything. Adding the grant here is what makes "I look
+   * after this investor" true at the moment they say it, rather than after
+   * somebody else confirms it. */
+  if (isManager(req)) {
+    await q(`INSERT INTO user_investors (user_id, investor_id) VALUES ($1,$2)
+             ON CONFLICT DO NOTHING`, [req.user.uid, rows[0].id]);
+    await audit(req.user.uid, 'investor', rows[0].id, 'update',
+      `${rows[0].name} is in ${req.user.name || req.user.email}'s hands — `
+      + 'granted automatically to the manager who entered them');
+    req.user.investorIds = [...(req.user.investorIds || []), rows[0].id];
+  }
+
   let login = null;
   if (!wanted.none) {
     const client = await pool.connect();
@@ -5048,7 +5153,8 @@ router.get('/reports/returns', wrap(async (req, res) => {
         : net(Number(p.proceeds_amount) * factor),
       proceeds_received_on: p.proceeds_received_on,
       settled: p.proceeds_amount != null,
-      rate: a.rate, invested: a.invested, returned: a.returned, profit: a.profit,
+      rate: a.rate, compound_rate: a.compound_rate,
+      invested: a.invested, returned: a.returned, profit: a.profit,
       multiple: a.multiple, days: a.days, years: a.years,
       first_flow: a.first_flow, last_flow: a.last_flow,
       short_period: a.short_period, extreme: a.extreme, ambiguous: a.ambiguous,
@@ -5220,6 +5326,14 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         death_benefit: Number(p.death_benefit || 0) * factor,
         premium_required: Number(p.premium_required || 0) * factor,
         premium_mode: p.premium_mode, next_premium_due: p.next_premium_due,
+        /* What is actually scheduled against this policy, at this
+           investor's share. The two lines above are the policy record and
+           stay for reference; nothing that says money is due reads them. */
+        next_scheduled_due: (planned.get(p.id) || [])[0]?.due_date || null,
+        next_scheduled_amount: Number((planned.get(p.id) || [])[0]?.amount || 0) * factor,
+        scheduled_next_12mo: (planned.get(p.id) || [])
+          .filter((r) => String(r.due_date).slice(0, 10) <= addMonths(asOf, 12))
+          .reduce((s, r) => s + Number(r.amount || 0), 0) * factor,
         matured_on: p.matured_on,
         proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount) * factor,
         proceeds_received_on: p.proceeds_received_on,
@@ -5409,7 +5523,17 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
               COALESCE(SUM(pl.total_acquisition * ${w}),0) AS total_acquisition,
               COALESCE(SUM(pl.total_premiums * ${w}),0) AS total_premiums,
               COALESCE(SUM(pl.cost_of_insurance * ${w}),0) AS monthly_coi,
-              COALESCE(SUM(pl.premium_required * ${w}),0) AS annual_premium
+              COALESCE(SUM(pl.premium_required * ${w}),0) AS annual_premium,
+              /* What is actually scheduled to go out over the next year.
+                 The line above is the sum of the annual figures on the
+                 policy forms and is kept as reference; this is the one
+                 that answers "what do we have to find". */
+              COALESCE(SUM((SELECT COALESCE(SUM(r.amount), 0) FROM policy_reminders r
+                             WHERE r.policy_id = pl.id AND r.kind = 'Premium'
+                               AND r.done_at IS NULL
+                               AND r.due_date >= CURRENT_DATE
+                               AND r.due_date < CURRENT_DATE + 365) * ${w}), 0)
+                                                        AS scheduled_12mo
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
           AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}`, [fund, scope, funds]),

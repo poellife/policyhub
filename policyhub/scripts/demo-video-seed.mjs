@@ -116,6 +116,22 @@ for (const b of BOOK) {
       death_benefit: b.face } });
   }
 
+  /* What is coming, on the servicing calendar.
+     Every premium an investor is shown — the Premiums page, the next-due
+     tile on their portfolio, the premium forecast, and anything a capital
+     call is raised over — is read from here and from nowhere else. The
+     annual figure on the policy form above is reference data and reaches
+     none of those screens, so a book without these entries shows an
+     investor "nothing scheduled" however many policies they hold. */
+  const first = 12 + BOOK.indexOf(b) * 26;      // staggered, so the list has months in it
+  for (let n = 0; n < 3; n++)
+    await api(admin, `/policies/${p.id}/reminders`, { method: 'POST', body: {
+      kind: 'Premium',
+      due_date: addMonths(new Date(Date.now() + first * 86400000).toISOString().slice(0, 10),
+        12 * n),
+      amount: Math.round(b.premium * (1.04 ** (years + 1 + n))),
+      note: n === 0 ? 'Per the carrier statement' : 'Per the illustration' } });
+
   await api(admin, `/policies/${p.id}/investors`, { method: 'POST', body: {
     investor_id: investor.id, pct: b.pct, acquired_on: b.acquired } });
 }

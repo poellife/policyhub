@@ -594,6 +594,19 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
 /* A card that will accept the file hovering over it. Nothing moves and
    nothing is hidden — the outline is the whole signal, because a card
    that reflows under a dragged file is a card you can no longer aim at. */
+/* Walking the book: the back link and the two neighbours on one line,
+   with where you are in the list beside them. */
+.policy-walk { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.policy-walk .btn-sm { padding: 2px 9px; font-size: 11.5px; }
+.policy-walk .btn-sm[disabled] { opacity: .38; cursor: default; }
+.policy-walk .muted { font-size: 11.5px; }
+
+/* The insured's date of birth, beside their name rather than under it. */
+.h1-dob {
+  font-size: 17px; font-weight: 500; color: var(--text-muted);
+  letter-spacing: 0; margin-left: 10px; white-space: nowrap;
+}
+
 .drop-target { box-shadow: inset 0 0 0 2px var(--text-primary); }
 .drop-target::after {
   content: 'Drop to upload'; position: absolute; inset: auto 14px 12px auto;

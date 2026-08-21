@@ -67,8 +67,17 @@ console.log('THE DASHBOARD TILE');
 await p.waitForTimeout(900);
 const dashTiles = await p.locator('.kpi-row').first().textContent();
 check('a portfolio return tile is present', dashTiles.includes('Portfolio return'));
-check('showing a percentage', /Portfolio return\s*[\d.]+%/.test(dashTiles.replace(/\s+/g, ' ')),
-  (dashTiles.replace(/\s+/g, ' ').match(/Portfolio return [^·]{0,14}/) || [''])[0].trim());
+/* Staff see it labelled "· simple", because the compounded rate is quoted
+   beside it — an unqualified "return" with two different numbers on the
+   screen is the ambiguity the label exists to remove. */
+check('showing a percentage',
+  /Portfolio return( · simple)?\s*[\d.]+%/.test(dashTiles.replace(/\s+/g, ' ')),
+  (dashTiles.replace(/\s+/g, ' ').match(/Portfolio return[^·]{0,30}/) || [''])[0].trim());
+check('and naming which rate it is, since both are shown',
+  /Portfolio return · simple/.test(dashTiles.replace(/\s+/g, ' ')));
+check('with the compounded rate beside it',
+  /compounded/.test(dashTiles.replace(/\s+/g, ' ')),
+  (dashTiles.replace(/\s+/g, ' ').match(/[\d.]+% compounded/) || [''])[0]);
 
 console.log('\nTHE RETURN TAB ON A LIVE POLICY');
 await p.goto(`${BASE}/#/policy/${policy.id}`); await p.waitForSelector('.tabs');
