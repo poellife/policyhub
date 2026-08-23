@@ -264,6 +264,18 @@ export function extractSheets(root = document) {
         ? readNumber(text) : (text === '—' ? '' : text);
     }));
 
+    /* A table with nothing in it says so on screen -- "No policies in
+       force." across the width of it -- and that sentence is content, not
+       decoration. It is a single spanning cell, so the row filter above
+       drops it, and the file used to come out with a header row and a
+       silence underneath. An investor with no positions should read the
+       same on paper as on the screen. */
+    if (!rows.length) {
+      const only = table.querySelector('tbody tr td[colspan]');
+      const said = only ? cellText(only) : '';
+      if (said) rows.push(headCells.map((_, c) => (c === 0 ? said : '')));
+    }
+
     /* Totals belong in the file. Somebody checking a spreadsheet against
        the document will look for them, and a workbook that quietly drops
        them reads as a different report. */
@@ -289,7 +301,21 @@ export function extractSheets(root = document) {
       const h = el.querySelector?.('.rpt-h3') || (el.classList?.contains('rpt-h3') ? el : null);
       if (h) { name = cellText(h); break; }
     }
-    out.push({ name: name || `Table ${i + 1}`, columns, rows });
+
+    /* And whose document it is.
+     *
+     * Investor statements are one page per investor and fact sheets one
+     * per policy, each with the same two or three headings under it. Left
+     * at the heading alone, a statement for sixty investors is a hundred
+     * and twenty tables called "Positions in force" and "Premiums coming
+     * up" -- unreadable in a CSV, and not merely untidy in a workbook:
+     * two tabs may not share a name, and Excel refuses to open the file
+     * rather than saying which one is the duplicate. So the table is
+     * named for the person as well as the section. */
+    const owner = table.closest('.rpt-sheet')?.querySelector('.rpt-h2');
+    const whose = owner ? cellText(owner) : '';
+    const full = [whose, name].filter(Boolean).join(' - ');
+    out.push({ name: full || `Table ${i + 1}`, columns, rows });
   });
   return out;
 }
@@ -1921,6 +1947,15 @@ export async function reportsView(api, state) {
       const stem = () => `${safeName(REPORTS[r.type].name)}-${
         ($('#rptAsOf').value || '').slice(0, 10) || 'today'}`;
 
+      /* How big the document is, said accurately. This used to count the
+         first table only, so an investor statement covering sixty people
+         announced itself as the nine rows of the first one's positions. */
+      const sizeNote = (sheets) => {
+        const rows = sheets.reduce((n, s2) => n + s2.rows.length, 0);
+        const count = `${rows.toLocaleString('en-US')} row${rows === 1 ? '' : 's'}`;
+        return sheets.length > 1 ? `${sheets.length} tables · ${count}` : count;
+      };
+
       const onDownload = (sel, run) => $(sel).addEventListener('click', async () => {
         const btn = $(sel);
         const was = btn.textContent;
@@ -1952,8 +1987,7 @@ export async function reportsView(api, state) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: REPORTS[r.type].name,
-            subtitle: [fundNote(r.fund), `${sheets[0].rows.length} rows`]
-              .filter(Boolean).join(' · '),
+            subtitle: [fundNote(r.fund), sizeNote(sheets)].filter(Boolean).join(' · '),
             as_of: $('#rptAsOf').value || '',
             confidential: r.showBasis,
             sheets,

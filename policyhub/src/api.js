@@ -5403,7 +5403,11 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
 
   const out = investors.map((inv) => {
     const mine = byInvestor.get(inv.id) || [];
-    const allFlows = [];
+    /* One flow array per position, kept apart rather than concatenated.
+       `poolFlows` needs them separate to measure each policy against its
+       own end date; pouring them into one series is the mistake its note
+       in public/irr.js exists to describe. */
+    const groups = [];
     const paid = {};          // what has actually left this investor, by kind
     const upcoming = [];      // what is due to leave next
 
@@ -5420,7 +5424,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         { ...p, benefit: p.death_benefit }, asOf, lastOut);
       const withTerminal = terminal
         ? [...flows, { ...terminal, amount: terminal.amount * factor }] : flows;
-      allFlows.push(...withTerminal);
+      groups.push(withTerminal);
       const a = analyzeFlows(withTerminal);
 
       /* What this investor will be asked for comes from the servicing
@@ -5462,7 +5466,22 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
       };
     });
 
-    const overall = analyzeFlows(allFlows);
+    /* This investor's return across everything they hold.
+     *
+     * Pooled, not poured into one series. Simple interest measures every
+     * dollar against ONE end date, and a person holding a policy that
+     * settled in 2019 and another still running has two: run as one
+     * series, the 2019 cheque is read as capital handed back and left
+     * idle for the years since, its dollar-years come out large and
+     * negative, and the denominator the whole rate stands on is wrong --
+     * it can pass through zero and take the rate with it.
+     *
+     * Pooling measures each position against its own end and then adds:
+     * total profit over total dollar-years. That is what makes the figure
+     * weighted by the size of each position and by how long it has been
+     * held, so a $10m holding counts for ten times a $1m one rather than
+     * the two being averaged as equals. */
+    const overall = poolFlows(groups);
     const live = rows.filter((r) => r.status !== 'Matured');
     const realized = rows.filter((r) => r.status === 'Matured');
     upcoming.sort((a, b) => (a.date < b.date ? -1 : 1));

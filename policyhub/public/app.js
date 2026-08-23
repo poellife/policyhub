@@ -1261,10 +1261,17 @@ async function dashboardView() {
       <div class="stat">
         <div class="label">Portfolio return${showsBothRates() ? ' · simple' : ''}</div>
         <div class="value">${fmtRate(sum.rate?.rate)}</div>
+        ${''/* Said on the tile, because the question comes up: this is not
+               the average of the policies' rates. It is total profit over
+               total dollar-years, so a $10m position counts for ten times
+               a $1m one, and a policy held eight years for more than one
+               held eight months. The Returns report prints the plain
+               average beside it if anybody wants to see the gap. */}
         <div class="note">${compoundNote(sum.rate)
           ? `${compoundNote(sum.rate)} · ` : ''}${sum.rate?.days
           ? `if every policy matured today · ${(sum.rate.days / 365).toFixed(1)} yr span`
-          : 'no dated cash flows yet'}</div>
+          : 'no dated cash flows yet'}${sum.rate?.rate != null
+          ? ' · weighted by capital and time, not averaged across policies' : ''}</div>
       </div>
       ${isInvestorUser() ? `
       <div class="stat">
