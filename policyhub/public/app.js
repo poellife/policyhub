@@ -38,7 +38,12 @@ const state = {
   route: 'dashboard',
   params: {},
   policies: [],
-  filters: { search: '', status: '', fund: '' },
+  /* Which owner entities the staff screens are narrowed to, and to what
+     status. An array rather than one code: see the entity filter below. */
+  filters: { search: '', status: '', funds: [] },
+  /* The view this person asked to be remembered, as it came back from the
+     server, so the picker can say whether what is on screen is it. */
+  viewDefault: null,
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -79,6 +84,7 @@ async function loadPrefs() {
     const prefs = await api('/me/prefs');
     state.policyCols = prefs?.policy_columns || null;
     state.reportCols = prefs?.report_columns || null;
+    applyViewDefault(prefs?.view_defaults || null);
   } catch {
     state.policyCols = null;
   }
@@ -163,29 +169,220 @@ function avgAgeCell(f) {
  * a per-page filter that silently resets is how somebody ends up reading
  * one entity's totals beside another's alerts.
  *
+ * Several at once, not one. Somebody who runs two entities together reads
+ * them together, and the alternative — look at one, write the number down,
+ * look at the other, add them up by hand — is how a total ends up wrong.
+ * Nothing selected still means the whole book, which is what a person
+ * means by "all", so the empty selection and the complete one agree.
+ *
  * Investors never see it. They hold percentages of policies, not
  * entities, and the entity is not theirs to know about.
  * ------------------------------------------------------------------- */
 
-const entityFilter = () => (isInvestorUser() ? '' : state.filters.fund || '');
-const entityQuery = () => (entityFilter() ? `fund=${encodeURIComponent(entityFilter())}` : '');
+/** The codes chosen, in the order the entities are listed. */
+const entityCodes = () => (isInvestorUser() ? [] : (state.filters.funds || []));
 
-/** The picker itself, for a page heading. Empty for anyone who may not use it. */
+/* What goes on the wire: comma separated, blank for the whole book. Every
+   filtered endpoint reads it the same way, so one code and five are the
+   same request with a different list in it. */
+const entityParam = () => entityCodes().join(',');
+const entityQuery = () => (entityParam() ? `fund=${encodeURIComponent(entityParam())}` : '');
+
+/**
+ * The selection said in words, for a page's subheading.
+ *
+ * Named rather than counted while the list is short enough to read — "LCG1
+ * and LCG2 only" tells somebody what they are looking at; "2 entities"
+ * makes them open the picker to find out.
+ */
+const entityWords = (codes) => {
+  if (!codes.length) return '';
+  if (codes.length === 1) return codes[0];
+  if (codes.length === 2) return `${codes[0]} and ${codes[1]}`;
+  if (codes.length === 3) return `${codes[0]}, ${codes[1]} and ${codes[2]}`;
+  return `${codes.length} entities`;
+};
+const entityLabel = () => entityWords(entityCodes());
+
+/** Whether what is on screen is what this person asked to be remembered. */
+const viewIsDefault = () => {
+  const d = state.viewDefault;
+  if (!d) return false;
+  const a = [...entityCodes()].sort().join(',');
+  const b = [...(d.funds || [])].sort().join(',');
+  return a === b && (d.status || '') === (state.filters.status || '');
+};
+
+/**
+ * The picker itself, for a page heading. Empty for anyone who may not use it.
+ *
+ * A button and a list of tick boxes rather than a multiple <select>: a
+ * native multi-select needs ctrl-click to add a second entity and shows
+ * one row at a time on a laptop, which makes choosing two a thing people
+ * do by accident and undo by accident.
+ */
 const entityPicker = (funds) => (isInvestorUser() ? '' : `
-  <select id="entityFilter" class="head-select" aria-label="Owner entity">
-    <option value="">All entities</option>
-    ${(funds || []).map((f) => `<option value="${esc(f.code)}" ${
-      entityFilter() === f.code ? 'selected' : ''}>${esc(f.code)}${
-      f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
-  </select>`);
+  <div class="entity-pick" id="entityPick">
+    <button type="button" class="head-select entity-btn" id="entityBtn"
+            aria-haspopup="true" aria-expanded="false">
+      <span>${entityCodes().length ? esc(entityLabel()) : 'All entities'}</span>
+      <span class="entity-caret" aria-hidden="true">▾</span>
+    </button>
+    <div class="entity-menu" id="entityMenu" role="group" aria-label="Owner entities" hidden>
+      <label class="entity-opt entity-all">
+        <input type="checkbox" id="entityAll" ${entityCodes().length ? '' : 'checked'}>
+        <span><strong>All entities</strong></span>
+      </label>
+      <div class="entity-list">
+        ${(funds || []).map((f) => `
+          <label class="entity-opt">
+            <input type="checkbox" class="entity-one" value="${esc(f.code)}" ${
+              entityCodes().includes(f.code) ? 'checked' : ''}>
+            <span>${esc(f.code)}${f.name && f.name !== f.code
+              ? ` <span class="muted">— ${esc(f.name)}</span>` : ''}</span>
+          </label>`).join('')}
+      </div>
+      <div class="entity-foot">
+        ${viewIsDefault()
+    ? `<span class="entity-saved">This is your default view</span>
+           <button type="button" class="btn-link" id="entityForget">Forget it</button>`
+    : `<button type="button" class="btn-link" id="entityRemember">Remember this view</button>${
+      state.viewDefault ? `
+           <button type="button" class="btn-link" id="entityRestore">Back to my default</button>` : ''}`}
+      </div>
+    </div>
+  </div>`);
 
-/** Wire it up. Call from a view's `after`. */
-const wireEntityPicker = () => {
-  $('#entityFilter')?.addEventListener('change', (e) => {
-    state.filters.fund = e.target.value;
+/**
+ * Wire it up. Call from a view's `after`.
+ *
+ * `soft` for screens that can repaint without refetching everything —
+ * the policies grid filters in place, the dashboard has to ask the server
+ * for another set of totals.
+ */
+const wireEntityPicker = ({ soft = false } = {}) => {
+  const pick = $('#entityPick');
+  if (!pick) return;
+  const menu = $('#entityMenu', pick);
+  const btn = $('#entityBtn', pick);
+
+  /* Ticking a box does not reload the page. Choosing three entities is one
+     decision, and refetching the dashboard between the first tick and the
+     third would show two sets of totals nobody asked for. The list is read
+     when the menu closes, and only then, and only if it changed. */
+  const before = entityParam();
+  const pending = () => [...pick.querySelectorAll('.entity-one:checked')].map((b) => b.value);
+
+  /* Clicking anywhere else closes it. The document listener exists only
+     while the menu is open and is taken off again when it shuts, so a
+     screen repainted forty times does not leave forty of them behind. */
+  const away = () => open(false);
+  const open = (yes) => {
+    menu.hidden = !yes;
+    btn.setAttribute('aria-expanded', yes ? 'true' : 'false');
+    pick.classList.toggle('open', yes);
+    if (yes) document.addEventListener('click', away);
+    else document.removeEventListener('click', away);
+    if (yes) return;
+    const now = pending();
+    if (now.join(',') === before) return;
+    state.filters.funds = now;
+    render(soft ? { soft: true } : undefined);
+  };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); open(menu.hidden); });
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  pick.addEventListener('keydown', (e) => { if (e.key === 'Escape') open(false); });
+
+  /* The button says what is chosen while the menu is still open, so the
+     reader can see the answer forming without closing it to check. */
+  const label = $('#entityBtn span', pick);
+  const restate = () => {
+    const codes = pending();
+    label.textContent = codes.length ? entityWords(codes) : 'All entities';
+    $('#entityAll', pick).checked = codes.length === 0;
+  };
+
+  $('#entityAll', pick)?.addEventListener('change', () => {
+    pick.querySelectorAll('.entity-one').forEach((b) => { b.checked = false; });
+    restate();
+  });
+  pick.querySelectorAll('.entity-one').forEach((box) =>
+    box.addEventListener('change', restate));
+
+  /* Remembering reads the boxes as they stand, so a person can tick two
+     entities and make that their view in one visit to the menu. */
+  const settle = () => { state.filters.funds = pending(); };
+  $('#entityRemember', pick)?.addEventListener('click', () => {
+    settle(); menu.hidden = true; document.removeEventListener('click', away); rememberView();
+  });
+  $('#entityForget', pick)?.addEventListener('click', () => {
+    menu.hidden = true; document.removeEventListener('click', away); forgetView();
+  });
+  $('#entityRestore', pick)?.addEventListener('click', () => {
+    menu.hidden = true;
+    document.removeEventListener('click', away);
+    state.filters.funds = [...(state.viewDefault.funds || [])];
+    state.filters.status = state.viewDefault.status || '';
     render();
   });
 };
+
+/* ------------------------- the remembered view -----------------------
+ * Somebody who works in one entity should not have to say so every
+ * morning. What is stored is the entity selection and the status the
+ * policies grid is set to — the two things that make a screen "mine" —
+ * against the account rather than the browser, so it follows them to
+ * whichever machine they sign in from.
+ *
+ * Asked for rather than assumed. Remembering every selection silently
+ * would mean that looking at one entity for a minute quietly changes what
+ * you see for good, and there would be no way to look without changing.
+ * ------------------------------------------------------------------- */
+
+/** What the stored view looks like, cleaned of anything odd. */
+const viewFrom = (pref) => (pref && typeof pref === 'object' && !Array.isArray(pref)
+  ? {
+    funds: (Array.isArray(pref.funds) ? pref.funds : []).filter((c) => typeof c === 'string'),
+    status: typeof pref.status === 'string' ? pref.status : '',
+  }
+  : null);
+
+/**
+ * Put the remembered view back. Sign-in only.
+ *
+ * Restoring it later — after a repaint, say — would mean the application
+ * arguing with a choice the reader made a moment ago.
+ */
+function applyViewDefault(pref) {
+  state.viewDefault = viewFrom(pref);
+  if (!state.viewDefault || isInvestorUser()) return;
+  state.filters.funds = [...state.viewDefault.funds];
+  state.filters.status = state.viewDefault.status || '';
+}
+
+async function rememberView() {
+  const view = { funds: entityCodes(), status: state.filters.status || '' };
+  state.viewDefault = view;
+  try {
+    await api('/me/prefs/view_defaults', { method: 'PUT', body: view });
+    toast(view.funds.length
+      ? `${entityLabel()} is what you will see when you sign in`
+      : 'The whole book is what you will see when you sign in');
+  } catch (err) {
+    state.viewDefault = null;
+    toast(`That was not saved: ${err.message}`);
+  }
+  render();
+}
+
+async function forgetView() {
+  state.viewDefault = null;
+  try {
+    await api('/me/prefs/view_defaults', { method: 'DELETE' });
+    toast('Signing in will show you the whole book again');
+  } catch (err) { toast(`That was not cleared: ${err.message}`); }
+  render();
+}
 
 /** Entities, fetched once per session and kept on state. */
 const loadFunds = async () => {
@@ -252,6 +449,30 @@ function ageFrom(dob, at) {
 
 const insuredName = (p) =>
   p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
+
+/**
+ * What a capital call is about, in one cell.
+ *
+ * The title on every premium call is the same words, so a list of them says
+ * nothing about which policies each one covers. The lives do. Two names
+ * fit; past that it says how many more, and the whole list is one click
+ * away in the call itself.
+ *
+ * The names arrive from the API already reduced to initials for an
+ * investor, so this does not have to know who is reading.
+ */
+function coveredBy(call) {
+  const items = call?.covers || [];
+  if (!items.length) return '<span class="muted">—</span>';
+  const names = [...new Set(items
+    .map((i) => String(i.insured_name || '').trim())
+    .filter(Boolean))];
+  if (!names.length) return `<span class="muted">${items.length} ${
+    items.length === 1 ? 'policy' : 'policies'}</span>`;
+  const shown = names.slice(0, 2).map(esc).join(', ');
+  return names.length > 2
+    ? `${shown} <span class="muted">+${names.length - 2} more</span>` : shown;
+}
 
 const statusBadge = (s) =>
   `<span class="badge ${esc(String(s || '').toLowerCase())}"><span class="dot"></span>${esc(s || 'Unknown')}</span>`;
@@ -331,7 +552,7 @@ async function exportCsv(filename, rows, columns, kind) {
     await api('/exports', { method: 'POST', body: {
       kind: kind || filename.replace(/\.csv$/, ''),
       rows: rows.length,
-      scope: [state.filters?.fund, state.filters?.status, state.filters?.search]
+      scope: [entityParam(), state.filters?.status, state.filters?.search]
         .filter(Boolean).join(' · '),
     } });
   } catch (err) {
@@ -979,7 +1200,7 @@ async function dashboardView() {
       <div>
         <h1>${isInvestorUser() ? 'Your portfolio' : 'Portfolio dashboard'}</h1>
         <div class="sub">${t.policy_count} ${t.policy_count === 1 ? 'position' : isInvestorUser() ? 'positions' : 'active policies'}${
-          !isInvestorUser() && entityFilter() ? ` in ${esc(entityFilter())}` : ''}${
+          !isInvestorUser() && entityLabel() ? ` in ${esc(entityLabel())}` : ''}${
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
@@ -1208,6 +1429,12 @@ wireReports({
   pick: (opts) => openColumnsDialog(opts),
   save: (fields) => saveReportColumns(fields),
   reset: () => resetReportColumns(),
+  /* Reports had an owner picker of its own. It is the same question every
+     other screen asks, and two controls for it meant a person could look
+     at LCG1 all morning and print LCG2 without noticing. */
+  entityPicker: (funds) => entityPicker(funds),
+  wireEntityPicker: () => wireEntityPicker(),
+  entityCodes: () => entityCodes(),
 });
 
 const policyFieldList = () =>
@@ -1408,7 +1635,7 @@ function sortPolicies(rows) {
 
 async function policiesView() {
   const [policies, funds] = await Promise.all([
-    api(`/policies?search=${encodeURIComponent(state.filters.search)}&status=${encodeURIComponent(state.filters.status)}&fund=${encodeURIComponent(state.filters.fund)}`),
+    api(`/policies?search=${encodeURIComponent(state.filters.search)}&status=${encodeURIComponent(state.filters.status)}&fund=${encodeURIComponent(entityParam())}`),
     isInvestorUser() ? Promise.resolve([])
       : state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
   ]);
@@ -1439,6 +1666,7 @@ async function policiesView() {
     <div class="page-head">
       <div><h1>${isInvestorUser() ? 'My policies' : 'Policies'}</h1>
         <div class="sub">${rows.length} of ${policies.length ? policies.length : 0} shown${
+          entityLabel() ? ` · ${esc(entityLabel())} only` : ''}${
           isInvestorUser() ? ' · every figure is your share of each policy' : ''}</div></div>
       <div class="spacer"></div>
       ${shareToggle()}
@@ -1454,10 +1682,7 @@ async function policiesView() {
         ${['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending']
           .map((s) => `<option ${state.filters.status === s ? 'selected' : ''}>${s}</option>`).join('')}
       </select>
-      <select id="fundFilter" style="${isInvestorUser() ? 'display:none' : ''}">
-        <option value="">All owners</option>
-        ${funds.map((f) => `<option ${state.filters.fund === f.code ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
-      </select>
+      ${entityPicker(funds)}
     </div>
 
     ${canBulkDelete && state.selected.size ? `
@@ -1527,8 +1752,7 @@ async function policiesView() {
       wireSearch('#searchInput', (term) => { state.filters.search = term; });
       $('#statusFilter').addEventListener('change', (e) => {
         state.filters.status = e.target.value; render({ soft: true }); });
-      $('#fundFilter')?.addEventListener('change', (e) => {
-        state.filters.fund = e.target.value; render({ soft: true }); });
+      wireEntityPicker({ soft: true });
       $('#columnsBtn').addEventListener('click', () => openColumnsDialog());
 
       /* A heading does two jobs: click it to sort, drag it to move the column.
@@ -1669,7 +1893,7 @@ async function policyView() {
     state.policies = await api(
       `/policies?search=${encodeURIComponent(state.filters.search)}`
       + `&status=${encodeURIComponent(state.filters.status)}`
-      + `&fund=${encodeURIComponent(state.filters.fund)}`).catch(() => []);
+      + `&fund=${encodeURIComponent(entityParam())}`).catch(() => []);
   const walk = sortPolicies(state.policies || []);
   const here = walk.findIndex((x) => x.id === p.id);
   const prev = here > 0 ? walk[here - 1] : null;
@@ -3851,7 +4075,7 @@ async function servicingView() {
              ${upcoming.length} scheduled premium ${upcoming.length === 1 ? 'payment' : 'payments'}${
              (svc.scheduled || []).length ? ` · ${svc.scheduled.length} follow-up${
                svc.scheduled.length === 1 ? '' : 's'} outstanding` : ''}`}${
-             !investor && entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
+             !investor && entityLabel() ? ` · ${esc(entityLabel())} only` : ''}</div></div>
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
@@ -3883,7 +4107,7 @@ async function servicingView() {
         <button class="btn-sm" id="toggleCancelledCalls" style="margin-left:10px">${
           state.showCancelledCalls ? 'Hide' : 'Show'} ${cancelledCount} cancelled</button>` : ''}</div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Called</th><th>What for</th><th>Money in by</th>
+        <thead><tr><th>Called</th><th>What for</th><th>Covers</th><th>Money in by</th>
           ${investor ? '<th class="num">Your share</th><th>You</th>'
             : '<th class="num">Asked</th><th class="num">Received</th><th>Parties</th>'}
           <th></th></tr></thead>
@@ -3891,6 +4115,10 @@ async function servicingView() {
           <td class="muted">${fmtDate(c.created_at)}</td>
           <td class="strong">${esc(c.title || 'Capital call')}${c.fund_code
             ? ` <span class="muted">· ${esc(c.fund_code)}</span>` : ''}</td>
+          ${''/* Which lives it is about. Two calls with the same title, the
+                 same date and different policies are otherwise
+                 indistinguishable on this list. */}
+          <td class="secondary">${coveredBy(c)}</td>
           <td>${fmtDate(c.due_date)}${c.status !== 'Open'
             ? ` <span class="badge">${esc(c.status)}</span>` : ''}</td>
           ${investor ? `
@@ -4188,7 +4416,7 @@ async function openRaiseCallDialog() {
     $('#callSummary', dlg).innerHTML = summary(null);
     try {
       draft = await api(`/capital-calls/draft?days=${days}`
-        + `&fund=${encodeURIComponent(entityFilter())}`);
+        + `&fund=${encodeURIComponent(entityParam())}`);
     } catch (err) { draft = { error: err.message, items: [], investors: [] }; }
     excluded = new Set();
     paint();
@@ -5640,7 +5868,7 @@ function sortMaturities(rows, cols) {
 async function carryView() {
   const status = state.carryStatus || 'all';
   const [d, funds] = await Promise.all([
-    api(`/carry?status=${status}&fund=${encodeURIComponent(entityFilter())}`),
+    api(`/carry?status=${status}&fund=${encodeURIComponent(entityParam())}`),
     state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
   ]);
   state.funds = funds;
@@ -5653,7 +5881,7 @@ async function carryView() {
         <div class="sub">${t.policies} ${t.policies === 1 ? 'policy' : 'policies'}${
           t.charged < t.policies
             ? ` · ${t.policies - t.charged} in entities that charge none` : ''}${
-          entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
+          entityLabel() ? ` · ${esc(entityLabel())} only` : ''}</div></div>
       <div class="spacer"></div>
       <select id="carryStatus" class="head-select">
         ${[['all', 'All policies'], ['active', 'Still running'], ['matured', 'Matured']]
@@ -5820,7 +6048,7 @@ async function maturitiesView() {
       <div><h1>${investorView ? 'Realized' : 'Maturities'}</h1>
         <div class="sub">${rows.length} matured ${rows.length === 1 ? 'policy' : 'policies'} ·
           ${t.paid_count} paid · ${rows.length - t.paid_count} awaiting payment${
-          !investorView && entityFilter() ? ` · ${esc(entityFilter())} only` : ''}</div></div>
+          !investorView && entityLabel() ? ` · ${esc(entityLabel())} only` : ''}</div></div>
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${shareToggle()}
@@ -6023,7 +6251,7 @@ async function insuredsView() {
     <div class="page-head">
       <div><h1>Insureds</h1>
         <div class="sub">${rows.length} ${rows.length === 1 ? 'person' : 'people'}${
-          entityFilter() ? ` in ${esc(entityFilter())}` : ''}${
+          entityLabel() ? ` in ${esc(entityLabel())}` : ''}${
           avgAge ? ` · average age ${avgAge}` : ''}</div></div>
       <div class="spacer"></div>
       ${entityPicker(funds)}
@@ -6215,7 +6443,7 @@ async function investorsView() {
     <div class="page-head">
       <div><h1>Investors</h1>
         <div class="sub">${rows.length} ${rows.length === 1 ? 'investor' : 'investors'} · ${
-          totals.pos} positions${entityFilter() ? ` · ${esc(entityFilter())} only` : ''}${
+          totals.pos} positions${entityLabel() ? ` · ${esc(entityLabel())} only` : ''}${
           rows.filter((r) => !r.fund_code).length
             ? ` · ${rows.filter((r) => !r.fund_code).length} not assigned to an entity` : ''}</div></div>
       <div class="spacer"></div>

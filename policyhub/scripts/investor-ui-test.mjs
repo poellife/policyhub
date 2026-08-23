@@ -137,8 +137,13 @@ await inv.waitForTimeout(800);
 const detailText = (await inv.locator('.main').textContent()).replace(/\s+/g, ' ');
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 // Some cards render whole dollars, some to the cent; match on the digits.
+/* Some cards render to the cent, some to whole dollars — the Policy
+   Schedule rounds because cents across five columns and forty rows is a
+   couple of hundred digits nobody reads. Match on the digits, not on one
+   particular way of writing them. */
 const anyMoney = (hay, n) => hay.includes(money(n))
-  || hay.includes(money(n).replace(/\.00$/, ''));
+  || hay.includes(money(n).replace(/\.00$/, ''))
+  || hay.includes(money(Math.round(n)).replace(/\.00$/, ''));
 
 check('a banner states the percentage they own',
   (await inv.locator('.share-banner').count()) === 1,
@@ -238,7 +243,7 @@ console.log('\nTHEIR STATEMENTS ARE THEIR SHARE TOO');
 await inv.goto(`${BASE}/#/reports`); await inv.waitForSelector('#rptGenerate');
 await inv.waitForTimeout(600);
 check('the section is called Statements', /Statements/.test(await inv.locator('h1').textContent()));
-check('with no owner-entity picker', !(await inv.locator('#rptFund').isVisible().catch(() => false)));
+check('with no owner-entity picker', (await inv.locator('#entityPick').count()) === 0);
 
 // The policy schedule is built from raw records, so it is the one that would
 // leak whole-policy figures if the scaling were missed.

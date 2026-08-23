@@ -12,7 +12,8 @@
    works.
    ===================================================================== */
 import { chromium } from 'playwright';
-import { BASE, ADMIN, INVESTOR1, login } from './test-config.mjs';
+import { BASE, ADMIN, INVESTOR1, login,
+         pickEntities, chosenEntities } from './test-config.mjs';
 
 const PREFIX = 'ENTVIEW';
 const S = '/home/claude/shots';
@@ -172,7 +173,7 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row', { time
 for (const [route, name] of [['insureds', 'Insureds'], ['servicing', 'Servicing'],
                              ['maturities', 'Maturities'], ['dashboard', 'the dashboard']]) {
   await p.goto(`${BASE}/#/${route}`); await p.waitForTimeout(1300);
-  check(`${name} offers the entity picker`, (await p.locator('#entityFilter').count()) === 1);
+  check(`${name} offers the entity picker`, (await p.locator('#entityPick').count()) === 1);
 }
 
 /* One selection, carried between screens — a filter that silently resets
@@ -180,8 +181,7 @@ for (const [route, name] of [['insureds', 'Insureds'], ['servicing', 'Servicing'
    alerts. */
 await p.goto(`${BASE}/#/insureds`); await p.waitForTimeout(1200);
 const allRows = await p.locator('table.data tbody tr').count();
-await p.locator('#entityFilter').selectOption('LCG1');
-await p.waitForTimeout(1400);
+await pickEntities(p, ['LCG1']);
 const oneRows = await p.locator('table.data tbody tr').count();
 check('choosing an entity narrows the list on screen', oneRows < allRows,
   `${oneRows} of ${allRows}`);
@@ -213,15 +213,14 @@ await p.screenshot({ path: `${S}/ev5-dashboard-age.png`, fullPage: true });
 
 await p.goto(`${BASE}/#/servicing`); await p.waitForTimeout(1400);
 check('the choice is still LCG1 on the next screen',
-  (await p.locator('#entityFilter').inputValue()) === 'LCG1');
+  (await chosenEntities(p)).join(',') === 'LCG1');
 check('and that screen says so too',
   /LCG1 only/.test(await p.locator('.page-head .sub').first().textContent()),
   (await p.locator('.page-head .sub').first().textContent()).trim());
 await p.goto(`${BASE}/#/maturities`); await p.waitForTimeout(1400);
-check('and on maturities', (await p.locator('#entityFilter').inputValue()) === 'LCG1');
+check('and on maturities', (await chosenEntities(p)).join(',') === 'LCG1');
 
-await p.locator('#entityFilter').selectOption('');
-await p.waitForTimeout(1200);
+await pickEntities(p, []);
 await p.goto(`${BASE}/#/settings`); await p.waitForTimeout(1500);
 const entityCard = p.locator('.card', { hasText: 'Owner entities' });
 const heads = (await entityCard.locator('thead th').allTextContents()).map((h) => h.trim());

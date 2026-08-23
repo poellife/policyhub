@@ -8,6 +8,7 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
+import { cleanReport, reportPdf } from './report-pdf.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
   mailFromProblem } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
@@ -236,6 +237,27 @@ const int = (v) => {
   return n === null ? null : Math.round(n);
 };
 const str = (v) => (v === null || v === undefined ? '' : String(v).trim());
+
+/**
+ * The owner entities a screen is asking about.
+ *
+ * One code, several, or none at all. The picker sends them comma
+ * separated and every filtered query reads the parameter the same way --
+ * blank still means the whole book, and a single code is simply a list of
+ * one, so nothing that worked when this was a single choice stops working.
+ *
+ * Cleaned here rather than trusted: blanks dropped, duplicates dropped,
+ * and a ceiling on how many, because the string is handed to
+ * string_to_array in the SQL and there is no reason for it to be long.
+ */
+const fundParam = (v) => {
+  const seen = [];
+  for (const part of str(v).split(',')) {
+    const code = part.trim();
+    if (code && !seen.includes(code)) seen.push(code);
+  }
+  return seen.slice(0, 60).join(',');
+};
 
 /**
  * A link somebody will click. Only http and https survive: a stored
@@ -719,6 +741,32 @@ router.get('/security/notices', authenticate, blockInvestors, requireRole('admin
 router.post('/exports', authenticate, blockInvestors, requireRole('admin'),
   wrap((req, res) => recordExport(req, res)));
 
+/**
+ * A report, drawn as a PDF and handed straight back.
+ *
+ * The browser will not save a PDF without asking where to put it, so a
+ * one-press download has to be drawn here. The client posts the tables it
+ * is already showing — including whichever columns the reader arranged —
+ * and this lays them out, which is what keeps the file and the screen
+ * saying the same thing without two implementations of every report.
+ *
+ * Recorded like any other export, and an administrator's act like any
+ * other export: the client asks /exports first, and this refuses anybody
+ * else on its own account rather than trusting it to.
+ */
+router.post('/reports/pdf', authenticate, blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const spec = cleanReport(req.body);
+    if (spec.error) return res.status(400).json({ error: spec.error });
+    const pdf = reportPdf(spec);
+    await audit(req.user.uid, 'export', null, 'read',
+      `downloaded "${spec.title}" as PDF · ${
+        spec.sheets.reduce((n, s) => n + s.rows.length, 0)} rows · ${describeOrigin(req)}`);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="report.pdf"');
+    res.send(pdf);
+  }));
+
 /* ------------------------------------------------------------------ *
  * Email
  *
@@ -825,9 +873,42 @@ router.post('/mail/test', authenticate, blockInvestors, requireRole('admin'),
 /* Two surfaces arranged separately by the same machinery: the policies
    grid somebody works from, and the Policy Schedule report they hand to
    somebody else. Different jobs, different columns, one validator. */
+/* The statuses the policies toolbar offers. Kept here so a stored default
+   can be checked against the same list the screen draws. */
+const VIEW_STATUSES = ['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending'];
+
+/**
+ * A remembered view: which owner entities somebody works in, and which
+ * status they usually want, restored the next time they sign in.
+ *
+ * It is a convenience, not a permission. Nothing stored here widens what
+ * the reader may see -- the entity list is intersected with their scope by
+ * the same SQL that filters everything else, so a code they no longer have
+ * simply shows nothing rather than showing somebody else's book.
+ *
+ * Like an arrangement, a malformed one is ignored rather than refused.
+ */
+const cleanView = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const funds = [];
+  for (const code of Array.isArray(value.funds) ? value.funds : []) {
+    /* Codes only. Anything else -- a number, an object, a null -- is a
+       client sending something it made up, and String() would turn it
+       into "[object Object]" and store that forever. */
+    if (typeof code !== 'string') continue;
+    const c = code.trim().slice(0, 40);
+    if (c && !funds.includes(c)) funds.push(c);
+  }
+  const status = VIEW_STATUSES.includes(str(value.status)) ? str(value.status) : '';
+  /* An empty view is a real answer -- it is what "remember that I want the
+     whole book" looks like -- so it is stored rather than rejected. */
+  return { funds: funds.slice(0, 60), status };
+};
+
 const PREF_CLEANERS = {
   policy_columns: cleanArrangement,
   report_columns: cleanArrangement,
+  view_defaults: cleanView,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -838,7 +919,9 @@ router.get('/me/prefs', authenticate, wrap(async (req, res) => {
     const clean = PREF_CLEANERS[r.name];
     if (!clean) continue;                       // a name we no longer use
     const value = clean(r.value);
-    if (value) out[r.name] = value;
+    /* An empty view -- no entity, no status -- is a deliberate answer, so
+       only a value the cleaner rejected outright is dropped. */
+    if (value !== null && value !== undefined) out[r.name] = value;
   }
   res.json(out);
 }));
@@ -1142,7 +1225,7 @@ router.get('/insureds', wrap(async (req, res) => {
   // Narrow to one owner entity, the same way the dashboard does. It joins
   // through the policies the person is insured under, so a life covered by
   // two entities appears under either — which is the truth about them.
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const { rows } = await q(
     `SELECT i.*, COUNT(p.id)::int AS policy_count
        FROM insureds i
@@ -1150,7 +1233,7 @@ router.get('/insureds', wrap(async (req, res) => {
        LEFT JOIN funds f ON f.id = p.fund_id
       WHERE ($1 = '' OR i.first_name ILIKE '%'||$1||'%' OR i.last_name ILIKE '%'||$1||'%'
              OR i.display_name ILIKE '%'||$1||'%')
-        AND ($4 = '' OR f.code = $4)
+        AND ($4 = '' OR f.code = ANY(string_to_array($4, ',')))
       GROUP BY i.id ORDER BY i.last_name, i.first_name`,
     [search, scope, funds, fund]
   );
@@ -1235,7 +1318,7 @@ router.put('/insureds/:id', blockInvestors, canEdit, wrap(async (req, res) => {
 router.get('/policies', wrap(async (req, res) => {
   const search = str(req.query.search);
   const status = str(req.query.status);
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const scope = scopeId(req);
   const funds = fundScope(req);
   const { rows } = await q(
@@ -1275,7 +1358,7 @@ router.get('/policies', wrap(async (req, res) => {
         -- Matured policies belong to the Maturities register, not the active
         -- book. They come back only when explicitly asked for by status.
         AND ($2 <> '' OR pl.status <> 'Matured')
-        AND ($3 = '' OR pl.fund_code = $3)
+        AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 4, 5)}
       ORDER BY pl.insured_last, pl.insured_first, pl.policy_number`,
     [search, status, fund, scope, funds]
@@ -1988,7 +2071,7 @@ router.get('/analytics/summary', wrap(async (req, res) => {
      as a whole, which is what a person means by "all". The filter sits
      inside the scope predicate rather than replacing it, so choosing an
      entity can only ever show less than the reader is already allowed. */
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   // For an investor every money figure is multiplied by their percentage, so
   // the dashboard reads as *their* portfolio rather than the whole book.
   const w = `(${shareOf('pl.id', 1)} / 100.0)`;
@@ -2008,12 +2091,12 @@ router.get('/analytics/summary', wrap(async (req, res) => {
          COALESCE(SUM(pl.total_premiums * ${w}),0)                 AS total_premiums,
          COALESCE(SUM(pl.cost_of_insurance * ${w}),0)              AS monthly_coi
        FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis} AND ($3 = '' OR pl.fund_code = $3)`, [scope, funds, fund]),
+      WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis} AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))`, [scope, funds, fund]),
     q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
               COALESCE(SUM(pl.face_amount * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${vis}
-          AND ($3 = '' OR pl.fund_code = $3)
+          AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         GROUP BY pl.carrier_name ORDER BY face DESC`, [scope, funds, fund]),
     q(`SELECT to_char(date_trunc('month', t.txn_date),'YYYY-MM') AS month,
               SUM(t.amount * (COALESCE((SELECT pix.pct FROM policy_investors pix
@@ -2022,7 +2105,8 @@ router.get('/analytics/summary', wrap(async (req, res) => {
         WHERE t.txn_type IN ('Acquisition Cost','Premium Payment','Fee','Servicing','Commission')
           AND ${visibleTo('t.policy_id', '(SELECT fund_id FROM policies WHERE id = t.policy_id)', 1, 2)}
           AND ($3 = '' OR (SELECT f.code FROM funds f
-                 WHERE f.id = (SELECT fund_id FROM policies WHERE id = t.policy_id)) = $3)
+                 WHERE f.id = (SELECT fund_id FROM policies WHERE id = t.policy_id))
+                       = ANY(string_to_array($3, ',')))
         GROUP BY 1 ORDER BY 1`, [scope, funds, fund]),
     /* Average age of the lives the book is exposed to.
        Counted over distinct people, not over policies, and every life on
@@ -2041,14 +2125,14 @@ router.get('/analytics/summary', wrap(async (req, res) => {
             FROM policy_latest pl
            WHERE pl.insured_id IS NOT NULL
              AND pl.status NOT IN ('Lapsed','Sold','Matured')
-             AND ${vis} AND ($3 = '' OR pl.fund_code = $3)
+             AND ${vis} AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
           UNION
           SELECT pi.insured_id
             FROM policy_insureds pi
             JOIN policy_latest pl2 ON pl2.id = pi.policy_id
            WHERE pl2.status NOT IN ('Lapsed','Sold','Matured')
              AND ${visibleTo('pl2.id', 'pl2.fund_id', 1, 2)}
-             AND ($3 = '' OR pl2.fund_code = $3))`, [scope, funds, fund]),
+             AND ($3 = '' OR pl2.fund_code = ANY(string_to_array($3, ','))))`, [scope, funds, fund]),
   ]);
 
   // Running total of capital deployed. Months with no activity are filled in
@@ -2714,7 +2798,7 @@ router.get('/capital-calls/draft/acquisition', blockInvestors, canEdit, wrap(asy
 
 router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res) => {
   const days = Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 30));
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const scope = scopeId(req);
   const funds = fundScope(req);
   const to = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
@@ -2738,7 +2822,7 @@ router.get('/capital-calls/draft', blockInvestors, canEdit, wrap(async (req, res
         AND COALESCE(r.amount, 0) > 0
         AND r.due_date >= CURRENT_DATE AND r.due_date <= $4::date
         AND pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND ($3 = '' OR pl.fund_code = $3)
+        AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY r.due_date`,
     [scope, funds, fund, to]);
@@ -2806,6 +2890,40 @@ router.get('/capital-calls', wrap(async (req, res) => {
       WHERE ${scope.sql}
       ORDER BY (c.status = 'Open') DESC, c.due_date DESC, c.id DESC`,
     [...scope.params, mine]);
+
+  /* What each call is actually about.
+   *
+   * "Premium capital call · 09/03/2026 · $37,500" does not say which
+   * policies, and two of them side by side are indistinguishable — the
+   * title is the same on every one. So each row carries the lives it
+   * covers, taken from the items frozen onto the call rather than from the
+   * policies as they stand now.
+   *
+   * Sent as objects with an `insured_name` key on purpose: that is one of
+   * the keys the de-identification pass at the edge of this API rewrites,
+   * so an investor's copy comes back as initials without this route
+   * knowing anything about it. A pre-joined string would sail straight
+   * through it. */
+  if (rows.length) {
+    const { rows: items } = await q(
+      `SELECT call_id, policy_id, opportunity_id, policy_number, insured_name, carrier_name
+         FROM capital_call_items WHERE call_id = ANY($1)
+        ORDER BY insured_name, policy_number`,
+      [rows.map((c) => c.id)]);
+    const byCall = new Map(rows.map((c) => [c.id, []]));
+    const seen = new Map(rows.map((c) => [c.id, new Set()]));
+    for (const i of items) {
+      const key = `${i.policy_id || 0}:${i.opportunity_id || 0}:${i.policy_number}`;
+      if (seen.get(i.call_id)?.has(key)) continue;      // one line per policy, not per premium
+      seen.get(i.call_id)?.add(key);
+      byCall.get(i.call_id)?.push({
+        insured_name: i.insured_name || '',
+        policy_number: i.policy_number || '',
+        carrier_name: i.carrier_name || '',
+      });
+    }
+    for (const c of rows) c.covers = byCall.get(c.id) || [];
+  }
   res.json(rows);
 }));
 
@@ -3866,7 +3984,7 @@ async function portfolioFlows(req, { onlyMatured = false, basis, fund = '' } = {
             (${shareOf('pl.id', 1)}) AS my_pct,
             (${shareOf('pl.id', 1)}) / 100.0 AS factor
        FROM policy_latest pl
-      WHERE ${filter} AND ($3 = '' OR pl.fund_code = $3) AND ${vis}`,
+      WHERE ${filter} AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ','))) AND ${vis}`,
     [scope, funds, fund]
   );
   if (!policies.length) return { policies: [], byPolicy: new Map(), asOf };
@@ -4003,7 +4121,7 @@ router.get('/carry', blockInvestors, requireRole('admin'), wrap(async (req, res)
   const basis = CARRY_BASIS[asked];
   if (!basis)
     return res.status(400).json({ error: 'Status must be active, matured or all.' });
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const { policies, byPolicy } = await portfolioFlows(req, { basis, fund });
 
   const rows = policies.map((p) => {
@@ -4256,9 +4374,9 @@ router.get('/maturities', wrap(async (req, res) => {
   // Same entity filter as the dashboard, applied to the rows, the totals
   // and the realized return together — a return computed over one book and
   // shown above totals for another would be worse than no filter at all.
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const w = `(${shareOf('pl.id', 1)} / 100.0)`;
-  const vis = `${visibleTo('pl.id', 'pl.fund_id', 1, 2)} AND ($3 = '' OR pl.fund_code = $3)`;
+  const vis = `${visibleTo('pl.id', 'pl.fund_id', 1, 2)} AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))`;
 
   // Death benefit at maturity is the carrier's last reported figure, falling
   // back to the face amount when no snapshot was ever taken.
@@ -4408,7 +4526,7 @@ router.get('/servicing', wrap(async (req, res) => {
   const scope = scopeId(req);
   const funds = fundScope(req);
   // Same entity filter the dashboard uses, so the two agree when one is set.
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const { rows } = await q(
     `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
             pl.insured_first, pl.insured_last, pl.insured_gender,
@@ -4421,7 +4539,7 @@ router.get('/servicing', wrap(async (req, res) => {
             (pl.next_premium_due - CURRENT_DATE) AS days_until_due
        FROM policy_latest pl
       WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND ($3 = '' OR pl.fund_code = $3)
+        AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY pl.next_premium_due NULLS LAST`,
     [scope, funds, fund]
@@ -4495,7 +4613,7 @@ router.get('/servicing', wrap(async (req, res) => {
         AND ($1::int IS NOT NULL
              OR r.due_date <= CURRENT_DATE + 45
              OR (r.kind = 'Premium' AND r.due_date >= CURRENT_DATE))
-        AND ($3 = '' OR pl.fund_code = $3)
+        AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       ORDER BY r.due_date`,
     [scope, funds, fund]);
@@ -4597,13 +4715,13 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
                                  AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
              OR inv.email ILIKE '%'||$1||'%')
-        AND ($4 = '' OR f.code = $4)
+        AND ($4 = '' OR f.code = ANY(string_to_array($4, ',')))
         AND ($2::int[] IS NULL OR inv.fund_id = ANY($2)
              OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
       GROUP BY inv.id, f.code, f.name ORDER BY inv.name`,
-    [search, funds, granted, str(req.query.fund)]
+    [search, funds, granted, fundParam(req.query.fund)]
   );
   res.json(rows);
 }));
@@ -5126,7 +5244,7 @@ router.delete('/policy-investors/:linkId', blockInvestors, canEdit, wrap(async (
  */
 router.get('/reports/returns', wrap(async (req, res) => {
   const basis = req.query.basis === 'realized' ? 'realized' : 'active';
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
 
   const { policies, byPolicy, asOf } = await portfolioFlows(req, { basis, fund });
 
@@ -5188,7 +5306,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
     `SELECT pl.status, COUNT(*)::int AS n,
             COALESCE(SUM(pl.total_invested * (${shareOf('pl.id', 1)} / 100.0)), 0) AS invested
        FROM policy_latest pl
-      WHERE NOT (${BASIS_FILTER[basis]}) AND ($3 = '' OR pl.fund_code = $3)
+      WHERE NOT (${BASIS_FILTER[basis]}) AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
       GROUP BY pl.status ORDER BY pl.status`,
     [scope, funds, fund]
@@ -5223,7 +5341,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
  * document are the totals *they* are responsible for.
  */
 router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const wanted = String(req.query.investor_ids || '')
     .split(',').map((n) => parseInt(n, 10)).filter(Number.isInteger);
   const funds = fundScope(req);
@@ -5252,7 +5370,7 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
             pl.premium_required, pl.premium_mode, pl.next_premium_due, pl.le_months
        FROM policy_investors pi JOIN policy_latest pl ON pl.id = pi.policy_id
       WHERE pi.investor_id = ANY($1)
-        AND ($2 = '' OR pl.fund_code = $2)
+        AND ($2 = '' OR pl.fund_code = ANY(string_to_array($2, ',')))
         AND ($3::int[] IS NULL OR pl.fund_id = ANY($3))
       ORDER BY pl.insured_last, pl.policy_number`,
     [ids, fund, funds]);
@@ -5391,7 +5509,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
      the month horizon happened to be. Two months of headroom covers a window
      ending mid-month and a payment dated the last day of it. */
   const months = days ? Math.min(60, Math.max(asked, Math.ceil(days / 28) + 1)) : asked;
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
 
   const scope = scopeId(req);
   const funds = fundScope(req);
@@ -5407,7 +5525,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
             ${shareOf('pl.id', 2)} AS my_pct
        FROM policy_latest pl
       WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND ($1 = '' OR pl.fund_code = $1)
+        AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}
       ORDER BY pl.insured_last, pl.insured_first`,
     [fund, scope, funds]
@@ -5443,7 +5561,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
        JOIN policy_latest pl ON pl.id = r.policy_id
       WHERE r.kind = 'Premium' AND r.done_at IS NULL AND r.due_date >= CURRENT_DATE
         AND pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND ($1 = '' OR pl.fund_code = $1)
+        AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ',')))
         AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}
       ORDER BY r.due_date, pl.insured_last`,
     [fund, scope, funds]
@@ -5507,7 +5625,7 @@ router.get('/reports/premium-forecast', wrap(async (req, res) => {
 
 /** Everything a portfolio summary needs that /analytics/summary doesn't cover. */
 router.get('/reports/portfolio', wrap(async (req, res) => {
-  const fund = str(req.query.fund);
+  const fund = fundParam(req.query.fund);
   const scope = scopeId(req);
   const funds = fundScope(req);
   const w = `(${shareOf('pl.id', 2)} / 100.0)`;
@@ -5536,33 +5654,33 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
                                                         AS scheduled_12mo
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}`, [fund, scope, funds]),
+          AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}`, [fund, scope, funds]),
     q(`SELECT pl.carrier_name, COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+          AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}
         GROUP BY pl.carrier_name ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(NULLIF(pl.product_type,''),'Unclassified') AS product_type,
               COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+          AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}
         GROUP BY 1 ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(pl.fund_code,'Unassigned') AS fund_code, COUNT(*)::int AS n,
               COALESCE(SUM(COALESCE(pl.death_benefit, pl.face_amount) * ${w}),0) AS face,
               COALESCE(SUM(pl.total_invested * ${w}),0) AS invested
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}
+          AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}
         GROUP BY 1 ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
               COALESCE(MIN(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS min_age,
               COALESCE(MAX(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS max_age
          FROM policy_latest pl
         WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND pl.insured_dob IS NOT NULL
-          AND ($1 = '' OR pl.fund_code = $1) AND ${vis3}`, [fund, scope, funds]),
+          AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}`, [fund, scope, funds]),
   ]);
 
   res.json({

@@ -19,7 +19,7 @@
    Idempotent: its own entity, its own policies, removed first and last.
    ===================================================================== */
 import { chromium } from 'playwright';
-import { BASE, ADMIN, MANAGER1, login } from './test-config.mjs';
+import { BASE, ADMIN, MANAGER1, login, pickEntities } from './test-config.mjs';
 
 const PREFIX = 'CARRYUI';
 const FUND = 'CUIFND';
@@ -99,10 +99,7 @@ const signIn = async (page, who) => {
   await page.waitForSelector('.kpi-row', { timeout: 20000 });
 };
 const navLabels = (page) => page.$$eval('nav a, .nav a', (as) => as.map((a) => a.textContent.trim()));
-const pickEntity = async () => {
-  await p.selectOption('#entityFilter', FUND);
-  await p.waitForTimeout(700);
-};
+const pickEntity = async () => { await pickEntities(p, [FUND], { settle: 900 }); };
 
 await signIn(p, ADMIN);
 

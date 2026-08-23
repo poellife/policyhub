@@ -1,7 +1,8 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 
-import { BASE, ADMIN } from './test-config.mjs';
+import { BASE, ADMIN, pickEntities, chosenEntities,
+         offeredEntities, entityButtonText } from './test-config.mjs';
 const SHOTS = '/home/claude/shots';
 fs.mkdirSync(SHOTS, { recursive: true });
 
@@ -57,27 +58,39 @@ await page.mouse.move(5, 5);
    is not that the figure changes — it is that the parts add back up to the
    whole, and that the alerts below move with the headline rather than
    staying on the full book. */
-const fundPicker = page.locator('#entityFilter');
-check('the dashboard offers an entity filter', (await fundPicker.count()) === 1);
-check('starting on all entities', (await fundPicker.inputValue()) === '');
-const entities = (await fundPicker.locator('option').allTextContents()).map((x) => x.trim());
-check('with an explicit "all" rather than a blank line',
-  /^All entities$/.test(entities[0] || ''), entities.join(' | '));
+check('the dashboard offers an entity filter', (await page.locator('#entityPick').count()) === 1);
+check('starting on all entities', (await chosenEntities(page)).length === 0);
+check('and saying so on the button', /^All entities$/.test(await entityButtonText(page)),
+  await entityButtonText(page));
+const entities = await offeredEntities(page);
 
 const readHero = async () => Number(
   (await page.locator('.stat .value.hero').first().textContent()).replace(/[^0-9.]/g, ''));
 const whole = await readHero();
 let parts = 0;
-for (const code of entities.slice(1).map((e) => e.split(' — ')[0])) {
-  await fundPicker.selectOption(code);
-  await page.waitForSelector('.kpi-row'); await page.waitForTimeout(700);
+for (const code of entities) {
+  await pickEntities(page, [code], { settle: 700 });
+  await page.waitForSelector('.kpi-row');
   parts += await readHero();
 }
 check('the entities add back up to the whole book', Math.abs(parts - whole) < 1,
   `${parts} against ${whole}`);
 const narrowedAlerts = await page.locator('.alert-row').count();
-await fundPicker.selectOption('');
-await page.waitForSelector('.kpi-row'); await page.waitForTimeout(700);
+
+/* Several at once is one request, and it has to agree with the sum of the
+   same entities asked for one at a time. */
+if (entities.length > 1) {
+  await pickEntities(page, entities, { settle: 900 });
+  await page.waitForSelector('.kpi-row');
+  check('and choosing them all at once reads the same as the whole book',
+    Math.abs(await readHero() - whole) < 1,
+    `${await readHero()} against ${whole}`);
+  check('with the button naming what was chosen',
+    (await entityButtonText(page)).includes(entities[0]), await entityButtonText(page));
+}
+
+await pickEntities(page, [], { settle: 700 });
+await page.waitForSelector('.kpi-row');
 check('and choosing all puts the whole book back', Math.abs(await readHero() - whole) < 1);
 check('the alerts narrow with it rather than staying on the full book',
   narrowedAlerts <= (await page.locator('.alert-row').count()),

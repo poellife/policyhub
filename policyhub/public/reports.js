@@ -10,16 +10,21 @@
 
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
 import { fmtRate } from './irr.js';
+import { buildWorkbook } from './xlsx-write.js';
 
 /* What this module needs from the application shell.
-   app.js imports this file, so this file cannot import back; the two
-   functions it needs — the column catalogue as this person has arranged
-   it, and the picker that changes it — are handed over once at load. */
+   app.js imports this file, so this file cannot import back; the handful
+   of things it needs — the column catalogue as this person has arranged
+   it, the picker that changes it, and the owner-entity control that every
+   other screen shares — are handed over once at load. */
 let host = {
   columns: () => [],
   pick: () => {},
   save: async () => {},
   reset: async () => {},
+  entityPicker: () => '',
+  wireEntityPicker: () => {},
+  entityCodes: () => [],
 };
 export const wireReports = (fns) => { host = { ...host, ...fns }; };
 
@@ -29,6 +34,51 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
 
 const money = (v, dp = 2) =>
   v === null || v === undefined || v === '' ? '—' : fmtMoney(v, dp);
+
+/* ------------------------- which book is this ------------------------
+   A report can now cover several owner entities at once, so the line
+   under the letterhead has to name them. A document that leaves the room
+   has to say on its face which books are in it — "Fund LCG1" on a page
+   that is really LCG1 and LCG3 together is a number somebody will act on.
+   ------------------------------------------------------------------- */
+const fundCodes = (fund) =>
+  String(fund || '').split(',').map((c) => c.trim()).filter(Boolean);
+
+const fundNote = (fund) => {
+  const codes = fundCodes(fund);
+  if (!codes.length) return '';
+  if (codes.length === 1) return `Fund ${codes[0]}`;
+  return `Entities ${codes.slice(0, -1).join(', ')} and ${codes[codes.length - 1]}`;
+};
+
+/* One entity is stated once in the letterhead and left out of the rows.
+   Two or more and every row has to say which, or the reader cannot tell
+   the books apart. */
+const oneFund = (fund) => fundCodes(fund).length === 1;
+
+/**
+ * Somewhere for a long word to break.
+ *
+ * A table can never be narrower than its widest unbreakable word, and a
+ * carrier called "Albritton/brighthouse/Metlife" is one word of twenty-nine
+ * characters — on its own enough to push a schedule off the page.
+ *
+ * The alternative, letting CSS break anywhere, is worse: the browser then
+ * sizes every column off its shortest possible line, so "Annual" comes out
+ * as "Annu / al" and a row numbered 10 as "1 / 0". So the break
+ * opportunities are put in by hand, only into words long enough to be a
+ * problem, and preferentially at the punctuation a reader would break at
+ * anyway. Takes already-escaped text and returns markup.
+ */
+const LONG_WORD = 15;
+const softBreak = (escaped) => String(escaped).replace(/\S{15,}/g, (word) => {
+  if (/&[a-z]+;|&#\d+;/i.test(word)) return word;   // don't cut an entity in half
+  return word
+    .split(/(?<=[/\\\-_.,])/)                          // after a slash, dash, dot
+    .map((piece) => piece.replace(/(.{12})/g, '$1<wbr>'))
+    .join('<wbr>')
+    .replace(/(?:<wbr>)+/g, '<wbr>');
+});
 
 const fmtDate = (d) => {
   if (!d) return '—';
@@ -148,6 +198,140 @@ function setPageOrientation(landscape) {
     : '@page { size: Letter portrait; margin: 0.55in; }';
 }
 
+/* =====================================================================
+   Taking a report away with you.
+
+   A report is already a table on the screen, laid out the way the reader
+   arranged it. Reading the figures back out of that table is what lets
+   CSV, Excel and the PDF all come from one place — rather than three
+   builders that would each have to be taught about every report and
+   would drift apart the first time one of them was changed.
+
+   It also means the file says exactly what the screen says, including
+   the reader's own column choices. A spreadsheet that quietly differs
+   from the document it came from is worse than no spreadsheet.
+   ===================================================================== */
+
+/** "$1,234.56" → 1234.56. "—" → ''. Anything else comes back as itself. */
+function readNumber(text) {
+  const t = String(text || '').trim();
+  if (!t || t === '—' || t === '-') return '';
+  const negative = /^\(.*\)$/.test(t) || /^[−-]/.test(t);
+  const digits = t.replace(/[^0-9.]/g, '');
+  if (!digits || !/[0-9]/.test(digits)) return t;
+  const n = Number(digits);
+  if (!Number.isFinite(n)) return t;
+  return negative ? -n : n;
+}
+
+const cellText = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+
+/**
+ * Every table on screen, as data.
+ *
+ * A sheet is named for the heading above it where there is one, so a
+ * workbook of an investor statement comes out with a tab per section
+ * rather than Sheet1..Sheet4.
+ */
+export function extractSheets(root = document) {
+  const out = [];
+  const tables = root.querySelectorAll('.rpt-output table.rpt-table');
+  tables.forEach((table, i) => {
+    const headCells = [...table.querySelectorAll('thead tr:last-child th')];
+    if (!headCells.length) return;
+
+    /* Whether a column is a percentage is decided by the column, not the
+       cell: one blank row must not turn a rate column into text. */
+    const bodyRows = [...table.querySelectorAll('tbody tr')]
+      .filter((tr) => tr.querySelectorAll('td').length >= headCells.length - 1);
+    const isPct = headCells.map((_, c) => {
+      const seen = bodyRows
+        .map((tr) => cellText(tr.children[c] || { textContent: '' }))
+        .filter((t) => t && t !== '—');
+      return seen.length > 0 && seen.every((t) => /%$/.test(t));
+    });
+
+    const columns = headCells.map((th, c) => ({
+      header: cellText(th) + (isPct[c] ? ' (%)' : ''),
+      numeric: th.classList.contains('num'),
+    }));
+
+    const rows = bodyRows.map((tr) => headCells.map((th, c) => {
+      const td = tr.children[c];
+      if (!td) return '';
+      const text = cellText(td);
+      return (th.classList.contains('num') || td.classList?.contains('num') || isPct[c])
+        ? readNumber(text) : (text === '—' ? '' : text);
+    }));
+
+    /* Totals belong in the file. Somebody checking a spreadsheet against
+       the document will look for them, and a workbook that quietly drops
+       them reads as a different report. */
+    for (const tr of table.querySelectorAll('tfoot tr')) {
+      const cells = [...tr.children];
+      if (!cells.length) continue;
+      const row = new Array(headCells.length).fill('');
+      let at = 0;
+      for (const td of cells) {
+        const span = Number(td.getAttribute('colspan') || 1);
+        const text = cellText(td);
+        if (at < headCells.length && text)
+          row[at] = td.classList.contains('num') ? readNumber(text) : text;
+        at += span;
+      }
+      if (row.some((v) => v !== '')) rows.push(row);
+    }
+
+    /* The nearest heading above the table, which is what a reader would
+       call this section. */
+    let name = '';
+    for (let el = table.closest('.rpt-block') || table; el; el = el.previousElementSibling) {
+      const h = el.querySelector?.('.rpt-h3') || (el.classList?.contains('rpt-h3') ? el : null);
+      if (h) { name = cellText(h); break; }
+    }
+    out.push({ name: name || `Table ${i + 1}`, columns, rows });
+  });
+  return out;
+}
+
+/** A filename nothing will object to. */
+const safeName = (s) => String(s || 'report')
+  .replace(/[^\w\- ]+/g, ' ').replace(/\s+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+
+function saveBlob(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+
+/**
+ * A cell that cannot execute.
+ *
+ * Excel and Sheets treat a value beginning =, +, - or @ as a formula, so
+ * a carrier or insured name that came in from somebody else's file could
+ * run on open. The same rule as the grid's CSV export, applied here.
+ */
+const csvCell = (value) => {
+  if (typeof value === 'number') return String(value);
+  let s = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
+};
+
+export function sheetsToCsv(sheets, title) {
+  const parts = sheets.map((s) => {
+    const head = s.columns.map((c) => csvCell(c.header)).join(',');
+    const body = s.rows.map((r) => r.map(csvCell).join(',')).join('\n');
+    // A workbook of several tables becomes one file with each named.
+    return sheets.length > 1 ? `${csvCell(s.name)}\n${head}\n${body}` : `${head}\n${body}`;
+  });
+  const header = sheets.length > 1 && title ? `${csvCell(title)}\n\n` : '';
+  // The BOM makes Excel read it as UTF-8 rather than the local code page.
+  return `\ufeff${header}${parts.join('\n\n')}\n`;
+}
+
 /* --------------------------- report specs ---------------------------- */
 
 const REPORTS = {
@@ -220,7 +404,7 @@ function buildSummary(d, o) {
     </div>`;
 
   return `
-    ${letterhead('Portfolio Summary', o.fund ? `Fund ${o.fund}` : 'All funds', o.asOf)}
+    ${letterhead('Portfolio Summary', fundNote(o.fund) || 'All funds', o.asOf)}
     ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 6 : 4}">
@@ -275,14 +459,17 @@ function buildSummary(d, o) {
 const scheduleCell = (f, p) => {
   const v = p[f.key];
   switch (f.type) {
-    case 'money': return money(v);
+    /* Whole dollars. An inventory of forty policies across five money
+       columns is two hundred digits of cents nobody reads, and they are a
+       good part of what pushed this report off the page. */
+    case 'money': return money(v, 0);
     case 'pct': return v == null ? '—' : `${Number(v).toFixed(4).replace(/\.?0+$/, '')}%`;
     case 'date': return fmtDate(v);
     case 'age': return ageFrom(p.insured_dob) ?? '—';
     case 'int': return v == null || v === '' ? '—' : Number(v).toLocaleString('en-US');
     case 'sex': return esc(v || '—');
     case 'status': case 'product': case 'owner': case 'strong': case 'text':
-    default: return esc(v ?? '') || '—';
+    default: return softBreak(esc(v ?? '')) || '—';
   }
 };
 const NUMERIC = new Set(['money', 'pct', 'age', 'int']);
@@ -305,15 +492,36 @@ export function buildSchedule(rows, o, fields) {
   for (const f of shown.filter((x) => x.total))
     totals.set(f.key, rows.reduce((s, p) => s + (Number(value(f, p)) || 0), 0));
 
+  /* How tight to set it.
+   *
+   * This is the one report whose width the reader controls, so it cannot
+   * be laid out for a fixed number of columns. A landscape Letter page
+   * with the margins we print at is about 970px of usable width; past
+   * roughly fourteen columns that stops being enough at 10px type, so the
+   * type comes down a step at a time rather than the table running off
+   * the edge of the paper. Below 7px it would not be readable, so past that
+   * the table scrolls on screen — and, since a wide table does not paginate
+   * sideways, the report says plainly that printing it will cut it off,
+   * rather than letting somebody find that out from the paper. */
+  const density = shown.length <= 14 ? 'a'
+    : shown.length <= 18 ? 'b'
+      : shown.length <= 23 ? 'c' : 'd';
+
   return `
     ${letterhead('Policy Schedule', `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${
-      o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
+      o.fund ? ` · ${fundNote(o.fund)}` : ''}`, o.asOf)}
     ${confidential(o.showBasis, o)}
+    ${density === 'd' ? `
+    <div class="rpt-block no-print"><p class="rpt-note">
+      <strong>${shown.length} columns is wider than a landscape page.</strong>
+      It scrolls here, but printing will cut off whatever runs past the right-hand
+      margin. Take some columns off with <strong>Columns</strong> to fit it on paper.
+    </p></div>` : ''}
     ${shown.length === 0 ? `
     <div class="rpt-block"><p class="rpt-note">
       No columns are switched on. Use <strong>Columns</strong> above to choose what
       this schedule should show.</p></div>`
-    : `<table class="rpt-table rpt-table-tight">
+    : `<div class="rpt-hscroll"><table class="rpt-table rpt-table-tight" data-density="${density}">
       <thead><tr>
         <th>#</th>
         ${shown.map((f) => `<th class="${NUMERIC.has(f.type) ? 'num' : ''}">${
@@ -325,7 +533,7 @@ export function buildSchedule(rows, o, fields) {
           ${shown.map((f) => `<td class="${NUMERIC.has(f.type) ? 'num' : ''}${
             f.type === 'strong' || f.key === 'insured_last' ? ' strong' : ''}${
             f.type === 'date' || f.key === 'policy_number' ? ' rpt-nowrap' : ''}">${
-            f.key === 'death_benefit' ? money(p.death_benefit ?? p.face_amount)
+            f.key === 'death_benefit' ? money(p.death_benefit ?? p.face_amount, 0)
               : scheduleCell(f, p)}</td>`).join('')}
         </tr>`).join('')}
       </tbody>
@@ -340,10 +548,10 @@ export function buildSchedule(rows, o, fields) {
           <td colspan="${1 + first}">Totals — ${rows.length} ${
             rows.length === 1 ? 'policy' : 'policies'}</td>
           ${shown.slice(first).map((f) => `<td class="${NUMERIC.has(f.type) ? 'num' : ''}">${
-            totals.has(f.key) ? money(totals.get(f.key)) : ''}</td>`).join('')}
+            totals.has(f.key) ? money(totals.get(f.key), 0) : ''}</td>`).join('')}
         </tr></tfoot>`;
       })() : ''}
-    </table>`}
+    </table></div>`}
     ${footer('Policy Schedule')}`;
 }
 
@@ -403,7 +611,7 @@ function buildForecastWindow(d, o) {
 
   return `
     ${letterhead('Premium Forecast',
-      `Next ${w.days} day${w.days === 1 ? '' : 's'} · ${span}${o.fund ? ` · Fund ${o.fund}` : ''}`,
+      `Next ${w.days} day${w.days === 1 ? '' : 's'} · ${span}${o.fund ? ` · ${fundNote(o.fund)}` : ''}`,
       o.asOf)}
     ${confidential(false)}
 
@@ -499,7 +707,7 @@ function buildForecast(d, o) {
       ${note ? `<div class="rpt-tile-note">${note}</div>` : ''}</div>`;
 
   return `
-    ${letterhead('Premium Forecast', `Next ${d.months} months${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
+    ${letterhead('Premium Forecast', `Next ${d.months} months${o.fund ? ` · ${fundNote(o.fund)}` : ''}`, o.asOf)}
     ${confidential(false)}
 
     <div class="rpt-tiles" data-count="4">
@@ -638,7 +846,7 @@ function buildReturn(d, o, { realized }) {
     </div>` : '';
 
   return `
-    ${letterhead(title, `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${o.fund ? ` · Fund ${o.fund}` : ''}`, o.asOf)}
+    ${letterhead(title, `${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}${o.fund ? ` · ${fundNote(o.fund)}` : ''}`, o.asOf)}
     ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
@@ -794,7 +1002,7 @@ function buildInvestorReport(d, o) {
     return `
     <section class="rpt-sheet ${idx < d.investors.length - 1 ? 'page-break-after' : ''}">
       ${letterhead('Investor Statement',
-        `${esc(inv.name)}${o.fund ? ` · Fund ${esc(o.fund)}` : ''}`, o.asOf)}
+        `${esc(inv.name)}${o.fund ? ` · ${esc(fundNote(o.fund))}` : ''}`, o.asOf)}
       <div class="rpt-confidential">Confidential — investor position and cost basis.
         For the intended recipient only.</div>
 
@@ -837,7 +1045,7 @@ function buildInvestorReport(d, o) {
         <table class="rpt-table rpt-table-tight">
           <thead><tr>
             <th>Insured</th><th>Carrier</th><th>Policy no.</th><th>Type</th>
-            ${o.fund ? '' : '<th>Owner</th>'}
+            ${oneFund(o.fund) ? '' : '<th>Owner</th>'}
             <th class="num">Share</th><th class="num">Death benefit</th>
             ${o.showBasis ? '<th class="num">Paid in</th>' : ''}
             <th class="num">Next premium</th><th>Due</th>
@@ -850,7 +1058,7 @@ function buildInvestorReport(d, o) {
                 <td>${esc(p.carrier_name)}</td>
                 <td class="rpt-nowrap">${esc(p.policy_number)}</td>
                 <td>${esc(p.product_type || '—')}</td>
-                ${o.fund ? '' : `<td>${esc(p.fund_code || '—')}</td>`}
+                ${oneFund(o.fund) ? '' : `<td>${esc(p.fund_code || '—')}</td>`}
                 <td class="num">${pctOf(p.pct)}</td>
                 <td class="num">${money(p.death_benefit)}</td>
                 ${o.showBasis ? `<td class="num">${money(p.invested)}</td>` : ''}
@@ -860,7 +1068,7 @@ function buildInvestorReport(d, o) {
                 <td class="num strong">${fmtRate(p.rate)}</td>
               </tr>`).join('')}</tbody>
           ${live.length ? `<tfoot><tr>
-            <td colspan="${o.fund ? 5 : 6}">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
+            <td colspan="${oneFund(o.fund) ? 5 : 6}">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
             <td class="num">${money(t.live_death_benefit)}</td>
             ${o.showBasis ? `<td class="num">${money(live.reduce((s, p) => s + p.invested, 0))}</td>` : ''}
             <td class="num">${money(live.reduce((s, p) => s + (Number(p.next_scheduled_amount) || 0), 0))}</td>
@@ -1400,6 +1608,8 @@ export async function reportsView(api, state) {
       <div><h1>${investorUser ? 'Statements' : 'Reports'}</h1>
         <div class="sub">Print-ready documents. Generate, review, then save as PDF.${
           investorUser ? ' Figures reflect your ownership percentage.' : ''}</div></div>
+      <div class="spacer"></div>
+      ${host.entityPicker(funds)}
     </div>
 
     <div class="card no-print">
@@ -1419,10 +1629,6 @@ export async function reportsView(api, state) {
         <div class="field-row">
           <div class="field"><label>As-of date</label>
             <input type="date" id="rptAsOf" value="${new Date().toISOString().slice(0, 10)}"></div>
-          <div class="field" style="${investorUser ? 'display:none' : ''}"><label>Owner / fund</label>
-            <select id="rptFund"><option value="">All owners</option>
-              ${funds.map((f) => `<option ${r.fund === f.code ? 'selected' : ''}>${esc(f.code)}</option>`).join('')}
-            </select></div>
           <div class="field" id="rptMonthsField" style="${r.type === 'forecast' ? '' : 'display:none'}">
             <label>Horizon</label>
             <select id="rptMonths">
@@ -1471,15 +1677,25 @@ export async function reportsView(api, state) {
                  cannot do. */}
           <button id="rptColumns" style="${r.type === 'schedule' ? '' : 'display:none'}"
             title="Choose which columns this schedule shows">Columns</button>
-          <button id="rptPrint" disabled>Save as PDF</button>
+          ${''/* One click, no dialog. The browser cannot save a PDF without
+                 asking where to put it, so this one is drawn on the server
+                 from the same table the screen is showing. Print is kept
+                 beside it for the exact on-screen document, charts and
+                 all. */}
+          <button id="rptPdf" disabled>Download PDF</button>
+          <button id="rptCsv" disabled title="The tables as a .csv">CSV</button>
+          <button id="rptXlsx" disabled title="The tables as an Excel workbook">Excel</button>
+          <button id="rptPrint" disabled title="The document exactly as it appears, including charts">Print…</button>
         </div>
       </div>
     </div>
 
     <div class="rpt-hint no-print" id="rptHint" style="display:none">
-      In the print dialog choose <strong>Save as PDF</strong> as the destination. For the cleanest
-      result set Margins to <strong>Default</strong> and turn <strong>off</strong> "Headers and
-      footers"; tick <strong>Background graphics</strong> so rules and shading come through.
+      <strong>Download PDF</strong> saves the tables straight away, with no print dialog.
+      <strong>Print…</strong> opens the browser's dialog and saves the document exactly as it
+      appears here, charts included — choose <strong>Save as PDF</strong> as the destination,
+      set Margins to <strong>Default</strong>, turn <strong>off</strong> "Headers and footers",
+      and tick <strong>Background graphics</strong> so rules and shading come through.
     </div>
 
     <div id="rptOutput" class="rpt-output"></div>`;
@@ -1487,6 +1703,7 @@ export async function reportsView(api, state) {
   return {
     html,
     after: () => {
+      host.wireEntityPicker();
       const sync = () => {
         r.type = document.querySelector('input[name=rptType]:checked').value;
         $('#rptMonthsField').style.display = r.type === 'forecast' ? '' : 'none';
@@ -1538,7 +1755,7 @@ export async function reportsView(api, state) {
           // from a book held at several percentages, and the reader is
           // entitled to know which of those they are looking at.
           investorShare: investorUser ? describeShare(policies) : null,
-          fund: $('#rptFund').value,
+          fund: host.entityCodes().join(','),
           showBasis: $('#rptBasis').checked,
           detail: $('#rptDetail').checked,
         };
@@ -1561,7 +1778,11 @@ export async function reportsView(api, state) {
           } else if (r.type === 'schedule') {
             const raw = await api(`/policies?fund=${encodeURIComponent(o.fund)}&status=`);
             const rows = investorUser ? raw.map(scaleRow) : raw;
-            out.innerHTML = `<div class="rpt-sheet">${
+            /* A landscape sheet on screen too, so what is in front of the
+               reader is the shape of the page it will print on. A portrait
+               sheet showing a landscape report is what let this one run off
+               the edge without anybody noticing until it was printed. */
+            out.innerHTML = `<div class="rpt-sheet rpt-sheet-landscape">${
               buildSchedule(rows, o, host.columns())}</div>`;
 
           } else if (r.type === 'forecast') {
@@ -1649,7 +1870,8 @@ export async function reportsView(api, state) {
           }
 
           charts();
-          $('#rptPrint').disabled = false;
+          for (const id of ['#rptPdf', '#rptCsv', '#rptXlsx', '#rptPrint'])
+            $(id).disabled = false;
           $('#rptHint').style.display = '';
           out.scrollIntoView({ behavior: 'smooth', block: 'start' });
         } catch (err) {
@@ -1661,6 +1883,89 @@ export async function reportsView(api, state) {
       });
 
       $('#rptPrint').addEventListener('click', () => window.print());
+
+      /* ---------------------- taking it away ---------------------- *
+       *
+       * All three come from the same reading of the table on screen, so
+       * the file always says what the document says — including whatever
+       * columns this reader chose.
+       *
+       * Every one of them is an export, and an export is an
+       * administrator's act that gets recorded and announced to the
+       * other administrators. If the server will not record it, no file
+       * is written: see the note on exportCsv in app.js.
+       */
+      const recorded = async (sheets) => {
+        try {
+          await api('/exports', { method: 'POST', body: {
+            kind: 'reports',
+            rows: sheets.reduce((n, s) => n + s.rows.length, 0),
+            scope: [REPORTS[r.type].name, r.fund].filter(Boolean).join(' · '),
+          } });
+          return true;
+        } catch (err) {
+          alert(err.message === 'You do not have permission to do that'
+            ? 'Downloading a report is an administrator’s job. The document is on '
+              + 'screen, and Print will still save it as a PDF.'
+            : `That download was not recorded, so nothing was saved: ${err.message}`);
+          return false;
+        }
+      };
+
+      const gather = () => {
+        const sheets = extractSheets();
+        if (!sheets.length) throw new Error('There is no table in this report to take away.');
+        return sheets;
+      };
+
+      const stem = () => `${safeName(REPORTS[r.type].name)}-${
+        ($('#rptAsOf').value || '').slice(0, 10) || 'today'}`;
+
+      const onDownload = (sel, run) => $(sel).addEventListener('click', async () => {
+        const btn = $(sel);
+        const was = btn.textContent;
+        btn.disabled = true;
+        try {
+          const sheets = gather();
+          if (!(await recorded(sheets))) return;
+          btn.innerHTML = '<span class="spin"></span>';
+          await run(sheets);
+        } catch (err) {
+          alert(err.message || 'That download did not work.');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = was;
+        }
+      });
+
+      onDownload('#rptCsv', (sheets) => saveBlob(
+        new Blob([sheetsToCsv(sheets, REPORTS[r.type].name)],
+          { type: 'text/csv;charset=utf-8' }),
+        `${stem()}.csv`));
+
+      onDownload('#rptXlsx', (sheets) => saveBlob(
+        buildWorkbook(sheets), `${stem()}.xlsx`));
+
+      onDownload('#rptPdf', async (sheets) => {
+        const res = await fetch('/api/reports/pdf', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: REPORTS[r.type].name,
+            subtitle: [fundNote(r.fund), `${sheets[0].rows.length} rows`]
+              .filter(Boolean).join(' · '),
+            as_of: $('#rptAsOf').value || '',
+            confidential: r.showBasis,
+            sheets,
+          }),
+        });
+        if (!res.ok) {
+          let msg = 'The PDF could not be built.';
+          try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+          throw new Error(msg);
+        }
+        saveBlob(await res.blob(), `${stem()}.pdf`);
+      });
     },
   };
 }

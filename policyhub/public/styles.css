@@ -682,6 +682,19 @@ select[multiple] { padding: 6px; }
   padding: 44px 46px; margin-bottom: 20px;
   max-width: 1100px;
 }
+/* A report that prints landscape gets a landscape sheet on screen. Letter
+   landscape at the 0.45in margins we print at is about 970px of usable
+   width; matching it here means a table that fits on screen fits on paper,
+   and one that does not is visibly too wide before anybody prints it. */
+.rpt-sheet-landscape { max-width: 1062px; padding: 34px 46px; }
+
+/* The only report whose width the reader controls. On screen it may scroll
+   rather than clip — losing columns off the edge of a screen is worse than
+   scrolling to them. In print there is nothing to scroll to, so the type
+   comes down instead (see data-density below) and overflow is visible so
+   nothing is silently cut. */
+.rpt-hscroll { overflow-x: auto; }
+
 :root[data-theme="dark"] .rpt-sheet { border-color: var(--border-strong); }
 
 .rpt-head {
@@ -756,6 +769,31 @@ table.rpt-table .muted { color: #8f8f8f; }
 table.rpt-table-tight { font-size: 10px; }
 table.rpt-table-tight th { padding: 6px 5px; font-size: 8px; }
 table.rpt-table-tight td { padding: 5px; }
+
+/* Type set to the number of columns asked for. Four steps rather than a
+   continuous scale, so two schedules printed a week apart with the same
+   columns look the same. */
+table.rpt-table-tight[data-density="b"] { font-size: 9px; }
+table.rpt-table-tight[data-density="b"] th { padding: 5px 3px; font-size: 7.5px; }
+table.rpt-table-tight[data-density="b"] td { padding: 4px 3px; }
+table.rpt-table-tight[data-density="c"] { font-size: 8px; }
+table.rpt-table-tight[data-density="c"] th { padding: 4px 2px; font-size: 7px; }
+table.rpt-table-tight[data-density="c"] td { padding: 3px 2px; }
+table.rpt-table-tight[data-density="d"] { font-size: 7px; }
+table.rpt-table-tight[data-density="d"] th { padding: 3px 2px; font-size: 6.5px; }
+table.rpt-table-tight[data-density="d"] td { padding: 2px; }
+
+/* The row number is a counter, not data. It never needs more than three
+   digits and must never be the reason a column wraps. Scoped to the
+   schedule — every other tight table's first column carries something. */
+table.rpt-table-tight[data-density] td:first-child,
+table.rpt-table-tight[data-density] th:first-child { white-space: nowrap; width: 1%; }
+
+/* Long words are broken by <wbr> marks put in at render time, not by
+   overflow-wrap. Letting CSS break anywhere sized the columns off the
+   shortest possible line, so "Annual" came out as "Annu / al" and the row
+   number 10 as "1 / 0" — the table fitted the page by making nonsense of
+   every narrow column. */
 /* Policy numbers and dates must not break mid-token. */
 .rpt-nowrap { white-space: nowrap; }
 .rpt-dim td { color: #b8b8b8; }
@@ -882,6 +920,9 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
 
   .main { padding: 0 !important; max-width: none !important; }
   .rpt-output { margin: 0 !important; }
+  /* Nothing to scroll to on paper: let it run onto a second page rather
+     than clipping columns off the right-hand edge. */
+  .rpt-hscroll { overflow: visible !important; }
   .rpt-sheet {
     border: none !important; border-radius: 0 !important;
     padding: 0 !important; margin: 0 !important; max-width: none !important;
@@ -1138,6 +1179,69 @@ dialog.wide { width: 760px; }
   max-width: 260px;
 }
 .head-select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* ------------------------ the entity picker --------------------------
+   A button that says what is chosen and a panel of tick boxes under it.
+   The panel is absolutely positioned so opening it cannot push the page
+   heading around, and it is right-aligned because the picker sits at the
+   right-hand end of a heading and a left-aligned panel would hang off the
+   screen on a narrow one. */
+.entity-pick { position: relative; }
+
+.entity-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 0 10px; cursor: pointer; text-align: left;
+  max-width: 260px;
+}
+.entity-btn > span:first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.entity-caret { font-size: 10px; color: var(--text-secondary); }
+.entity-pick.open .entity-btn { border-color: var(--focus); }
+
+.entity-menu {
+  position: absolute; z-index: 40; top: calc(100% + 4px); right: 0;
+  min-width: 232px; max-width: 340px;
+  background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+  padding: 4px;
+  text-align: left;
+}
+.entity-menu[hidden] { display: none; }
+
+/* Tall books scroll; short ones are simply as tall as they are. */
+.entity-list { max-height: 300px; overflow-y: auto; }
+
+/* A tick box with a name beside it, not a form label — so it opts out of
+   the uppercase mono micro-label treatment fields use, and the box keeps
+   its own size rather than stretching the way a text input does. */
+.entity-opt {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 9px; margin: 0; border-radius: var(--radius-sm);
+  font-family: inherit; font-size: 13px; font-weight: 400; line-height: 1.4;
+  text-transform: none; letter-spacing: 0; color: var(--text-primary);
+  cursor: pointer; white-space: nowrap;
+}
+.entity-opt:hover { background: var(--surface-2); }
+.entity-opt input[type=checkbox] {
+  flex: none; width: 15px; height: 15px; margin: 0; min-width: 0;
+}
+.entity-opt > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.entity-all { border-bottom: 1px solid var(--border); border-radius: 0; margin-bottom: 3px; }
+
+.entity-foot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  border-top: 1px solid var(--border); margin-top: 3px;
+  padding: 7px 9px 5px; font-size: 12px;
+}
+.entity-saved { color: var(--text-secondary); font-family: inherit; }
+.entity-foot .btn-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 12px; font-family: inherit; color: var(--text-primary);
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.entity-foot .btn-link:hover { color: var(--text-secondary); }
 
 /* -------------------------- registration ----------------------------- */
 /* The register form is longer than anything else a signed-out visitor

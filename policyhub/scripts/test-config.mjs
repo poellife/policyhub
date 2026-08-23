@@ -102,3 +102,57 @@ export async function login(email, password, base = BASE) {
   if (!r.ok) throw new Error(`login failed for ${email}: ${r.status}`);
   return r.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
 }
+
+/* ------------------------- the entity picker -------------------------
+   Several suites drive the owner-entity filter, and it is a button and a
+   panel of tick boxes rather than a <select>, so "choose LCG1" is three
+   actions. They live here so that changing the control means changing one
+   place rather than five.
+   ------------------------------------------------------------------- */
+
+/** The codes the picker currently has ticked. */
+export async function chosenEntities(page) {
+  await page.waitForSelector('#entityPick', { timeout: 15000 });
+  return page.$$eval('#entityPick .entity-one:checked', (b) => b.map((x) => x.value));
+}
+
+/** Every code the picker offers. */
+export async function offeredEntities(page) {
+  await page.waitForSelector('#entityPick', { timeout: 15000 });
+  return page.$$eval('#entityPick .entity-one', (b) => b.map((x) => x.value));
+}
+
+/** What the closed button says. */
+export async function entityButtonText(page) {
+  await page.waitForSelector('#entityBtn', { timeout: 15000 });
+  return (await page.locator('#entityBtn').textContent()).replace(/[\u25be\s]+/g, ' ').trim();
+}
+
+/**
+ * Tick exactly `codes` and let the page settle.
+ *
+ * An empty list means the whole book, which is the "All entities" box.
+ * The selection is read when the menu closes, so this opens it, ticks,
+ * and clicks away — the same three things a person does.
+ */
+export async function pickEntities(page, codes, { settle = 1400 } = {}) {
+  const want = Array.isArray(codes) ? codes : [codes].filter(Boolean);
+  await page.waitForSelector('#entityBtn', { timeout: 15000 });
+  await page.click('#entityBtn');
+  await page.waitForSelector('#entityMenu:not([hidden])', { timeout: 5000 });
+  if (!want.length) {
+    await page.click('#entityAll');
+  } else {
+    for (const box of await page.$$('#entityPick .entity-one')) {
+      const code = await box.getAttribute('value');
+      const on = await box.isChecked();
+      if (want.includes(code) !== on) await box.click();
+    }
+  }
+  /* Escape shuts it, which is when the selection is read. If focus went
+     somewhere odd, clicking the page heading does the same job. */
+  await page.keyboard.press('Escape');
+  if (await page.locator('#entityMenu:not([hidden])').count())
+    await page.locator('.page-head h1').first().click();
+  await page.waitForTimeout(settle);
+}

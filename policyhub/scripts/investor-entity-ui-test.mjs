@@ -68,7 +68,7 @@ check('an unassigned one says so plainly',
 check('and the page counts how many are still unassigned',
   /not assigned to an entity/i.test(await p.locator('.page-head .sub').textContent()),
   (await p.locator('.page-head .sub').textContent()).trim());
-check('the entity picker is on this page too', (await p.locator('#entityFilter').count()) === 1);
+check('the entity picker is on this page too', (await p.locator('#entityPick').count()) === 1);
 
 console.log('\nEVERYTHING THEY TYPED IS EDITABLE');
 await row.locator('[data-edit-investor]').click();
