@@ -97,6 +97,12 @@ for (const [name, path, pick] of endpoints) {
     Number.isInteger(a?.rated_count) && a.rated_count > 0, String(a?.rated_count));
   check(`${name} has them genuinely different on this book`,
     Math.abs(a.rate - a.mean_rate) > 0.02, `${pct(a.rate)} against ${pct(a.mean_rate)}`);
+  /* The compounded figure is a pair with the simple one, not a separate
+     question. Both readings of it come down too, or a screen ends up
+     quoting an equal-weighted return against a capital-weighted IRR. */
+  check(`${name} sends both readings of the compounded figure`,
+    a?.compound_rate != null && a?.mean_compound_rate != null,
+    `${pct(a?.compound_rate)} against ${pct(a?.mean_compound_rate)}`);
 }
 const ret = await json(await api('/reports/returns?basis=active&fund=LCG1'));
 const lcg1 = (ret.byFund || []).find((f) => f.fund_code === 'LCG1');
@@ -171,6 +177,31 @@ check('and the tile now names that one', /equal-weighted/.test(await tileNote())
 check('with the capital-weighted figure printed beside it — the one it was',
   (await tileNote()).includes(weightedShown.replace('%', '')), await tileNote());
 await p.screenshot({ path: `${S}/rb1-dashboard.png`, fullPage: false });
+
+console.log('\nTHE COMPOUNDED FIGURE MOVES WITH IT');
+/* Switching the weighting has to move both numbers on the tile. One of
+   them staying put is the reader quoting two different books off one
+   line, with nothing on screen to say so. */
+const compoundShown = async () => {
+  const note = await tileNote();
+  const m = /([\d.]+%) compounded/.exec(note);
+  return m ? m[1] : null;
+};
+const equalCompound = await compoundShown();
+check('the tile carries a compounded figure', equalCompound !== null, await tileNote());
+await p.selectOption('#rateBasis', 'weighted');
+await p.waitForTimeout(1600);
+const weightedCompound = await compoundShown();
+check('and it changes with the weighting, like the figure above it',
+  weightedCompound !== null && weightedCompound !== equalCompound,
+  `${equalCompound} equal-weighted, ${weightedCompound} capital-weighted`);
+check('the simple figure went back too', (await tileRate()) === weightedShown,
+  `${await tileRate()} against ${weightedShown}`);
+await p.selectOption('#rateBasis', 'simple');
+await p.waitForTimeout(1600);
+check('and back again gives the same pair, not a third answer',
+  (await tileRate()) === equalShown && (await compoundShown()) === equalCompound,
+  `${await tileRate()} · ${await compoundShown()}`);
 
 console.log('\nAND IT IS THE SAME CHOICE ON EVERY TAB');
 for (const [route, name] of [['maturities', 'maturities'], ['reports', 'reports']]) {

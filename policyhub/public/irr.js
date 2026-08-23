@@ -245,7 +245,8 @@ export function poolFlows(groups) {
     (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   /* Nothing to pool. The two extra fields are still on it so a caller can
      read `mean_rate` without checking whether there was anything there. */
-  if (!all.length) return { ...analyzeFlows([]), mean_rate: null, rated_count: 0 };
+  if (!all.length) return { ...analyzeFlows([]),
+    mean_rate: null, rated_count: 0, mean_compound_rate: null, compound_rated_count: 0 };
 
   const profit = parts.reduce((s, a) => s + a.profit, 0);
   const dollarYears = parts.reduce((s, a) => s + a.dollar_years, 0);
@@ -262,6 +263,15 @@ export function poolFlows(groups) {
   const rated = parts.filter((a) => a.rate !== null);
   const meanRate = rated.length
     ? rated.reduce((s, a) => s + a.rate, 0) / rated.length : null;
+
+  /* The compounded figure has the same two readings, and they have to
+     travel together with the simple ones. A screen showing an
+     equal-weighted return beside a capital-weighted IRR is quoting two
+     different books on one line, which is worse than showing either
+     alone -- the reader has no way to see that the pair disagree. */
+  const compounded = parts.filter((a) => a.compound_rate !== null);
+  const meanCompound = compounded.length
+    ? compounded.reduce((s, a) => s + a.compound_rate, 0) / compounded.length : null;
 
   const first = all[0].date;
   const last = all[all.length - 1].date;
@@ -293,6 +303,8 @@ export function poolFlows(groups) {
     policy_count: parts.length,
     mean_rate: meanRate,
     rated_count: rated.length,
+    mean_compound_rate: meanCompound,
+    compound_rated_count: compounded.length,
   };
 }
 

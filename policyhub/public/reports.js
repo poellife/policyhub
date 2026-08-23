@@ -48,6 +48,17 @@ const shown = (a) => {
 };
 const shownOther = (a) => (!a ? null
   : host.rateBasis() === 'simple' ? (a.rate ?? null) : (a.mean_rate ?? null));
+
+/* The compounded figure on the same basis as the simple one beside it.
+   The pair has to move together, or a document quotes an equal-weighted
+   return against a capital-weighted IRR and says nothing about it. */
+const shownCompound = (a) => {
+  if (!a) return null;
+  if (host.rateBasis() === 'simple'
+    && a.mean_compound_rate !== undefined && a.mean_compound_rate !== null)
+    return a.mean_compound_rate;
+  return a.compound_rate ?? null;
+};
 const basisWord = () => BASIS_WORDS[host.rateBasis()] || BASIS_WORDS.weighted;
 const otherWord = () => BASIS_WORDS[host.rateBasis() === 'simple' ? 'weighted' : 'simple'];
 export const wireReports = (fns) => { host = { ...host, ...fns }; };
@@ -912,8 +923,9 @@ function buildReturn(d, o, { realized }) {
              the simple one alone — it is what their statements are written
              in, and an unexplained second figure raises a question the
              document cannot answer. */}
-      ${o.investorShare || p.compound_rate == null ? '' : tile('Compounded (IRR)',
-        fmtRate(p.compound_rate), 'the same cash flows, compounded rather than simple')}
+      ${o.investorShare || shownCompound(p) == null ? '' : tile('Compounded (IRR)',
+        fmtRate(shownCompound(p)),
+        `the same cash flows, compounded rather than simple · ${basisWord()}`)}
       ${tile(realized ? 'Proceeds' : 'Death benefit', fmtExact(p.returned),
         realized
           ? (assumed > 0

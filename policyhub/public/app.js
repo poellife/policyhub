@@ -8,6 +8,9 @@ import { reportsView, buildOpportunitySheet, wireReports } from './reports.js';
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
 import { analyzeFlows, fmtRate, today as irrToday } from './irr.js';
+// The build this page was served from. The server reports the same
+// constant on /auth/me; if the two differ the deployment is half updated.
+import { BUILD } from './build.js';
 import { POLICY_FIELDS, POLICY_GROUPS, arrangeFields, packArrangement }
   from './policy-fields.js';
 
@@ -380,6 +383,22 @@ const bookRate = (a) => {
 const otherRate = (a) => {
   if (!a) return null;
   return rateBasis() === 'simple' ? (a.rate ?? null) : (a.mean_rate ?? null);
+};
+
+/**
+ * The compounded figure, on the same basis as the simple one beside it.
+ *
+ * The two are a pair. Switching the weighting has to move both or the
+ * line reads as two different books -- an equal-weighted return with a
+ * capital-weighted IRB next to it, and nothing on screen to say they
+ * disagree.
+ */
+const bookCompound = (a) => {
+  if (!a) return null;
+  if (rateBasis() === 'simple'
+    && a.mean_compound_rate !== undefined && a.mean_compound_rate !== null)
+    return a.mean_compound_rate;
+  return a.compound_rate ?? null;
 };
 
 /**
@@ -878,8 +897,8 @@ const isManagerUser  = () => state.user?.role === 'manager';
  * no explanation is worse than one that is labelled.
  */
 const showsBothRates = () => !isInvestorUser();
-const compoundNote = (a) => (!showsBothRates() || !a || a.compound_rate == null
-  ? '' : `${fmtRate(a.compound_rate)} compounded`);
+const compoundNote = (a) => (!showsBothRates() || !a || bookCompound(a) == null
+  ? '' : `${fmtRate(bookCompound(a))} compounded`);
 
 let screenKeys = null;
 const onKey = (fn) => { screenKeys = fn; };
@@ -973,8 +992,49 @@ function shell(inner) {
         <button class="btn-sm" id="logoutBtn">Sign out</button>
       </div>
     </div>
+    ${buildBanner()}
     <div id="securityBanner"></div>
     <div class="main" id="main">${inner}</div>`;
+}
+
+/**
+ * "This page and this server are not the same build."
+ *
+ * A deployment that updates the browser files without updating the server
+ * -- or the other way round -- produces errors that look like bugs and are
+ * not: a button whose route does not exist yet, an export the API has
+ * never heard of. Both have happened here, and both cost a round trip to
+ * diagnose, because the only thing on screen was a status code.
+ *
+ * So the application checks itself. The server puts its build on
+ * /auth/me, the page carries its own, and when they disagree it says so
+ * in the one place nobody can miss, in terms that name the action:
+ * hard-reload first, because a cached page explains most of it, and if
+ * that does not settle it then the deployment did not finish.
+ *
+ * A server too old to report a build at all is the same problem said
+ * differently -- no answer is a stronger signal than a different one.
+ */
+function buildBanner() {
+  const theirs = state.user?.build;
+  if (theirs === BUILD) return '';
+  return `
+    <div class="security-bar warn" id="buildBanner">
+      <span class="security-mark" aria-hidden="true">!</span>
+      <div class="security-text">
+        <div><strong>This page and the server are running different builds.</strong>
+          Something on screen may ask for a route the server does not have, and
+          fail with a bare error code.</div>
+        <div class="muted" style="font-size:12.5px;margin-top:3px">
+          This page is <strong>${esc(BUILD)}</strong>; the server ${theirs
+    ? `is <strong>${esc(theirs)}</strong>`
+    : 'is old enough that it does not report one'}.
+          Reload with a hard refresh first. If it still says this, the last
+          deployment updated some files and not others.</div>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn-sm" id="buildReload">Hard reload</button>
+    </div>`;
 }
 
 /**
@@ -8982,6 +9042,7 @@ function fitStatValues() {
 window.addEventListener('resize', fitStatValues);
 
 function wireShell() {
+  $('#buildReload')?.addEventListener('click', () => location.reload(true));
   $('#logoutBtn').addEventListener('click', async () => {
     await api('/auth/logout', { method: 'POST' });
     state.user = null;
