@@ -5408,6 +5408,44 @@ router.get('/reports/returns', wrap(async (req, res) => {
     [scope, funds, fund]
   );
 
+  /* Entities the reader asked for that put nothing in this table.
+   *
+   * Now that several can be chosen at once, adding one that holds no
+   * matured policies to a realized-return report produces a document
+   * identical to the one before it except for the line naming the
+   * entities -- which reads exactly like a filter that was ignored. It
+   * was not; there was simply nothing in it on this basis. Saying so is
+   * the difference between a document that answers the question and one
+   * that raises it.
+   *
+   * Each is reported with what it actually holds, because "nothing
+   * matured yet" and "no policies at all" are different facts and the
+   * reader is about to act on one of them.
+   */
+  const askedCodes = fund ? fund.split(',').filter(Boolean) : [];
+  let emptyFunds = [];
+  if (askedCodes.length) {
+    const present = new Set(policies.map((p) => p.fund_code).filter(Boolean));
+    const missing = askedCodes.filter((c) => !present.has(c));
+    if (missing.length) {
+      const { rows: held } = await q(
+        `SELECT pl.fund_code, COUNT(*)::int AS n,
+                COUNT(*) FILTER (WHERE pl.status = 'Matured')::int AS matured
+           FROM policy_latest pl
+          WHERE pl.fund_code = ANY($3::text[])
+            AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
+          GROUP BY pl.fund_code`,
+        [scope, funds, missing]
+      );
+      const byCode = new Map(held.map((h) => [h.fund_code, h]));
+      emptyFunds = missing.map((code) => ({
+        fund_code: code,
+        policies: byCode.get(code)?.n || 0,
+        matured: byCode.get(code)?.matured || 0,
+      }));
+    }
+  }
+
   const portfolio = poolFlows([...byPolicy.values()]);
   // The simple mean is reported alongside, because the gap between it and the
   // capital-weighted rate is itself worth seeing.
@@ -5416,7 +5454,7 @@ router.get('/reports/returns', wrap(async (req, res) => {
 
   res.json({
     basis, as_of: asOf, fund,
-    rows, byFund, excluded, portfolio,
+    rows, byFund, excluded, emptyFunds, portfolio,
     mean_rate: meanIrr,
     rated_count: rated.length,
     scopedToInvestor: scope !== null,
