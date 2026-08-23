@@ -885,7 +885,40 @@ function buildReturn(d, o, { realized }) {
     other === null || other === undefined ? '' : `${otherWord()} ${fmtRate(other)}`,
   ].filter(Boolean).join(' · ');
 
-  const fundTable = d.byFund.length > 1 ? `
+  /* Why this document may look identical to the last one.
+   *
+   * An entity chosen in the picker that holds nothing on this basis
+   * contributes no row and no figure, so two reports over different
+   * selections come out the same but for the line naming them. That is
+   * correct and it is baffling, and the fix is a sentence rather than a
+   * change to the arithmetic. */
+  const silent = (d.emptyFunds || []).length ? `
+    <p class="rpt-note">
+      ${(d.emptyFunds || []).map((f) => `${esc(f.fund_code)} was included in this
+        selection and is not in the table above: ${f.policies === 0
+    ? 'it holds no policies'
+    : `it holds ${f.policies} ${f.policies === 1 ? 'policy' : 'policies'}, ${
+      realized ? 'none of them matured' : 'none of them in force'}`}.`).join(' ')}
+    </p>` : '';
+
+  /* What the basis itself leaves out. Computed for this purpose all along
+     and never printed, which made the table look like the whole book. */
+  /* "Inforce" is how the status is stored; "in force" is how it is read. */
+  const STATUS_WORDS = { Inforce: 'in force', Grace: 'in grace', Lapsed: 'lapsed',
+    Matured: 'matured', Sold: 'sold', Pending: 'pending' };
+  const left = (d.excluded || []).filter((e) => e.n > 0);
+  const leftNote = left.length ? `
+    <p class="rpt-note">
+      Not in this table: ${left.map((e) => `${e.n} ${
+    e.n === 1 ? 'policy' : 'policies'} ${
+    STATUS_WORDS[e.status] || String(e.status).toLowerCase()}${
+    o.showBasis && Number(e.invested) ? ` (${money(e.invested, 0)} invested)` : ''}`).join(', ')}.
+      ${realized
+    ? 'A realized return counts only claims the carrier has recorded as paid.'
+    : 'This table is the live book; anything settled is on the realized report.'}
+    </p>` : '';
+
+  const fundTable = d.byFund.length + (d.emptyFunds || []).length > 1 ? `
     <div class="rpt-block avoid-break">
       <h3 class="rpt-h3">By owner entity</h3>
       <table class="rpt-table">
@@ -902,6 +935,19 @@ function buildReturn(d, o, { realized }) {
           ${o.showBasis ? `<td class="num">${fmtExact(f.profit)}</td>
             <td class="num">${f.multiple ? `${f.multiple.toFixed(2)}×` : '—'}</td>` : ''}
           <td class="num strong">${fmtRate(shown(f))}</td>
+        </tr>`).join('')}
+        ${''/* Entities that were asked for and had nothing to put in.
+               Listed as zeros rather than left out: an omitted row is
+               indistinguishable from a filter that was ignored, which is
+               what makes two reports over different selections look like
+               the same document for no reason. */}
+        ${(d.emptyFunds || []).map((f) => `<tr class="rpt-zero">
+          <td class="strong">${esc(f.fund_code)}</td>
+          <td class="num">0</td>
+          ${o.showBasis ? '<td class="num">—</td>' : ''}
+          <td class="num">—</td>
+          ${o.showBasis ? '<td class="num">—</td><td class="num">—</td>' : ''}
+          <td class="num">—</td>
         </tr>`).join('')}</tbody>
         <tfoot><tr><td>Whole book</td><td class="num">${rows.length}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(p.invested)}</td>` : ''}
@@ -951,6 +997,8 @@ function buildReturn(d, o, { realized }) {
     </div>` : ''}
 
     ${fundTable}
+    ${silent}
+    ${leftNote}
 
     <div class="rpt-block">
       <h3 class="rpt-h3">Policies, ranked by return</h3>
