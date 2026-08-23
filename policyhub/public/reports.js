@@ -25,7 +25,31 @@ let host = {
   entityPicker: () => '',
   wireEntityPicker: () => {},
   entityCodes: () => [],
+  rateToggle: () => '',
+  wireRateToggle: () => {},
+  rateBasis: () => 'weighted',
 };
+
+/* ---------------------- which rate a document quotes ------------------
+   Capital-weighted (total profit over total dollar-years) or
+   equal-weighted (each policy's own rate counted once). The reader's
+   standing choice, shared with the screens, and named on the document --
+   a report that leaves the room has to say which of the two it is, or the
+   number on it cannot be checked against anything.
+   ------------------------------------------------------------------- */
+const BASIS_WORDS = { weighted: 'capital-weighted', simple: 'equal-weighted' };
+
+/** The figure to print, out of anything carrying both. */
+const shown = (a) => {
+  if (!a) return null;
+  if (host.rateBasis() === 'simple' && a.mean_rate !== undefined && a.mean_rate !== null)
+    return a.mean_rate;
+  return a.rate ?? null;
+};
+const shownOther = (a) => (!a ? null
+  : host.rateBasis() === 'simple' ? (a.rate ?? null) : (a.mean_rate ?? null));
+const basisWord = () => BASIS_WORDS[host.rateBasis()] || BASIS_WORDS.weighted;
+const otherWord = () => BASIS_WORDS[host.rateBasis() === 'simple' ? 'weighted' : 'simple'];
 export const wireReports = (fns) => { host = { ...host, ...fns }; };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -841,8 +865,14 @@ function buildReturn(d, o, { realized }) {
   const settledCount = rows.filter((r) => r.settled).length;
   const cashReceived = rows.reduce((s, r) => s + (r.settled ? Number(r.proceeds_amount) || 0 : 0), 0);
   const assumed = Math.max(0, Number(p.returned) - cashReceived);
-  const weightedNote = d.mean_rate === null ? ''
-    : `Simple average of the ${d.rated_count} policy rates is ${fmtRate(d.mean_rate)}`;
+  /* Which of the two this document is quoting, and what the other reads.
+     Both on the tile, always: a rate handed to somebody with no statement
+     of how it was combined cannot be checked against anything. */
+  const other = shownOther(p);
+  const weightedNote = [
+    basisWord(),
+    other === null || other === undefined ? '' : `${otherWord()} ${fmtRate(other)}`,
+  ].filter(Boolean).join(' · ');
 
   const fundTable = d.byFund.length > 1 ? `
     <div class="rpt-block avoid-break">
@@ -860,14 +890,14 @@ function buildReturn(d, o, { realized }) {
           <td class="num">${fmtExact(f.returned)}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(f.profit)}</td>
             <td class="num">${f.multiple ? `${f.multiple.toFixed(2)}×` : '—'}</td>` : ''}
-          <td class="num strong">${fmtRate(f.rate)}</td>
+          <td class="num strong">${fmtRate(shown(f))}</td>
         </tr>`).join('')}</tbody>
         <tfoot><tr><td>Whole book</td><td class="num">${rows.length}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(p.invested)}</td>` : ''}
           <td class="num">${fmtExact(p.returned)}</td>
           ${o.showBasis ? `<td class="num">${fmtExact(p.profit)}</td>
             <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
-          <td class="num">${fmtRate(p.rate)}</td></tr></tfoot>
+          <td class="num">${fmtRate(shown(p))}</td></tr></tfoot>
       </table>
     </div>` : '';
 
@@ -877,7 +907,7 @@ function buildReturn(d, o, { realized }) {
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 5 : 3}">
       ${tile(`${realized ? 'Realized return' : 'Return if matured today'}${
-        o.investorShare ? '' : ' · simple'}`, fmtRate(p.rate), weightedNote)}
+        o.investorShare ? '' : ' · simple interest'}`, fmtRate(shown(p)), weightedNote)}
       ${''/* Both rates on a staff report, named. An investor's copy keeps
              the simple one alone — it is what their statements are written
              in, and an unexplained second figure raises a question the
@@ -985,12 +1015,17 @@ function buildReturn(d, o, { realized }) {
             'premium is paid in the meantime.'}
       </p>
       <p class="rpt-note">
-        Entity and portfolio rates are total profit over total dollar-years — each
-        policy measured against its own settlement date and then added — not averaged
-        across policies. A large position held a long time contributes more to a rate
-        than a small one held briefly.
-        ${d.mean_rate !== null ? `The simple average of the individual rates is ${fmtRate(d.mean_rate)},
-        against a capital-weighted ${fmtRate(p.rate)}.` : ''}
+        ${host.rateBasis() === 'simple'
+    ? `Entity and portfolio rates on this document are equal-weighted: each policy's own
+        rate counted once, whatever size it is. That is how the cases did rather than
+        what the money did, and a small position with an outsized rate moves it as much
+        as a large one.`
+    : `Entity and portfolio rates on this document are capital-weighted: total profit over
+        total dollar-years, each policy measured against its own settlement date and then
+        added, never averaged across policies. A large position held a long time
+        contributes more than a small one held briefly.`}
+        ${p.mean_rate != null && p.rate != null ? `The same policies read
+        ${fmtRate(p.rate)} capital-weighted and ${fmtRate(p.mean_rate)} equal-weighted.` : ''}
         ${anyFlagged ? `A * marks a figure that needs reading with care: ${realized ? 'a claim not yet paid, whose death benefit is shown and assumed collected today; ' : ''}a holding period under 90 days; or cash flows that change direction more than once, where more than one rate can satisfy the equation.` : ''}
         ${p.ambiguous ? ' At least one policy\u2019s cash flows change direction more than once; its own rate is marked, and it is pooled into the book figure on its dollar-years like any other.' : ''}
       </p>
@@ -1061,9 +1096,14 @@ function buildInvestorReport(d, o) {
             ? `${row.upcoming.length} scheduled ${row.upcoming.length === 1 ? 'date' : 'dates'}`
             : 'nothing scheduled'}</div></div>
         <div class="rpt-tile"><div class="rpt-tile-label">Portfolio return</div>
-          <div class="rpt-tile-value">${fmtRate(t.rate)}</div>
+          <div class="rpt-tile-value">${fmtRate(shown(t))}</div>
+          ${''/* Named on the statement itself. This is a document that
+                 leaves the office with somebody's name on it, and two
+                 statements quoting different figures for the same
+                 positions have to be able to explain themselves. */}
           <div class="rpt-tile-note">${t.short_period
-            ? 'short holding period' : 'if every policy matured today'}</div></div>
+            ? 'short holding period' : 'if every policy matured today'}${
+            shown(t) === null ? '' : ` · ${basisWord()}`}</div></div>
       </div>
 
       <div class="rpt-block">
@@ -1635,6 +1675,7 @@ export async function reportsView(api, state) {
         <div class="sub">Print-ready documents. Generate, review, then save as PDF.${
           investorUser ? ' Figures reflect your ownership percentage.' : ''}</div></div>
       <div class="spacer"></div>
+      ${host.rateToggle()}
       ${host.entityPicker(funds)}
     </div>
 
@@ -1729,7 +1770,15 @@ export async function reportsView(api, state) {
   return {
     html,
     after: () => {
+      /* Registered before the shell's own handler, which re-renders: a
+         report already on screen is rebuilt on the new basis rather than
+         cleared, because the reader changed how it should read, not what
+         it should cover. */
+      $('#rateBasis')?.addEventListener('change', () => {
+        if ($('#rptOutput')?.querySelector('.rpt-sheet')) r.regenerate = true;
+      });
       host.wireEntityPicker();
+      host.wireRateToggle();
       const sync = () => {
         r.type = document.querySelector('input[name=rptType]:checked').value;
         $('#rptMonthsField').style.display = r.type === 'forecast' ? '' : 'none';

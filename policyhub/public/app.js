@@ -44,6 +44,10 @@ const state = {
   /* The view this person asked to be remembered, as it came back from the
      server, so the picker can say whether what is on screen is it. */
   viewDefault: null,
+  /* How policy returns are combined into a book return: 'weighted' or
+     'simple'. See rateToggle below. Saved against the account the moment
+     it changes, because it is a way of reading rather than a filter. */
+  rateBasis: 'weighted',
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -85,6 +89,7 @@ async function loadPrefs() {
     state.policyCols = prefs?.policy_columns || null;
     state.reportCols = prefs?.report_columns || null;
     applyViewDefault(prefs?.view_defaults || null);
+    state.rateBasis = prefs?.rate_basis?.basis === 'simple' ? 'simple' : 'weighted';
   } catch {
     state.policyCols = null;
   }
@@ -324,6 +329,99 @@ const wireEntityPicker = ({ soft = false } = {}) => {
     state.filters.funds = [...(state.viewDefault.funds || [])];
     state.filters.status = state.viewDefault.status || '';
     render();
+  });
+};
+
+/* --------------------------- how rates combine -----------------------
+ * A book of policies has two honest returns and they answer different
+ * questions.
+ *
+ *   Capital-weighted -- total profit over total dollar-years. A $10m
+ *     position counts for ten times a $1m one, and a policy held eight
+ *     years for more than one held eight months. It is what the money
+ *     did, and it is the default, because that is what a figure headed
+ *     "portfolio return" is normally taken to mean.
+ *
+ *   Equal-weighted -- the plain average of the policies' own rates, each
+ *     counted once. It is how the cases did, which is a real question:
+ *     it is the one to ask about underwriting rather than about capital.
+ *
+ * Deliberately NOT called "simple", even though that is the plain word
+ * for it: this application already uses "simple" for simple interest as
+ * against compounded, and one word carrying two axes at once on the same
+ * tile is how somebody reads the wrong number. The words on the control
+ * are the ones the rest of the industry uses.
+ *
+ * Both figures are computed and sent regardless, so switching costs no
+ * request and can never make a document disagree with the database.
+ * ------------------------------------------------------------------- */
+
+const rateBasis = () => (state.rateBasis === 'simple' ? 'simple' : 'weighted');
+const BASIS_WORDS = {
+  weighted: 'capital-weighted',
+  simple: 'equal-weighted',
+};
+
+/**
+ * The rate to show, out of a pooled analysis.
+ *
+ * Falls back to the weighted figure whenever there is no average to be
+ * had -- a single policy, or an older payload that predates the choice --
+ * so a screen can call this without knowing which it is holding.
+ */
+const bookRate = (a) => {
+  if (!a) return null;
+  if (rateBasis() === 'simple' && a.mean_rate !== undefined && a.mean_rate !== null)
+    return a.mean_rate;
+  return a.rate ?? null;
+};
+
+/** The other one, for the note that says what it would read instead. */
+const otherRate = (a) => {
+  if (!a) return null;
+  return rateBasis() === 'simple' ? (a.rate ?? null) : (a.mean_rate ?? null);
+};
+
+/**
+ * A line saying which of the two is on screen and what the other reads.
+ *
+ * Printed rather than hidden behind the control: the gap between them is
+ * the whole reason there is a choice, and somebody who can see both at
+ * once never has to wonder which they are quoting.
+ */
+const basisNote = (a, { count } = {}) => {
+  if (!showsBothRates() || !a || bookRate(a) === null) return '';
+  const here = BASIS_WORDS[rateBasis()];
+  const other = otherRate(a);
+  const n = count ?? a.rated_count;
+  const of = rateBasis() === 'simple' && n
+    ? ` across ${n} ${n === 1 ? 'rate' : 'rates'}` : '';
+  return other === null || other === undefined
+    ? `${here}${of}`
+    : `${here}${of} · ${BASIS_WORDS[rateBasis() === 'simple' ? 'weighted' : 'simple']} ${
+      fmtRate(other)}`;
+};
+
+/** The control. Staff only, like the compounded figure beside it. */
+const rateToggle = () => (!showsBothRates() ? '' : `
+  <select id="rateBasis" class="head-select" aria-label="How policy returns are combined">
+    <option value="weighted" ${rateBasis() === 'weighted' ? 'selected' : ''}
+      >Capital-weighted</option>
+    <option value="simple" ${rateBasis() === 'simple' ? 'selected' : ''}
+      >Equal-weighted</option>
+  </select>`);
+
+/** Wire it up. Call from a view's `after`, like the entity picker. */
+const wireRateToggle = () => {
+  $('#rateBasis')?.addEventListener('change', async (e) => {
+    state.rateBasis = e.target.value === 'simple' ? 'simple' : 'weighted';
+    render();
+    /* Saved after the screen has already changed. A setting about how to
+       read a number is not worth a modal if the save fails, but it is
+       worth saying so -- otherwise it silently reverts tomorrow. */
+    try {
+      await api('/me/prefs/rate_basis', { method: 'PUT', body: { basis: state.rateBasis } });
+    } catch (err) { toast(`That was not saved: ${err.message}`); }
   });
 };
 
@@ -1204,6 +1302,7 @@ async function dashboardView() {
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
+      ${rateToggle()}
       ${entityPicker(funds)}
       ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
       <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
@@ -1259,19 +1358,17 @@ async function dashboardView() {
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
       <div class="stat">
-        <div class="label">Portfolio return${showsBothRates() ? ' · simple' : ''}</div>
-        <div class="value">${fmtRate(sum.rate?.rate)}</div>
-        ${''/* Said on the tile, because the question comes up: this is not
-               the average of the policies' rates. It is total profit over
-               total dollar-years, so a $10m position counts for ten times
-               a $1m one, and a policy held eight years for more than one
-               held eight months. The Returns report prints the plain
-               average beside it if anybody wants to see the gap. */}
+        <div class="label">Portfolio return${showsBothRates() ? ' · simple interest' : ''}</div>
+        <div class="value">${fmtRate(bookRate(sum.rate))}</div>
+        ${''/* Which of the two ways of combining the policies is on the
+               tile, and what the other reads. Printed rather than left to
+               the control in the heading: the gap between them is the
+               reason there is a choice. */}
         <div class="note">${compoundNote(sum.rate)
           ? `${compoundNote(sum.rate)} · ` : ''}${sum.rate?.days
           ? `if every policy matured today · ${(sum.rate.days / 365).toFixed(1)} yr span`
-          : 'no dated cash flows yet'}${sum.rate?.rate != null
-          ? ' · weighted by capital and time, not averaged across policies' : ''}</div>
+          : 'no dated cash flows yet'}${basisNote(sum.rate)
+          ? ` · ${basisNote(sum.rate)}` : ''}</div>
       </div>
       ${isInvestorUser() ? `
       <div class="stat">
@@ -1330,6 +1427,7 @@ async function dashboardView() {
     html,
     after: () => {
       wireEntityPicker();
+      wireRateToggle();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       lineChart($('#chartCapital'), {
@@ -1442,6 +1540,12 @@ wireReports({
   entityPicker: (funds) => entityPicker(funds),
   wireEntityPicker: () => wireEntityPicker(),
   entityCodes: () => entityCodes(),
+  /* A printed document has to be readable on the same basis as the screen
+     it was generated from, so the reports share the control rather than
+     keeping an idea of their own about how rates combine. */
+  rateToggle: () => rateToggle(),
+  wireRateToggle: () => wireRateToggle(),
+  rateBasis: () => rateBasis(),
 });
 
 const policyFieldList = () =>
@@ -2343,7 +2447,9 @@ function transactionsTab(p) {
                 <td class="num">${money(Number(t.amount) * f, 2)}</td>
                 <td class="secondary">${esc(t.remarks)}</td>
                 <td class="muted">${esc(t.source)}</td>
-                <td>${canEditData() ? `<button class="btn-sm btn-danger" data-del-txn="${t.id}">Delete</button>` : ''}</td>
+                <td class="row-actions">${canEditData() ? `
+                  <button class="btn-sm" data-edit-txn="${t.id}">Edit</button>
+                  <button class="btn-sm btn-danger" data-del-txn="${t.id}">Delete</button>` : ''}</td>
               </tr>`).join('')}
         </tbody>
       </table>
@@ -2928,6 +3034,11 @@ function wireDetailTab(p, values, irrData) {
       height: 110,
     });
     $('#addTxnBtn')?.addEventListener('click', () => openTxnDialog(p));
+    document.querySelectorAll('[data-edit-txn]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const t = (p.transactions || []).find((x) => String(x.id) === b.dataset.editTxn);
+        if (t) openTxnDialog(p, {}, t);
+      }));
     document.querySelectorAll('[data-del-txn]').forEach((b) =>
       b.addEventListener('click', async () => {
         if (!confirm('Delete this transaction?')) return;
@@ -3629,19 +3740,39 @@ function openStepDialog(p, existing = null) {
   return dlg;
 }
 
-function openTxnDialog(p, preset = {}) {
+/**
+ * Add a ledger entry, or correct one.
+ *
+ * The same dialog for both. An entry that is wrong is usually wrong in
+ * one field, and the way to fix that is to open it and change that field
+ * -- not to delete the row and retype four of them from memory, which is
+ * how a correction turns into a second mistake.
+ *
+ * `existing` is the row being corrected; without it this adds a new one.
+ */
+function openTxnDialog(p, preset = {}, existing = null) {
+  const from = existing || preset;
   const body = `
+    ${existing ? `<p class="dlg-note">Every return figure on this policy is worked out
+      from this ledger, so a change here moves the rate on the policy, on its entity and
+      on the book. What changed is recorded against your name.</p>` : ''}
     <div class="field-row">
-      ${inputField('Date *', 'txn_date', today(), 'date', 'required')}
-      ${selectField('Type *', 'txn_type', preset.txn_type || 'Premium Payment',
+      ${inputField('Date *', 'txn_date',
+        String(from.txn_date || today()).slice(0, 10), 'date', 'required')}
+      ${selectField('Type *', 'txn_type', from.txn_type || 'Premium Payment',
         ['Premium Payment', 'Acquisition Cost', 'Withdrawal', 'Loan', 'Fee', 'Commission', 'Servicing', 'Other'])}
     </div>
-    ${moneyField('Amount *', 'amount', preset.amount ?? '', 'required')}
-    ${inputField('Remarks', 'remarks')}`;
+    ${moneyField('Amount *', 'amount', from.amount ?? '', 'required')}
+    ${inputField('Remarks', 'remarks', existing ? (existing.remarks || '') : '')}`;
 
-  openDialog('Add transaction', body, async (v) => {
-    await api(`/policies/${p.id}/transactions`, { method: 'POST', body: v });
-    toast('Transaction saved');
+  openDialog(existing ? 'Edit transaction' : 'Add transaction', body, async (v) => {
+    if (existing) {
+      await api(`/transactions/${existing.id}`, { method: 'PUT', body: v });
+      toast('Transaction updated');
+    } else {
+      await api(`/policies/${p.id}/transactions`, { method: 'POST', body: v });
+      toast('Transaction saved');
+    }
   });
 }
 
@@ -4216,6 +4347,7 @@ async function servicingView() {
     html,
     after: () => {
       wireEntityPicker();
+      wireRateToggle();
       wireServicingTabs();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
@@ -5992,6 +6124,7 @@ async function carryView() {
     html,
     after: () => {
       wireEntityPicker();
+      wireRateToggle();
       $('#carryStatus').addEventListener('change', (e) => {
         state.carryStatus = e.target.value;
         render();
@@ -6038,14 +6171,9 @@ async function maturitiesView() {
   const paidCount = collected.length;
   const unpaidCount = rows.length - paidCount;
 
-  /* The simple mean of the per-policy rates, shown beside the book rate
-     rather than instead of it. The book rate is total profit over total
-     dollar-years, so a large position counts for more than a small one; the
-     mean treats a $50k case and a $5m case alike. The gap between them is
-     itself worth seeing, which is why both are on the tile. */
-  const ratedRows = rows.filter((r) => r.rate != null);
-  const meanRate = ratedRows.length
-    ? ratedRows.reduce((s2, r) => s2 + r.rate, 0) / ratedRows.length : null;
+  /* Which figure the tile leads with is this person's standing choice --
+     see rateToggle. Both come down from the server on the same object, so
+     the two can never disagree and switching costs no request. */
 
   const nameOf = (r) =>
     esc(r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim() || '—');
@@ -6057,6 +6185,7 @@ async function maturitiesView() {
           ${t.paid_count} paid · ${rows.length - t.paid_count} awaiting payment${
           !investorView && entityLabel() ? ` · ${esc(entityLabel())} only` : ''}</div></div>
       <div class="spacer"></div>
+      ${rateToggle()}
       ${entityPicker(funds)}
       ${shareToggle()}
       ${rows.length && isAdminUser() ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
@@ -6101,17 +6230,17 @@ async function maturitiesView() {
              would flatter the rate. That projection is still here, under the
              figure and named for what it is. */''}
         <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}${
-          showsBothRates() ? ' · simple' : ''}</div>
-        <div class="value">${fmtRate(paidCount ? m.realized?.rate : m.portfolio?.rate)}</div>
+          showsBothRates() ? ' · simple interest' : ''}</div>
+        <div class="value">${fmtRate(bookRate(paidCount ? m.realized : m.portfolio))}</div>
         ${showsBothRates() && compoundNote(paidCount ? m.realized : m.portfolio)
           ? `<div class="note">${compoundNote(paidCount ? m.realized : m.portfolio)}</div>` : ''}
         <div class="note">${paidCount
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
-             received${unpaidCount ? ` · ${fmtRate(m.portfolio?.rate)} with the other ${unpaidCount}
-             assumed collected today` : ''}`
+             received${unpaidCount ? ` · ${fmtRate(bookRate(m.portfolio))} with the other ${
+               unpaidCount} assumed collected today` : ''}`
           : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}${
-          meanRate != null ? ` · plain average of the ${ratedRows.length}
-            ${ratedRows.length === 1 ? 'rate' : 'rates'} ${fmtRate(meanRate)}` : ''}</div>
+          basisNote(paidCount ? m.realized : m.portfolio)
+            ? ` · ${basisNote(paidCount ? m.realized : m.portfolio)}` : ''}</div>
       </div>
     </div>
 
@@ -6138,7 +6267,7 @@ async function maturitiesView() {
           const totals = {
             total_death_benefit: t.total_death_benefit, total_invested: t.total_invested,
             total_proceeds: t.total_proceeds, gain,
-            rate: m.portfolio?.rate,
+            rate: bookRate(m.portfolio),
           };
           const first = matCols.findIndex((c) => c.total || c.key === 'gain'
             || c.key === 'rate');
@@ -6179,6 +6308,7 @@ async function maturitiesView() {
     after: () => {
       wireShareToggle();
       wireEntityPicker();
+      wireRateToggle();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
@@ -6301,6 +6431,7 @@ async function insuredsView() {
     html,
     after: () => {
       wireEntityPicker();
+      wireRateToggle();
       wireSearch('#insuredSearch', (term) => { state.insuredSearch = term; });
       $('#newInsuredBtn')?.addEventListener('click', () => openInsuredDialog(null));
       document.querySelectorAll('[data-edit-insured]').forEach((b) =>
@@ -6521,6 +6652,7 @@ async function investorsView() {
     after: () => {
       wireSearch('#investorSearch', (term) => { state.investorSearch = term; });
       wireEntityPicker();
+      wireRateToggle();
       $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
       $('#appShowAll')?.addEventListener('click', () => {
         state.showDecided = !state.showDecided; render();

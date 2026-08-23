@@ -120,8 +120,11 @@ check('and so is anything that is not an arrangement',
   [null, 'x', 42, [], { hidden: ['status'] }].every((v) => cleanArrangement(v) === null));
 
 console.log('\nOVER THE WIRE');
+/* About the arrangement, not about the account: other preferences live
+   under the same endpoint now — a remembered view, how rates are
+   combined — and an unsaved grid is the absence of this one key. */
 check('nothing is stored until something is saved',
-  Object.keys(await json(await api(admin, '/me/prefs'))).length === 0);
+  (await json(await api(admin, '/me/prefs')))?.policy_columns === undefined);
 const mine = { order: ['status', 'policy_number', 'carrier_name'], hidden: ['carrier_name'] };
 const saved = await json(await api(admin, '/me/prefs/policy_columns',
   { method: 'PUT', body: mine }));

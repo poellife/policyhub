@@ -67,14 +67,17 @@ console.log('THE DASHBOARD TILE');
 await p.waitForTimeout(900);
 const dashTiles = await p.locator('.kpi-row').first().textContent();
 check('a portfolio return tile is present', dashTiles.includes('Portfolio return'));
-/* Staff see it labelled "· simple", because the compounded rate is quoted
-   beside it — an unqualified "return" with two different numbers on the
-   screen is the ambiguity the label exists to remove. */
+/* Staff see it labelled "· simple interest", because the compounded rate
+   is quoted beside it — an unqualified "return" with two different
+   numbers on the screen is the ambiguity the label exists to remove.
+   "Interest" is said in full because a second axis now sits on the same
+   tile: how the policies are combined, capital-weighted or equal, which
+   is a different question from how the interest accrues. */
 check('showing a percentage',
-  /Portfolio return( · simple)?\s*[\d.]+%/.test(dashTiles.replace(/\s+/g, ' ')),
-  (dashTiles.replace(/\s+/g, ' ').match(/Portfolio return[^·]{0,30}/) || [''])[0].trim());
+  /Portfolio return( · simple interest)?\s*[\d.]+%/.test(dashTiles.replace(/\s+/g, ' ')),
+  (dashTiles.replace(/\s+/g, ' ').match(/Portfolio return[^·]{0,40}/) || [''])[0].trim());
 check('and naming which rate it is, since both are shown',
-  /Portfolio return · simple/.test(dashTiles.replace(/\s+/g, ' ')));
+  /Portfolio return · simple interest/.test(dashTiles.replace(/\s+/g, ' ')));
 check('with the compounded rate beside it',
   /compounded/.test(dashTiles.replace(/\s+/g, ' ')),
   (dashTiles.replace(/\s+/g, ' ').match(/[\d.]+% compounded/) || [''])[0]);

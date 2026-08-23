@@ -1158,6 +1158,22 @@ dialog.wide { width: 760px; }
 .dlg-check input[type=checkbox] { flex: none; width: 15px; height: 15px; margin: 2px 0 0; }
 .dlg-check > span { flex: 1; min-width: 0; }
 
+/* A sentence at the top of a dialog saying what the change will reach.
+   Not a warning box — it is not stopping anybody — but the ledger is the
+   basis of every rate in the application, and somebody correcting a
+   figure should know that before they type, not after. */
+.dlg-note {
+  margin: 0 0 16px; padding: 10px 12px;
+  background: var(--surface-2); border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; line-height: 1.55; color: var(--text-secondary);
+}
+
+/* Two small buttons in a table cell, kept on one line and out of the way
+   of the figures to their left. */
+.row-actions { white-space: nowrap; }
+.row-actions .btn-sm + .btn-sm { margin-left: 5px; }
+
 .party-row input, .party-row select { width: 100%; }
 
 @media print {
@@ -1176,6 +1192,10 @@ dialog.wide { width: 760px; }
   border-radius: var(--radius-sm);
   background: var(--surface-1);
   color: var(--text-primary);
+  /* Inputs are full-width by default, which is right in a form and wrong
+     in a page heading: a two-word choice stretched to 260px reads as the
+     most important thing up there. */
+  width: auto;
   max-width: 260px;
 }
 .head-select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

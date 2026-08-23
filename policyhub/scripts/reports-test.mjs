@@ -77,6 +77,34 @@ const s2 = await run('schedule','policy schedule');
 check('schedule lists every policy', (s2.match(/Totals — (\d+) policies/)||[])[1] > 0, (s2.match(/Totals — \d+ policies/)||['none'])[0]);
 check('schedule has totals row', /Totals — \d+ policies/.test(s2));
 
+/* The one report whose width the reader controls, so the one that can be
+   made too wide. A schedule that runs past the sheet on screen runs past
+   the margin on paper, and nobody finds out until they have printed it. */
+console.log('\nTHE SCHEDULE FITS THE PAGE IT PRINTS ON');
+const fit = await p.evaluate(() => {
+  const sheet = document.querySelector('.rpt-sheet');
+  const table = document.querySelector('.rpt-output table.rpt-table');
+  const cs = getComputedStyle(sheet);
+  return {
+    landscape: sheet.classList.contains('rpt-sheet-landscape'),
+    inner: sheet.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+    table: table.getBoundingClientRect().width,
+    cols: table.querySelectorAll('thead th').length,
+    density: table.dataset.density,
+  };
+});
+check('the sheet is the shape of the page it prints on', fit.landscape);
+check('and the table fits inside it', fit.table <= fit.inner + 1,
+  `${Math.round(fit.table)}px of ${Math.round(fit.inner)}px, ${fit.cols} columns`);
+check('with the type set to how many columns were asked for',
+  ['a', 'b', 'c', 'd'].includes(fit.density), fit.density);
+/* A long carrier name is one unbreakable word; a table cannot be narrower
+   than its widest word, so the breaks are put in by hand. What must NOT
+   happen is the browser breaking short words to suit itself. */
+check('short words are not broken to make it fit',
+  !/\bAnnu\s*al\b/.test(s2.replace(/\s+/g, ' ')),
+  (s2.replace(/\s+/g, ' ').match(/Annu\s*al/) || ['none'])[0]);
+
 console.log('\nPREMIUM FORECAST');
 const s3 = await run('forecast','premium forecast');
 check('forecast shows 12-month requirement', s3.includes('Next 12 months'));

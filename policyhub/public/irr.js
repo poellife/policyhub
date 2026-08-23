@@ -243,11 +243,26 @@ export function poolFlows(groups) {
   const parts = (groups || []).map((g) => analyzeFlows(g)).filter((a) => a.flows.length);
   const all = parts.flatMap((a) => a.flows).sort(
     (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  if (!all.length) return analyzeFlows([]);
+  /* Nothing to pool. The two extra fields are still on it so a caller can
+     read `mean_rate` without checking whether there was anything there. */
+  if (!all.length) return { ...analyzeFlows([]), mean_rate: null, rated_count: 0 };
 
   const profit = parts.reduce((s, a) => s + a.profit, 0);
   const dollarYears = parts.reduce((s, a) => s + a.dollar_years, 0);
   const rate = dollarYears > 0 ? profit / dollarYears : null;
+
+  /* The same policies with every rate counted once, whatever it is
+     attached to. Reported beside the weighted figure rather than instead
+     of it, because the two answer different questions -- "what did this
+     money do" and "how did the cases do, one each" -- and the gap between
+     them is worth seeing: it is large exactly when a few small positions
+     carry outsized rates. Policies with no rate at all are left out of it
+     rather than counted as zero, and how many were rated is returned so a
+     screen can say what the average is an average of. */
+  const rated = parts.filter((a) => a.rate !== null);
+  const meanRate = rated.length
+    ? rated.reduce((s, a) => s + a.rate, 0) / rated.length : null;
+
   const first = all[0].date;
   const last = all[all.length - 1].date;
   const days = daysBetween(first, last);
@@ -276,6 +291,8 @@ export function poolFlows(groups) {
        always change sign repeatedly, which says nothing about any of them. */
     ambiguous: parts.some((a) => a.ambiguous),
     policy_count: parts.length,
+    mean_rate: meanRate,
+    rated_count: rated.length,
   };
 }
 

@@ -504,6 +504,14 @@ administrator sees a passed deal.
 
 ## Capital calls
 
+Every call on the Servicing calendar names the lives it covers. The title on a
+premium call is the same words every time, so two of them side by side are
+otherwise indistinguishable — the insureds are what tell them apart. Two names
+fit in the column and the rest reads "+3 more"; the whole list is inside the
+call. The names are reduced to initials for an investor by the same pass that
+covers every other screen, so this one did not have to be taught about it.
+
+
 A premium schedule says when the **carrier** wants the money. A capital call
 says when the **office** needs it in the account, split by who holds what —
 which is the only version an investor can act on.
@@ -1040,6 +1048,59 @@ Capital invested and the other cost-basis columns come off unless *Include cost
 basis* is ticked, whatever the arrangement says. Totals follow the columns
 rather than a fixed layout, so moving them around cannot leave the footer a cell
 out of step with the figures above it.
+
+### Taking it away
+
+Three ways off the screen, all reading the same table the reader is looking
+at — so a file can never quietly say something the document does not,
+including whatever columns they arranged.
+
+**Download PDF** saves in one press, with no print dialog. A browser will not
+write a PDF without asking where to put it, so this one is drawn on the server
+from the tables the client posts up. It is a letterheaded landscape document
+with the figures right-aligned, the column row repeated on every page and the
+totals underneath. Columns wrap the way they do on screen rather than being cut
+off, and a column is never made narrower than its widest unbreakable word — a
+date, a policy number, a dollar amount — so nothing comes out as `126,23 / 0`.
+If even those minimums will not fit, the type comes down a half-point at a time
+before anything is truncated.
+
+**CSV** and **Excel** carry the same tables. Figures are written as figures, so
+a column totals in the spreadsheet without anybody stripping dollar signs first;
+percentages become numbers with `(%)` on the header. The workbook is written
+without a dependency, for the reasons given in `src/xlsx.js` — one sheet per
+table, named for its heading, header row bold and frozen, column widths from the
+content. Any cell beginning `=`, `+`, `-` or `@` is prefixed with an apostrophe
+so a name imported from somebody else's file cannot execute on open.
+
+**Print…** is still there for the document exactly as it appears, charts and
+all, through the browser's own dialog.
+
+All three are exports, which is an administrator's act: the server is asked
+first, it records what was taken, and every other administrator is told. If it
+says no, no file is written.
+
+### Fitting the page
+
+Since the reader sets the width, the schedule has to cope with any of it. The
+sheet on screen is the shape of the landscape page it prints on — about 970px of
+usable width — so a table that fits here fits on paper. Past roughly fourteen
+columns the type steps down (10px → 9 → 8 → 7) rather than the table running off
+the edge. Money is shown in whole dollars: cents across five columns and forty
+rows is a couple of hundred digits nobody reads, and they were a good part of
+what pushed this report off the page.
+
+Long words get break opportunities inserted at render time, at the punctuation a
+reader would break at anyway — a carrier called `Albritton/brighthouse/Metlife`
+is one word of twenty-nine characters, and a table can never be narrower than
+its widest word. This is done by hand rather than with `overflow-wrap: anywhere`,
+which sizes every column off its shortest possible line and turns *Annual* into
+*Annu / al* and a row numbered 10 into *1 / 0*.
+
+Past about twenty-three columns nothing legible will fit. The table scrolls on
+screen, and the report says on its face that printing will cut it off — a wide
+table does not paginate sideways, and finding that out from the paper is worse
+than being told.
 
 ## Premium optimization
 
