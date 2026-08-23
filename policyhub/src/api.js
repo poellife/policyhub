@@ -16,6 +16,9 @@ import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProbl
 // would eventually differ from the one that was signed.
 import { readPremiumStream, byYear } from './premium-stream.js';
 import { renderAgreement, canonicalText, AGREEMENT_FIELDS } from '../public/agreement-template.js';
+// One constant, read by both halves, so a half-updated deployment says so
+// rather than failing later as an unexplained error code.
+import { BUILD } from '../public/build.js';
 import { agreementPdf } from './agreement-pdf.js';
 import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
@@ -494,7 +497,10 @@ router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
 router.get('/auth/me', authenticate, wrap(async (req, res) => {
   const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role,
-                must_change_password: !!req.user.mustChangePassword };
+                must_change_password: !!req.user.mustChangePassword,
+                /* Which build is actually answering. The page compares it
+                   with its own and says so if they differ. */
+                build: BUILD };
   if (req.user.role === 'investor' && req.user.iid) {
     /* Only the last four digits of the tax number, and only so the Account
        page can say whether one is on file. An investor knows their own
@@ -905,10 +911,36 @@ const cleanView = (value) => {
   return { funds: funds.slice(0, 60), status };
 };
 
+/**
+ * How this person wants policy returns combined into a book return.
+ *
+ *   weighted -- total profit over total dollar-years. A $10m position
+ *     counts for ten times a $1m one and a policy held eight years for
+ *     more than one held eight months. This is what the book did.
+ *
+ *   simple -- the plain average of the policies' own rates, each counted
+ *     once whatever it is attached to. This is how the cases did.
+ *
+ * Both are true and they answer different questions, so this is a setting
+ * rather than a correction. Weighted is the default because it is the one
+ * a figure headed "portfolio return" is normally taken to mean.
+ *
+ * It changes nothing about what is stored or computed -- both numbers are
+ * worked out either way and travel together -- so it can never make a
+ * document disagree with the database.
+ */
+const RATE_BASES = ['weighted', 'simple'];
+const cleanRateBasis = (value) => {
+  const want = typeof value === 'string' ? value
+    : (value && typeof value === 'object' ? str(value.basis) : '');
+  return RATE_BASES.includes(want) ? { basis: want } : null;
+};
+
 const PREF_CLEANERS = {
   policy_columns: cleanArrangement,
   report_columns: cleanArrangement,
   view_defaults: cleanView,
+  rate_basis: cleanRateBasis,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -2050,6 +2082,67 @@ router.post('/policies/:id/transactions', blockInvestors, canEdit, inPolicyScope
   );
   await audit(req.user.uid, 'transaction', rows[0].id, 'create', `policy ${req.params.id}`);
   res.status(201).json(rows[0]);
+}));
+
+/**
+ * Correct a ledger entry.
+ *
+ * The ledger is the basis of every return figure in the application --
+ * change an acquisition cost and you have changed the rate on that
+ * policy, the entity subtotal it sits in, the book, and the number on
+ * somebody's statement. Before this, a wrong figure could only be deleted
+ * and retyped, which did the same damage and left a thinner trail.
+ *
+ * So the change is allowed and the record of it is thorough: what was
+ * touched, what it was, and what it became, field by field. An amount
+ * quietly moved by a decimal place is exactly the thing somebody has to
+ * be able to find afterwards.
+ *
+ * Same authority as adding and deleting one. Restricting a correction
+ * more tightly than the delete-and-retype that achieves the same end
+ * would be a rule that only slows down honest work.
+ */
+router.put('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res) => {
+  const { rows: cur } = await q(
+    'SELECT * FROM transactions WHERE id = $1', [req.params.id]);
+  if (!cur[0] || !(await assertPolicyInScope(req, cur[0].policy_id)))
+    return res.status(404).json({ error: 'Not found' });
+
+  const { cols, vals } = buildSet(TXN_FIELDS, req.body);
+  if (!cols.length)
+    return res.status(400).json({ error: 'There is nothing in that to change.' });
+  /* Present but empty is not a correction, it is a deletion of the two
+     things every entry has to have. Say so rather than writing a row the
+     rate engine will silently skip. */
+  for (const [name, label] of [['txn_date', 'A date'], ['txn_type', 'A type']]) {
+    const at = cols.indexOf(name);
+    if (at >= 0 && (vals[at] === null || vals[at] === ''))
+      return res.status(400).json({ error: `${label} is required on a transaction.` });
+  }
+
+  const set = cols.map((c, i) => `${c} = $${i + 1}`).join(', ');
+  const { rows } = await q(
+    `UPDATE transactions SET ${set} WHERE id = $${cols.length + 1} RETURNING *`,
+    [...vals, req.params.id]
+  );
+
+  /* Field by field, old to new. A summary that said only "transaction
+     updated" would make the audit log a list of times somebody was in
+     here rather than a record of what they did. */
+  const same = (a, b) => String(a ?? '') === String(b ?? '')
+    || (Number.isFinite(Number(a)) && Number(a) === Number(b));
+  const changed = cols
+    .map((c, i) => [c, cur[0][c], vals[i]])
+    .filter(([c, was, now]) => !same(
+      c === 'txn_date' ? String(was ?? '').slice(0, 10) : was, now))
+    .map(([c, was, now]) => `${c} ${
+      was === null || was === '' ? '(blank)' : String(was).slice(0, 10 + (c === 'txn_date' ? 0 : 30))
+    } -> ${now === null || now === '' ? '(blank)' : now}`);
+  await audit(req.user.uid, 'transaction', rows[0].id, 'update',
+    changed.length
+      ? `policy ${cur[0].policy_id} · ${changed.join(' · ')}`
+      : `policy ${cur[0].policy_id} · nothing changed`);
+  res.json(rows[0]);
 }));
 
 router.delete('/transactions/:id', blockInvestors, canEdit, wrap(async (req, res) => {
@@ -5294,8 +5387,11 @@ router.get('/reports/returns', wrap(async (req, res) => {
   }
   const byFund = [...groups.entries()].map(([fund_code, ids]) => {
     const a = poolFlows(ids.map((id) => byPolicy.get(id) || []));
+    /* Both ways of combining them, so the report can be read either way
+       without asking the server again. */
     return { fund_code, n: ids.length, rate: a.rate, invested: a.invested,
-             returned: a.returned, profit: a.profit, multiple: a.multiple, days: a.days };
+             returned: a.returned, profit: a.profit, multiple: a.multiple, days: a.days,
+             mean_rate: a.mean_rate, rated_count: a.rated_count };
   }).sort((x, y) => (y.rate ?? -Infinity) - (x.rate ?? -Infinity));
 
   // Anything the basis leaves out is named, so the reader can see the shape of
@@ -5499,6 +5595,11 @@ router.get('/reports/investors', blockInvestors, staffOnly, wrap(async (req, res
         annual_premium: live.reduce((s, r) => s + r.premium_required, 0),
         proceeds: realized.reduce((s, r) => s + (r.proceeds_amount || 0), 0),
         rate: overall.rate,
+        /* The same positions with each rate counted once. Which of the two
+           a statement leads with is the reader's choice, made once and
+           kept; both travel so the choice costs nothing. */
+        mean_rate: overall.mean_rate,
+        rated_count: overall.rated_count,
         multiple: overall.multiple,
         profit: overall.profit,
         short_period: overall.short_period, extreme: overall.extreme,

@@ -168,6 +168,9 @@ export async function noteSignIn(req, user) {
 export const EXPORT_KINDS = new Set([
   'policies', 'maturities', 'insureds', 'investors', 'carried-interest',
   'transactions', 'documents', 'servicing',
+  // Downloading a report — as CSV, as a workbook, or as a PDF — takes the
+  // same book out of the building by a different door.
+  'reports',
 ]);
 
 export async function recordExport(req, res) {
