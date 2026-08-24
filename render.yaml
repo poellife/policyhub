@@ -10,15 +10,56 @@ services:
         fromDatabase:
           name: policyhub-db
           property: connectionString
+      # Signs the session cookie. Render generates it; the app refuses to start
+      # in production without it, because anyone holding it could mint an admin.
       - key: SESSION_SECRET
+        generateValue: true
+      # Encrypts the tax numbers investors give when they register. Kept
+      # separate from SESSION_SECRET so the cookie key can be rotated
+      # without making every stored tax number unreadable.
+      - key: TAXID_KEY
         generateValue: true
       - key: NODE_ENV
         value: production
+      # Seeds the very first admin on an empty database, then ignored.
+      # There is no default password: production will not start without one.
       - key: ADMIN_EMAIL
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
       - key: ADMIN_NAME
+        sync: false
+      # Database TLS is verified by default. Render's managed Postgres presents
+      # a certificate from a private CA on their internal network, which the
+      # public trust store cannot verify — so verification is turned off for
+      # that hop only. Remove this and set PGSSLROOTCERT_PEM instead if you
+      # move the database somewhere that publishes a CA certificate.
+      - key: PGSSLMODE
+        value: no-verify
+
+      # ---------------------------------------------------------------
+      #  Email
+      #
+      #  The portal sends security alerts, portal invitations and
+      #  agreement notices. Without a key it queues them and sends
+      #  nothing, which is the right behaviour for a deployment that has
+      #  not been given one — not a reason to fail to start.
+      #
+      #  MAIL_FROM must be an address on a domain verified with the
+      #  provider, or every message bounces. The display name is the firm,
+      #  not the software:
+      #      Poel Capital Policy Portal <notices@poelcapital.com>
+      # ---------------------------------------------------------------
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # Where the links in those messages point. Without it they point at
+      # the default Render address, which works but reads like a stranger.
+      - key: APP_URL
+        sync: false
+      # Optional: where a reply goes, if not the sending address.
+      - key: MAIL_REPLY_TO
         sync: false
 
 databases:

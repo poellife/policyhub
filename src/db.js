@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -11,9 +12,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 pg.types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));
 pg.types.setTypeParser(1082, (v) => v); // keep DATE as plain YYYY-MM-DD string
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const connectionString =
   process.env.DATABASE_URL ||
-  'postgres://lcg:lcgdev@localhost:5432/lifesettle';
+  (isProd ? '' : 'postgres://lcg:lcgdev@localhost:5432/lifesettle');
+
+if (!connectionString)
+  throw new Error('DATABASE_URL is not set. Refusing to start.');
 
 // Managed Postgres (Render, Railway, Neon, …) expects TLS; a local dev server
 // usually has none. Default on that, with PGSSL as an explicit override.
@@ -24,12 +30,61 @@ const needsSSL =
   pgssl === 'false' ? false :
   /sslmode=require/.test(connectionString) || !isLocalHost;
 
+/**
+ * TLS to the database is verified by default. Encrypting without checking who
+ * you are encrypting *to* stops a passive eavesdropper but not an active one,
+ * which is the attack that matters on a shared network.
+ *
+ * Two ways to satisfy it:
+ *   PGSSLROOTCERT=/path/to/ca.crt   — file path, or
+ *   PGSSLROOTCERT_PEM="-----BEGIN…" — the certificate inline, for hosts whose
+ *                                     dashboard only lets you paste env vars
+ *
+ * PGSSLMODE=no-verify turns verification off. It is a deliberate, logged
+ * choice for a provider whose certificate is signed by a private CA reachable
+ * only over their internal network — not a default.
+ */
+function sslConfig() {
+  if (!needsSSL) return undefined;
+  const mode = (process.env.PGSSLMODE || '').toLowerCase();
+  if (mode === 'no-verify' || mode === 'require') {
+    console.warn(
+      '[db] PGSSLMODE=%s — the database certificate is NOT being verified. ' +
+      'The connection is encrypted but not authenticated. Supply PGSSLROOTCERT ' +
+      'and remove this setting when you can.', mode
+    );
+    return { rejectUnauthorized: false };
+  }
+  const ca = process.env.PGSSLROOTCERT_PEM
+    ? process.env.PGSSLROOTCERT_PEM.replace(/\\n/g, '\n')
+    : process.env.PGSSLROOTCERT
+      ? fs.readFileSync(process.env.PGSSLROOTCERT, 'utf8')
+      : undefined;
+  return { rejectUnauthorized: true, ca };
+}
+
 export const pool = new pg.Pool({
   connectionString,
-  ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
+  ssl: sslConfig(),
   max: 10,
   idleTimeoutMillis: 30000,
 });
+
+// A certificate failure is otherwise a wall of OpenSSL jargon; say what to do.
+const CERT_ERRORS = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED',
+]);
+export function explainDbError(e) {
+  if (!CERT_ERRORS.has(e?.code)) return null;
+  return (
+    `Could not verify the database's TLS certificate (${e.code}).\n` +
+    `Your provider signs it with a private CA. Either:\n` +
+    `  • set PGSSLROOTCERT_PEM to their CA certificate, or\n` +
+    `  • set PGSSLMODE=no-verify to accept it unverified (encrypted but not authenticated).`
+  );
+}
 
 export const q = (text, params) => pool.query(text, params);
 
@@ -41,16 +96,33 @@ export async function initDb() {
   const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM users');
   if (rows[0].n === 0) {
     const email = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
-    const password = process.env.ADMIN_PASSWORD || 'changeme123';
+    // There is no default password. A predictable one on a fresh deployment is
+    // an open door for however long it takes somebody to notice.
+    let password = process.env.ADMIN_PASSWORD || '';
+    let generated = false;
+    if (password.length < 10) {
+      if (isProd)
+        throw new Error(
+          password
+            ? 'ADMIN_PASSWORD must be at least 10 characters. Refusing to seed the first admin.'
+            : 'ADMIN_PASSWORD is not set. Refusing to seed the first admin account with a ' +
+              'default password. Set ADMIN_EMAIL and ADMIN_PASSWORD, then start again.'
+        );
+      password = crypto.randomBytes(15).toString('base64url');
+      generated = true;
+    }
     const hash = await bcrypt.hash(password, 12);
     await pool.query(
       'INSERT INTO users (email, password_hash, full_name, role) VALUES ($1,$2,$3,$4)',
       [email, hash, process.env.ADMIN_NAME || 'Administrator', 'admin']
     );
     console.log(`[init] created first admin user: ${email}`);
-    if (!process.env.ADMIN_PASSWORD) {
-      console.log('[init] WARNING: default password "changeme123" — change it after first login.');
-    }
+    if (generated)
+      console.log(
+        `[init] ADMIN_PASSWORD was not set, so a random one was generated for this\n` +
+        `       development database. It is shown once and not stored anywhere else:\n\n` +
+        `           ${password}\n`
+      );
   }
 
   // The two owning entities, so imports and the policy form have them from the
