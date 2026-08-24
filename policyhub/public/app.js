@@ -842,11 +842,25 @@ const STAFF_NAV = [
   // read. Filtered out of the menu below rather than merely refused on
   // arrival, so it is never a tab that answers 403.
   ['carry', 'Carried interest'],
+  /* A separate application, not a screen of this one.
+   *
+   * It carries a third element, which is what makes it external: the menu
+   * renders it as a link off this site, opening in its own tab and marked
+   * so, rather than as a route. Nothing here signs anybody in over there
+   * and no figure crosses between them -- it is a door, and it is labelled
+   * as one so nobody reads a valuation as portfolio data.
+   *
+   * Administrators only, filtered out below the same way carried interest
+   * is: absent from the menu rather than a tab that refuses on arrival. */
+  ['valuation', 'Policy Valuation', 'https://policy-valuation-z8vc.onrender.com/'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
   // unchanged, and the dashboard still offers it directly.
   ['settings', 'Settings'],
 ];
+
+/** Menu entries an administrator has and nobody else does. */
+const ADMIN_ONLY_NAV = ['carry', 'valuation'];
 
 // An investor sees only their own holdings; the staff-only sections are absent
 // from the menu and refused by the server regardless.
@@ -865,7 +879,7 @@ const INVESTOR_NAV = [
 // — no owner entities, no user management, no activity log — but they still need
 // somewhere to change their own password, so that becomes "Account".
 const MANAGER_NAV = STAFF_NAV
-  .filter(([r]) => r !== 'carry')
+  .filter(([r]) => !ADMIN_ONLY_NAV.includes(r))
   .map(([r, label]) => (r === 'settings' ? ['settings', 'Account'] : [r, label]));
 
 const isInvestorUser = () => state.user?.role === 'investor';
@@ -945,7 +959,7 @@ const navItems = () =>
     : isManagerUser() ? MANAGER_NAV
     // An editor or viewer is staff but not an administrator.
     : state.user?.role === 'admin' ? STAFF_NAV
-      : STAFF_NAV.filter(([r]) => r !== 'carry');
+      : STAFF_NAV.filter(([r]) => !ADMIN_ONLY_NAV.includes(r));
 
 /* Display multiplier.
  *
@@ -972,7 +986,18 @@ function shell(inner) {
       <div class="brand-divider"></div>
       <div class="brand-sub">Policy Portfolio</div>
       <nav class="nav">
-        ${navItems().map(([r, label]) => {
+        ${navItems().map(([r, label, external]) => {
+          /* A link off this site. Never marked active -- you do not come
+             back to it, you leave -- and carrying its own tab plus the two
+             rel values that matter: noopener so the page it opens cannot
+             reach back through window.opener and steer the portal, and
+             noreferrer so this application's address does not travel to
+             another host. */
+          if (external) return `<a href="${esc(external)}" target="_blank"
+            rel="noopener noreferrer" class="nav-out">${label}<svg width="11" height="11"
+            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+            stroke-linecap="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/>
+            <path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></svg></a>`;
           // The count is the point of the badge: an investor should be able
           // to tell at a glance that something is waiting for them.
           const badge = r === 'opportunities' && state.oppCount > 0
@@ -6694,7 +6719,16 @@ async function investorsView() {
               <td class="num">${money(r.death_benefit, 2)}</td>
               <td class="num">${money(r.invested, 2)}</td>
               <td class="num">${money(r.csv, 2)}</td>
-              <td>${canEditNow ? `<button class="btn-sm" data-edit-investor="${r.id}">Edit</button>` : ''}</td>
+              ${''/* Delete lives here as well as on the investor's own page.
+                     Removing somebody is a thing you decide while looking at
+                     the list they should not be on, and a person who cannot
+                     find it on the list concludes it cannot be done. It opens
+                     the same dialog either way, so the footprint, the refusal
+                     and the typed name are identical. */}
+              <td class="row-actions">${canEditNow
+    ? `<button class="btn-sm" data-edit-investor="${r.id}">Edit</button>` : ''}${
+    isAdminUser() ? `
+                <button class="btn-sm btn-danger" data-del-investor="${r.id}">Delete</button>` : ''}</td>
             </tr>`).join('')}
         </tbody>
         ${rows.length ? `<tfoot><tr>
@@ -6732,6 +6766,13 @@ async function investorsView() {
             cell.textContent = r.tax_id.replace(/^(\d{3})(\d{2})(\d{4})$/, '$1-$2-$3');
             b.remove();
           } catch (err) { alert(err.message); b.disabled = false; }
+        }));
+      document.querySelectorAll('[data-del-investor]').forEach((b) =>
+        b.addEventListener('click', (e) => {
+          /* The row is a link to the investor; the button is not. */
+          e.stopPropagation();
+          const inv = rows.find((r) => r.id === Number(b.dataset.delInvestor));
+          if (inv) openDeleteInvestorDialog(inv);
         }));
       document.querySelectorAll('[data-edit-investor]').forEach((b) =>
         b.addEventListener('click', (e) => {

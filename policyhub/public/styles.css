@@ -177,7 +177,10 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 .topbar {
   display: flex; align-items: center; gap: 18px;
-  height: 62px; padding: 0 26px;
+  /* min-width: 0 so the nav above can actually shrink: a flex child's
+     default min-width is its content, which is what makes an over-long
+     menu widen the page instead of scrolling. */
+  height: 62px; padding: 0 26px; min-width: 0;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 40;
@@ -196,7 +199,19 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--text-muted); white-space: nowrap;
 }
-.nav { display: flex; gap: 2px; margin-left: auto; flex-wrap: nowrap; }
+/* The menu is the one part of the bar that grows: entries get added, and
+   an administrator carries two more than anybody else. So it is allowed to
+   run out of room and scroll WITHIN ITSELF rather than push the page wider
+   — a horizontally scrolling application shell moves the whole book
+   sideways to read a tab, which is the worst possible trade. The brand and
+   the account controls keep their space; only the tabs give. */
+.nav {
+  display: flex; gap: 2px; margin-left: auto; flex-wrap: nowrap;
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.nav::-webkit-scrollbar { display: none; }
+.nav a { flex: none; }
 .nav a {
   padding: 8px 12px; border-radius: var(--pill);
   color: var(--text-secondary); font-weight: 500; font-size: 14px;
@@ -210,6 +225,22 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   color: var(--accent-ink); background: var(--accent); font-weight: 600;
 }
 .nav a.active:hover { color: var(--accent-ink); background: var(--accent); }
+
+/* A menu entry that leaves this application. Set apart from the tabs
+   beside it — a hairline rule before it, a lighter weight, and the arrow
+   every browser has taught people to read as "this opens elsewhere" — so
+   nobody clicks it expecting a screen of the portfolio and then reads a
+   valuation as though it were portfolio data. */
+.nav a.nav-out {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-muted); font-weight: 400;
+  margin-left: 8px; padding-left: 14px;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--pill) var(--pill) 0;
+}
+.nav a.nav-out:hover { color: var(--text-primary); background: var(--hover); }
+.nav a.nav-out svg { opacity: .6; flex: none; }
+.nav a.nav-out:hover svg { opacity: 1; }
 .topbar-right {
   display: flex; align-items: center; gap: 10px; padding-left: 10px;
   white-space: nowrap; flex: none;
@@ -622,6 +653,16 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
   animation: spin .7s linear infinite; display: inline-block; vertical-align: -2px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* A full administrator menu is thirteen entries. On a laptop that is the
+   difference between fitting and scrolling, so the tabs tighten before it
+   comes to that rather than after. */
+@media screen and (max-width: 1660px) {
+  .topbar { gap: 12px; padding: 0 16px; }
+  .nav a { padding: 7px 8px; font-size: 13.5px; }
+  .nav a.nav-out { margin-left: 5px; padding-left: 10px; gap: 5px; }
+  .brand-sub { display: none; }
+}
 
 @media screen and (max-width: 860px) {
   .topbar { height: auto; flex-wrap: wrap; gap: 10px; padding: 10px 14px; position: static; }
