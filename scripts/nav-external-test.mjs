@@ -20,7 +20,7 @@
 import { chromium } from 'playwright';
 import { BASE, ADMIN, MANAGER1, INVESTOR1 } from './test-config.mjs';
 
-const URL = 'https://policy-valuation-z8vc.onrender.com/';
+const URL = 'https://policy-valuation-e953.onrender.com/';
 const fails = [], errs = [];
 const check = (n, ok, x = '') => {
   console.log(`${ok ? '  PASS' : '  FAIL'}  ${n}${x ? ` — ${x}` : ''}`);
@@ -61,6 +61,11 @@ check('the page it opens cannot reach back and steer this one',
   rel.includes('noopener'), rel);
 check('and this application’s address does not travel with the click',
   rel.includes('noreferrer'), rel);
+/* The portal is noindex, so no crawler should ever see this menu — but a
+   link is how a private host gets discovered, and nofollow costs nothing
+   to say. */
+check('and no crawler is invited to walk it',
+  rel.includes('nofollow'), rel);
 check('it carries the mark browsers have taught people to read as "leaves here"',
   (await entry().locator('svg').count()) === 1);
 check('and it is never dressed as the screen you are on',
