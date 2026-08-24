@@ -1,0 +1,14 @@
+# Nothing here is public: every page behind the sign-in is a private
+# portfolio, and every response carries X-Robots-Tag: noindex.
+#
+# Crawling is deliberately ALLOWED. Blocking the whole site from this file
+# would stop a crawler fetching the pages, which sounds stronger and is
+# weaker: a page it may not fetch is a page whose noindex it can never
+# read, and a blocked address found linked elsewhere still gets listed --
+# without a snippet, but listed. "Do not index" has to be readable to be
+# obeyed.
+#
+# What keeps this out of a search result is that header, and behind it the
+# sign-in: there is no page here to index without an account.
+User-agent: *
+Disallow:

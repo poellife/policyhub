@@ -852,7 +852,7 @@ const STAFF_NAV = [
    *
    * Administrators only, filtered out below the same way carried interest
    * is: absent from the menu rather than a tab that refuses on arrival. */
-  ['valuation', 'Policy Valuation', 'https://policy-valuation-z8vc.onrender.com/'],
+  ['valuation', 'Policy Valuation', 'https://policy-valuation-e953.onrender.com/'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
   // unchanged, and the dashboard still offers it directly.
@@ -992,9 +992,10 @@ function shell(inner) {
              rel values that matter: noopener so the page it opens cannot
              reach back through window.opener and steer the portal, and
              noreferrer so this application's address does not travel to
-             another host. */
+             another host, and nofollow so no crawler treats this as a path
+             worth walking to whatever is on the other end. */
           if (external) return `<a href="${esc(external)}" target="_blank"
-            rel="noopener noreferrer" class="nav-out">${label}<svg width="11" height="11"
+            rel="noopener noreferrer nofollow" class="nav-out">${label}<svg width="11" height="11"
             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
             stroke-linecap="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/>
             <path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></svg></a>`;
