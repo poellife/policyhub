@@ -235,7 +235,30 @@ for (const [h, want] of [
   ['x-content-type-options', /nosniff/],
   ['x-frame-options', /DENY/],
   ['referrer-policy', /same-origin/],
+  /* A private portfolio has no business in a search index, and the meta
+     tag in index.html only covers that one page. */
+  ['x-robots-tag', /noindex/],
 ]) check(`${h} present`, want.test(head.headers.get(h) || ''), head.headers.get(h) || 'missing');
+
+/* Not only the shell: an export, a drawn PDF, an API response — anything
+   a crawler could reach has to carry it, or the header is decoration on
+   the one page that already had a meta tag. */
+for (const path of ['/api/health', '/styles.css', '/app.js']) {
+  const r = await fetch(`${BASE}${path}`);
+  check(`${path} carries it too`, /noindex/.test(r.headers.get('x-robots-tag') || ''),
+    r.headers.get('x-robots-tag') || 'missing');
+}
+/* And nothing disallows the crawler from reading that instruction: a
+   robots.txt Disallow would hide the noindex and leave the URL listable
+   with no snippet, which is the outcome we are trying to avoid. */
+const robots = await fetch(`${BASE}/robots.txt`);
+const robotsText = await robots.text();
+check('robots.txt is a real robots.txt, not the application shell',
+  robots.status === 200 && /^User-agent:/m.test(robotsText),
+  robotsText.split('\n').filter((l) => l && !l.startsWith('#'))[0] || 'not served');
+check('and it does not hide the noindex from the crawler that must read it',
+  !/Disallow:\s*\/\s*$/m.test(robotsText),
+  (robotsText.match(/Disallow:.*/) || ['none'])[0]);
 
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL HARDENING CHECKS PASSED');
 process.exit(fails.length ? 1 : 0);

@@ -26,6 +26,18 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
+  /* Nothing here belongs in a search result.
+   *
+   * index.html carries a robots meta tag, but that only covers the one
+   * HTML page a crawler is served — not a PDF, a CSV export, or any other
+   * response. The header covers every response there is, which is the
+   * point of using it instead.
+   *
+   * Deliberately NOT paired with a robots.txt that disallows crawling:
+   * a disallowed URL can still be listed in results, because the crawler
+   * was never permitted to fetch the page and read the instruction not to
+   * index it. "Do not index" has to be readable to be obeyed. */
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"

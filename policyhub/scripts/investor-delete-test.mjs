@@ -19,6 +19,7 @@
 
    Idempotent: its own investors, removed first and last.
    ===================================================================== */
+import { chromium } from 'playwright';
 import { BASE, ADMIN, MANAGER1, INVESTOR1, login, scratchPassword } from './test-config.mjs';
 
 const PREFIX = 'INVDEL';
@@ -213,6 +214,70 @@ check('a manager cannot',
 check('and an administrator can put them back',
   (await json(await api(admin, `/investors/${signer.id}`, { method: 'PUT', body: {
     name: signer.name, is_active: true } }))).is_active === true);
+
+/* ------------------------- and it can be found ----------------------- *
+ * All of the above is worth nothing if nobody can reach it. Removing
+ * somebody is a decision made while looking at the list they should not
+ * be on, so the way out has to be on that list -- not only on the page
+ * you reach by clicking through to them.
+ * ------------------------------------------------------------------- */
+console.log('\nAND AN ADMINISTRATOR CAN FIND IT');
+const spare = await json(await api(admin, '/investors', { method: 'POST', body: {
+  name: `${PREFIX} On The List`, investor_type: 'Individual' } }));
+
+const br = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const ctx = await br.newContext({ viewport: { width: 1500, height: 1000 } });
+const p = await ctx.newPage();
+const errs = [];
+p.on('pageerror', (e) => errs.push(e.message));
+p.on('console', (m) => m.type() === 'error' && !/40[0134]/.test(m.text()) && errs.push(m.text()));
+
+const signIn = async (who) => {
+  await p.goto(BASE);
+  await p.fill('#email', who.email); await p.fill('#password', who.password);
+  await p.click('button[type=submit]');
+  await p.waitForSelector('.kpi-row', { timeout: 20000 });
+};
+await signIn(ADMIN);
+await p.goto(`${BASE}/#/investors`);
+await p.waitForSelector(`tr[data-investor="${spare.id}"]`, { timeout: 20000 });
+await p.waitForTimeout(600);
+
+const row = p.locator(`tr[data-investor="${spare.id}"]`);
+check('the row on the investors list offers Delete',
+  (await row.locator('[data-del-investor]').count()) === 1);
+check('beside Edit, not instead of it',
+  (await row.locator('[data-edit-investor]').count()) === 1);
+
+/* And it is the same act as on the investor's own page -- same dialog,
+   same footprint, same refusal -- not a second, looser path. */
+await row.locator('[data-del-investor]').click();
+await p.waitForSelector('dialog[open]', { timeout: 10000 });
+await p.waitForTimeout(400);
+const dlg = p.locator('dialog[open]');
+check('it opens the deletion dialog rather than deleting on the spot',
+  /Delete/i.test(await dlg.locator('.dialog-head').textContent()),
+  (await dlg.locator('.dialog-head').textContent()).trim());
+check('naming the person',
+  (await dlg.textContent()).includes(spare.name));
+check('and the investor is still there while the dialog is open',
+  (await json(await api(admin, `/investors/${spare.id}`)))?.id === spare.id);
+await p.locator('#dlgCancel').click();
+await p.waitForTimeout(400);
+check('cancelling leaves them alone',
+  (await json(await api(admin, `/investors/${spare.id}`)))?.id === spare.id);
+
+console.log('\nAND NOBODY ELSE IS OFFERED IT');
+await ctx.clearCookies();
+await signIn(MANAGER1);
+await p.goto(`${BASE}/#/investors`);
+await p.waitForTimeout(1500);
+check('a manager sees no Delete on any row',
+  (await p.locator('[data-del-investor]').count()) === 0);
+
+console.log('\nERRORS:', errs.length ? errs.join('\n  ') : 'none');
+check('no page errors', errs.length === 0);
+await br.close();
 
 await wipe();
 console.log(fails.length ? `\nFAILED: ${fails.join(', ')}` : '\nALL INVESTOR DELETE CHECKS PASSED');
