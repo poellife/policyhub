@@ -842,17 +842,20 @@ const STAFF_NAV = [
   // read. Filtered out of the menu below rather than merely refused on
   // arrival, so it is never a tab that answers 403.
   ['carry', 'Carried interest'],
-  /* A separate application, not a screen of this one.
+  /* A separate application, and a page of this one.
    *
-   * It carries a third element, which is what makes it external: the menu
-   * renders it as a link off this site, opening in its own tab and marked
-   * so, rather than as a route. Nothing here signs anybody in over there
-   * and no figure crosses between them -- it is a door, and it is labelled
-   * as one so nobody reads a valuation as portfolio data.
+   * The third element is a path rather than a route: the valuation model
+   * is a different program on a different service, reached through
+   * /valuation, which this server answers by checking the reader is an
+   * administrator here and then asking it on their behalf. So it is one
+   * address and one sign-in, and the menu can link to it plainly.
+   *
+   * It is still a whole other application, not a screen of this one, so
+   * the menu keeps it visibly apart -- and no figure crosses between them.
    *
    * Administrators only, filtered out below the same way carried interest
    * is: absent from the menu rather than a tab that refuses on arrival. */
-  ['valuation', 'Policy Valuation', 'https://policy-valuation-e953.onrender.com/'],
+  ['valuation', 'Policy Valuation', '/valuation'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
   // unchanged, and the dashboard still offers it directly.
@@ -987,18 +990,12 @@ function shell(inner) {
       <div class="brand-sub">Policy Portfolio</div>
       <nav class="nav">
         ${navItems().map(([r, label, external]) => {
-          /* A link off this site. Never marked active -- you do not come
-             back to it, you leave -- and carrying its own tab plus the two
-             rel values that matter: noopener so the page it opens cannot
-             reach back through window.opener and steer the portal, and
-             noreferrer so this application's address does not travel to
-             another host, and nofollow so no crawler treats this as a path
-             worth walking to whatever is on the other end. */
-          if (external) return `<a href="${esc(external)}" target="_blank"
-            rel="noopener noreferrer nofollow" class="nav-out">${label}<svg width="11" height="11"
-            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
-            stroke-linecap="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/>
-            <path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></svg></a>`;
+          /* Another application, on this domain. It leaves the portfolio
+             — a real page load, not a route — so it is set apart from the
+             tabs and never marked active; but it does not leave the SITE,
+             so it does not open a tab and needs none of the rel values a
+             link to another host would. */
+          if (external) return `<a href="${esc(external)}" class="nav-out">${label}</a>`;
           // The count is the point of the badge: an investor should be able
           // to tell at a glance that something is waiting for them.
           const badge = r === 'opportunities' && state.oppCount > 0
