@@ -664,6 +664,21 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
   .brand-sub { display: none; }
 }
 
+/* A finger is not a cursor. Anything you tap gets a target you can hit
+   without aiming — 44px is the figure both Apple and Google publish, and
+   the app was handing out 31. Scoped to coarse pointers so the desktop
+   density, which is deliberate, is untouched. */
+@media (pointer: coarse) {
+  .btn-sm, .head-select, .entity-btn, button, .btn, select, input[type=date] {
+    min-height: 44px;
+  }
+  .btn-sm { padding: 8px 14px; }
+  .nav a { padding: 12px 14px; }
+  .entity-opt { padding: 11px 10px; }
+  .row-actions .btn-sm { min-height: 38px; }
+  table.data td .btn-sm { min-height: 38px; }
+}
+
 @media screen and (max-width: 860px) {
   .topbar { height: auto; flex-wrap: wrap; gap: 10px; padding: 10px 14px; position: static; }
   .nav {
@@ -671,7 +686,10 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
     overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
   }
   .nav::-webkit-scrollbar { display: none; }
-  .nav a { padding: 6px 11px; font-size: 13px; }
+  /* Tall enough to hit with a thumb. The desktop rule above is 8px, and
+     the tighter 6px this block used to carry made a 32-point target on
+     the one device where aiming is hardest. */
+  .nav a { padding: 12px 12px; font-size: 13px; }
   .brand-divider, .brand-sub { display: none; }
   .topbar-right { margin-left: auto; gap: 8px; padding-left: 0; }
   .topbar-right span { display: none; }
@@ -692,6 +710,10 @@ dialog::backdrop { background: rgba(10,10,10,.45); }
   display: block; padding: 13px 15px; border: 1px solid var(--border-strong);
   border-radius: var(--radius); cursor: pointer; margin: 0;
   font-family: var(--font); text-transform: none; letter-spacing: normal;
+  /* The visually-hidden radio inside is absolutely positioned; without a
+     positioning context here it hangs off whatever ancestor happens to be
+     positioned, which is not this card. */
+  position: relative;
 }
 .rpt-choice:hover { border-color: var(--text-primary); }
 .rpt-choice.selected { border-color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--text-primary); }
@@ -1271,6 +1293,19 @@ dialog.wide { width: 760px; }
 }
 .entity-menu[hidden] { display: none; }
 
+/* On a phone the picker sits at the left of its row, and a menu aligned to
+   the picker's RIGHT edge then starts off the side of the screen — the
+   first characters of every entity name cut off. Below this width the menu
+   stops hanging off the button and spans the row it belongs to instead. */
+@media (max-width: 620px) {
+  .page-head, .toolbar { position: relative; }
+  .entity-pick { position: static; }
+  .entity-menu {
+    left: 0; right: 0; width: auto; max-width: none; min-width: 0;
+  }
+  .entity-opt { white-space: normal; }
+}
+
 /* Tall books scroll; short ones are simply as tall as they are. */
 .entity-list { max-height: 300px; overflow-y: auto; }
 
@@ -1427,6 +1462,25 @@ table.dlg-list td.dlg-amt { width: 30%; text-align: left; }
 .security-bar .security-text { flex: 1; min-width: 0; }
 .security-bar .btn-sm { flex: none; }
 @media print { .security-bar { display: none; } }
+
+/* On a phone the two buttons and the spacer take most of the bar, and the
+   sentence they sit beside gets squeezed to one word per line — a warning
+   about somebody signing in from a new place, rendered unreadable. Below
+   this width the message takes the full row and the buttons take the next
+   one. */
+@media (max-width: 620px) {
+  /* A page heading's controls are pushed right by a spacer, which is right
+     on one line and wrong the moment they wrap: the heading sits left and
+     its buttons hang off the opposite edge, with one row right-aligned and
+     the next left. On a phone they all flow under the heading instead. */
+  .page-head .spacer { display: none; }
+  .page-head > :not(h1):not(.sub) { margin-right: 0; }
+
+  .security-bar { flex-wrap: wrap; padding: 12px 14px; }
+  .security-bar .security-text { flex: 1 1 100%; }
+  .security-bar .spacer { display: none; }
+  .security-bar .btn-sm { flex: 1 1 auto; }
+}
 
 .notice-box {
   padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5;

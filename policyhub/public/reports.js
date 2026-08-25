@@ -1796,7 +1796,12 @@ export async function reportsView(api, state) {
           </label>
         </div>
 
-        <div style="display:flex;gap:8px;margin-top:6px">
+        ${''/* Wraps. Six buttons is about 530px of row, and a phone is 390:
+               without this they run off the side of the page, which takes
+               the whole document with them -- and a page wider than the
+               screen puts Generate under a report card, so the report
+               cannot be produced at all. */}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">
           <button class="primary" id="rptGenerate">Generate report</button>
           ${''/* Only the Policy Schedule is a column table. The others are
                  documents with a shape of their own — tiles, prose, a chart
