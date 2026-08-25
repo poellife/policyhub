@@ -12,13 +12,14 @@ import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } fr
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { startMailWorker } from './mail.js';
+// The valuation model is a separate program; this is the door to it.
+import { mountValuation } from './valuation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 
 // Baseline security headers. No external assets are loaded, so the policy is strict.
@@ -46,6 +47,17 @@ app.use((req, res, next) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
+
+/* Policy Valuation, before the JSON body parser.
+ *
+ * It is a proxy: what arrives — a carrier illustration, a workbook, a form
+ * post — has to reach the other service byte for byte, and a parser that
+ * has already read the stream leaves nothing to forward. Its own gate runs
+ * inside, so nothing here is reachable without an administrator's session.
+ */
+mountValuation(app);
+
+app.use(express.json({ limit: '2mb' }));
 
 // Health check must sit ahead of the API router's auth middleware.
 app.get('/api/health', (req, res) =>
