@@ -302,6 +302,51 @@ await signIn(p);
 check('so the next sign-in is back to the whole book',
   (await chosenEntities(p)).length === 0, (await chosenEntities(p)).join(','));
 
+/* ------------------- what a manager is even offered -------------------
+   Scoping the DATA is not the same as scoping the CHOICE. A manager whose
+   picker lists entities they have no business with has been told who else
+   the firm invests for — before they tick anything, and whatever the rows
+   behind it come back as. So the list itself is checked, on the screens
+   that carry it, against the entities on the account.
+   -------------------------------------------------------------------- */
+console.log('\nA MANAGER IS OFFERED ONLY THEIR OWN');
+const mctx = await br.newContext({ viewport: { width: 1500, height: 1050 } });
+const mp = await mctx.newPage();
+mp.on('pageerror', (e) => errs.push(`manager: ${e.message}`));
+await mp.goto(BASE);
+await mp.fill('#email', MANAGER1.email);
+await mp.fill('#password', MANAGER1.password);
+await mp.click('button[type=submit]');
+await mp.waitForSelector('.kpi-row', { timeout: 20000 });
+await mp.waitForTimeout(700);
+
+const mine = ((await (await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: mgr } })).json())
+  .funds || []).map((f) => f.code).sort();
+check('the account names at least one entity', mine.length > 0, mine.join(','));
+
+for (const route of ['#/dashboard', '#/policies', '#/reports']) {
+  await mp.goto(`${BASE}/${route}`);
+  await mp.waitForTimeout(1200);
+  const offered = (await offeredEntities(mp)).sort();
+  check(`${route} offers their entities and no others`,
+    offered.join(',') === mine.join(','),
+    `offered ${offered.join(',') || 'nothing'}, holds ${mine.join(',')}`);
+  const foreign = offered.filter((c) => !mine.includes(c));
+  check(`${route} names nobody else's entity`, foreign.length === 0, foreign.join(','));
+}
+
+/* The same question asked of the owner-entity dropdown on a form: being
+   able to READ only your own entities is worth little if the New policy
+   dialog still lists the firm's. */
+await mp.goto(`${BASE}/#/policies`);
+await mp.waitForTimeout(1000);
+const formCodes = await mp.$$eval('select[name=fund_code] option',
+  (o) => o.map((x) => x.value).filter(Boolean)).catch(() => []);
+check('and a form that asks for an owner entity offers no others',
+  formCodes.every((c) => mine.includes(c)),
+  formCodes.filter((c) => !mine.includes(c)).join(',') || 'none offered');
+await mctx.close();
+
 console.log('\nERRORS:', errs.length ? errs.join('\n  ') : 'none');
 check('no page errors', errs.length === 0);
 await br.close();

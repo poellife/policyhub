@@ -5117,6 +5117,8 @@ async function opportunityView() {
             : '<button id="passOppBtn">Pass</button>'}
         ${['admin', 'manager'].includes(state.user.role) && o.status !== 'Funded'
           ? '<button class="primary" id="fundOppBtn">Fund it</button>' : ''}
+        ${['admin', 'manager'].includes(state.user.role) && o.status === 'Funded'
+          ? '<button id="unfundOppBtn">Send back to opportunities</button>' : ''}
         ${['admin', 'manager'].includes(state.user.role)
           ? '<button class="btn-danger" id="deleteOppBtn">Delete</button>' : ''}` : ''}
     </div>
@@ -5384,6 +5386,9 @@ async function opportunityView() {
       $('#shareOppBtn2')?.addEventListener('click', () => openShareDialog(o));
       $('#fundOppBtn')?.addEventListener('click', () => {
         openFundDialog(o).catch((e) => alert(e.message));
+      });
+      $('#unfundOppBtn')?.addEventListener('click', () => {
+        openReopenDialog(o).catch((e) => alert(e.message));
       });
 
       document.querySelectorAll('[data-del-prem]').forEach((b) =>
@@ -6002,6 +6007,97 @@ async function openFundDialog(o) {
       : `Policy created with ${res.allocations} allocation${res.allocations === 1 ? '' : 's'}`);
     go(`#/policy/${res.policy_id}`);
   }, clash ? 'Link and mark funded' : 'Create the policy');
+}
+
+/**
+ * Sending a funded deal back to the list.
+ *
+ * The moment this exists for: a deal was marked funded, and then one of the
+ * investors who had confirmed backs out. The money never moved, so the
+ * policy the funding created has to come off the books, and the piece that
+ * investor was holding has to go back in front of everybody else.
+ *
+ * Two things are made plain before the button is pressed. What the delete
+ * would destroy, counted by the server rather than guessed at here — and
+ * what percentage actually returns to available, recomputed as the boxes
+ * are ticked, because that is the number the next conversation starts from.
+ */
+async function openReopenDialog(o) {
+  const chk = await api(`/opportunities/${o.id}/reopen-check`);
+  const live = (o.commitments || [])
+    .filter((c) => ['Requested', 'Confirmed'].includes(c.status));
+  const losses = chk.losses || [];
+  const held = live.reduce((sum, c) => sum + Number(c.pct), 0);
+
+  const row = (c) => `
+    <label class="entity-opt">
+      <input type="checkbox" name="backing_out" value="${c.investor_id}">
+      <span>${esc(c.investor_name)}
+        <span class="pick-sub">${c.status === 'Confirmed'
+          ? 'Confirmed' : 'Requested, not yet decided'}</span></span>
+      <span class="pick-pct">${fmtPct(Number(c.pct))}</span>
+    </label>`;
+
+  const dlg = openDialog(`Send ${oppName(o)} back to the list`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      ${chk.unwinds_policy
+        ? `Policy <strong>${esc(chk.policy_number)}</strong> comes out of the portfolio,
+           along with the acquisition cost and the cap table written when it was funded.
+           The purchase never completed, so the book of record should not say it did.`
+        : chk.policy_id
+          ? `Policy <strong>${esc(chk.policy_number)}</strong> <strong>stays</strong> in the
+             portfolio. It was already on the books and this deal was linked to it rather
+             than the creator of it, so it is not this opportunity's to delete.`
+          : 'The policy behind this opportunity is no longer in the portfolio.'}
+      The opportunity goes back to <strong>Open</strong>, and every investor who stays in
+      keeps their position exactly as it is.
+    </p>
+    ${losses.length ? `<div class="error-box" style="margin-bottom:14px">
+      This policy has picked up ${esc(losses.join(', '))} since it was funded.
+      ${chk.paid_since ? `That is <strong>${fmtExact(chk.paid_since)}</strong> of movement
+        in the ledger. ` : ''}All of it goes with the policy, and none of it comes back.
+    </div>` : ''}
+    <div class="field">
+      <label>Who is backing out</label>
+      ${live.length
+        ? `<div class="pick-list">${live.map(row).join('')}</div>`
+        : '<div class="muted" style="font-size:13px">Nobody is holding a piece of this deal.</div>'}
+      <span class="muted" style="font-size:12px" id="freedNote"></span>
+    </div>
+    ${inputField('New closing date for the offer (optional)', 'offer_closes_on', '', 'date')}
+    ${inputField('Note against the withdrawal (optional)', 'notes', '', 'text',
+      'autocomplete=off')}
+    ${chk.needs_confirm
+      ? inputField(`Type <strong>${esc(chk.policy_number)}</strong> to confirm`,
+        'confirm', '', 'text', 'required autocomplete=off')
+      : ''}
+  `, async (v) => {
+    if (chk.needs_confirm && String(v.confirm).trim() !== String(chk.policy_number))
+      throw new Error(`Type ${chk.policy_number} exactly to confirm.`);
+    const res = await api(`/opportunities/${o.id}/reopen`, { method: 'POST', body: {
+      backing_out: [].concat(v.backing_out || []),
+      confirm: v.confirm, notes: v.notes, offer_closes_on: v.offer_closes_on } });
+    toast(res.withdrew
+      ? `Back on the list · ${fmtPct(res.freed_pct)} released · ${
+        fmtPct(res.remaining_pct)} available`
+      : `Back on the list · ${fmtPct(res.remaining_pct)} available`);
+  }, 'Send it back');
+
+  /* The freed figure, live. The consequence of ticking a box belongs on the
+     screen before the button is pressed, not in the toast afterwards. */
+  const note = $('#freedNote', dlg);
+  const paint = () => {
+    const freed = [...dlg.querySelectorAll('input[name=backing_out]:checked')]
+      .reduce((sum, b) => sum
+        + Number(live.find((c) => String(c.investor_id) === b.value)?.pct || 0), 0);
+    note.innerHTML = freed
+      ? `${fmtPct(freed)} is released — <strong>${fmtPct(Math.max(0, 100 - held + freed))
+        }</strong> of the policy goes back on offer.`
+      : `Nothing selected. ${fmtPct(Math.max(0, 100 - held))} is available as it stands.`;
+  };
+  dlg.querySelectorAll('input[name=backing_out]').forEach((b) =>
+    b.addEventListener('change', paint));
+  paint();
 }
 
 /* ---------------------------- maturities ----------------------------- */
@@ -8141,6 +8237,24 @@ async function openUserDialog(u, funds, onSaved) {
         You cannot change your own role or suspend yourself. Ask another administrator.</span>
     </div>` : ''}
 
+    ${''/* Policy Valuation is a different application, handed to people by
+           name. Not offered for an administrator, who has it anyway, nor
+           for an investor, who may never have it.
+
+           High in the dialog on purpose: it is one line, and it used to sit
+           under two full-height multi-selects where it was below the fold
+           and nobody could find it. */}
+    <div class="field" id="valuePick" style="display:none">
+      <label>Tools</label>
+      <label class="dlg-check" style="margin:0">
+        <input type="checkbox" name="can_value" ${u.can_value ? 'checked' : ''}>
+        <span>May use <strong>Policy Valuation</strong> — the pricing model, which
+          says what the firm would pay for a policy. It is a separate application
+          reached from the menu; nothing in this portfolio changes when somebody
+          runs one. Every run is recorded against their name.</span>
+      </label>
+    </div>
+
     <div class="field" id="fundPick" style="display:none">
       <label>Owner entities *</label>
       <select name="fund_ids" multiple size="${Math.min(5, Math.max(2, funds.length))}">
@@ -8177,20 +8291,6 @@ async function openUserDialog(u, funds, onSaved) {
       </select>
       <span class="muted" style="font-size:12px">
         This login sees only the policies this investor holds a share of.</span>
-    </div>
-
-    ${''/* Policy Valuation is a different application, handed to people by
-           name. Not offered for an administrator, who has it anyway, nor
-           for an investor, who may never have it. */}
-    <div class="field" id="valuePick" style="display:none">
-      <label>Tools</label>
-      <label class="dlg-check" style="margin:0">
-        <input type="checkbox" name="can_value" ${u.can_value ? 'checked' : ''}>
-        <span>May use <strong>Policy Valuation</strong> — the pricing model, which
-          says what the firm would pay for a policy. It is a separate application
-          reached from the menu; nothing in this portfolio changes when somebody
-          runs one. Every run is recorded against their name.</span>
-      </label>
     </div>
 
     ${inputField('Set a new password (optional, 10+ characters)', 'password', '', 'password',

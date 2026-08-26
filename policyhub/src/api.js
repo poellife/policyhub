@@ -3941,7 +3941,11 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
           [policyId, c.investor_id, c.pct, acquired]);
         linked += ins.rows.length;
       }
-      await q(`UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
+      // Adopted, not created: this policy was in the portfolio before the
+      // deal, so unwinding the deal must never delete it.
+      await q(`UPDATE opportunities
+                  SET status = 'Funded', policy_id = $1, policy_created = FALSE,
+                      updated_at = now()
                 WHERE id = $2`, [policyId, req.params.id]);
       await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
         `linked to existing policy ${o.policy_number} with ${linked} allocation(s)`);
@@ -3994,7 +3998,8 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
       }
 
       await client.query(
-        `UPDATE opportunities SET status = 'Funded', policy_id = $1, updated_at = now()
+        `UPDATE opportunities
+            SET status = 'Funded', policy_id = $1, policy_created = TRUE, updated_at = now()
           WHERE id = $2`, [policyId, req.params.id]);
       await client.query('COMMIT');
     } catch (e) {
@@ -4011,6 +4016,251 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
     await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
       `funded as policy ${policyNumber} with ${allocated} allocation(s)`);
     res.status(201).json({ policy_id: policyId, allocations: allocated });
+  }));
+
+/* ------------------------------------------------------------------ *
+ * Sending a funded deal back to the list
+ *
+ * Deals come apart after they are marked funded. An investor who confirmed
+ * a piece backs out, the money never moves, and the deal has to go back in
+ * front of the other investors with that piece available again.
+ *
+ * The rule is that funding is undone, not papered over:
+ *
+ *   - the investors who are staying keep their confirmed positions, exactly
+ *     as they were, at the same percentages;
+ *   - the ones backing out are marked Withdrawn, which is what releases
+ *     their share — `opportunity_taken` counts Requested and Confirmed and
+ *     nothing else, so the remaining figure becomes honest by itself;
+ *   - the policy that funding created is deleted, along with the
+ *     acquisition cost and cap table written with it. There was no
+ *     purchase, so a policy on the books claiming otherwise is worse than
+ *     no record at all;
+ *   - a policy that funding merely ADOPTED is left alone. It was in the
+ *     portfolio before this deal and is not this deal's to delete.
+ *
+ * Nothing here is silent. What the delete would destroy is counted first
+ * and returned to the caller, and once anything at all has happened to the
+ * policy since funding — a premium paid, a document filed, a capital call
+ * raised — the policy number has to be typed before it will proceed.
+ * ------------------------------------------------------------------ */
+
+/**
+ * What funding put on the policy, and what has happened to it since.
+ *
+ * The two rows funding seeds itself — the acquisition cost and the carrier
+ * values quoted in the deal — are not "activity": deleting them destroys
+ * nothing that was not created by the funding being undone. Everything else
+ * is somebody's later work, and is counted so it can be shown before it goes.
+ */
+async function reopenTally(o) {
+  const base = {
+    policy_id: o.policy_id || null,
+    policy_created: !!o.policy_created,
+    policy_number: '',
+    carrier_name: '',
+    allocations: 0,
+    transactions_since: 0,
+    paid_since: 0,
+    values_since: 0,
+    documents: 0,
+    capital_call_items: 0,
+    reminders: 0,
+    premium_streams: 0,
+    agreements: 0,
+  };
+  if (!o.policy_id) return { ...base, activity: 0 };
+
+  const { rows } = await q(
+    `SELECT p.policy_number, p.carrier_name,
+       (SELECT COUNT(*)::int FROM policy_investors a WHERE a.policy_id = p.id) AS allocations,
+       (SELECT COUNT(*)::int FROM transactions t WHERE t.policy_id = p.id
+          AND NOT (t.txn_type = 'Acquisition Cost'
+                   AND t.remarks = 'Funded from opportunity'
+                   AND t.source = 'app'))                             AS transactions_since,
+       (SELECT COALESCE(SUM(ABS(t.amount)), 0) FROM transactions t WHERE t.policy_id = p.id
+          AND NOT (t.txn_type = 'Acquisition Cost'
+                   AND t.remarks = 'Funded from opportunity'
+                   AND t.source = 'app'))                             AS paid_since,
+       (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id
+          AND v.notes <> 'Quoted on the opportunity')                 AS values_since,
+       (SELECT COUNT(*)::int FROM documents d        WHERE d.policy_id = p.id) AS documents,
+       (SELECT COUNT(*)::int FROM capital_call_items c WHERE c.policy_id = p.id) AS capital_call_items,
+       (SELECT COUNT(*)::int FROM policy_reminders r WHERE r.policy_id = p.id) AS reminders,
+       (SELECT COUNT(*)::int FROM premium_streams s  WHERE s.policy_id = p.id) AS premium_streams,
+       (SELECT COUNT(*)::int FROM agreements g       WHERE g.policy_id = p.id) AS agreements
+     FROM policies p WHERE p.id = $1`, [o.policy_id]);
+
+  if (!rows[0]) return { ...base, policy_id: null, activity: 0, missing: true };
+  const t = { ...base, ...rows[0] };
+  for (const k of ['allocations', 'transactions_since', 'values_since', 'documents',
+    'capital_call_items', 'reminders', 'premium_streams', 'agreements'])
+    t[k] = Number(t[k]) || 0;
+  t.paid_since = Number(t.paid_since) || 0;
+  // The cap table funding wrote is not activity — it is the thing being undone.
+  t.activity = t.transactions_since + t.values_since + t.documents
+    + t.capital_call_items + t.reminders + t.premium_streams + t.agreements;
+  return t;
+}
+
+/** English for what is about to be destroyed, in the order it matters. */
+function reopenLosses(t) {
+  const bits = [];
+  const n = (c, one, many) => (c === 1 ? `1 ${one}` : `${c} ${many || `${one}s`}`);
+  if (t.transactions_since) bits.push(n(t.transactions_since, 'transaction'));
+  if (t.values_since) bits.push(n(t.values_since, 'value snapshot'));
+  if (t.documents) bits.push(n(t.documents, 'document'));
+  if (t.premium_streams) bits.push(n(t.premium_streams, 'premium schedule'));
+  if (t.reminders) bits.push(n(t.reminders, 'reminder'));
+  if (t.capital_call_items) bits.push(n(t.capital_call_items, 'capital call line'));
+  if (t.agreements) bits.push(n(t.agreements, 'agreement'));
+  return bits;
+}
+
+/**
+ * What sending this back would cost, before anybody commits to it.
+ *
+ * The dialog needs the tally to write its warning, and the warning has to
+ * come from the same query the endpoint enforces on — otherwise the screen
+ * and the server can disagree about what is at stake.
+ */
+router.get('/opportunities/:id/reopen-check', blockInvestors, adminOrManager,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const o = await loadOpportunity(req, req.params.id);
+    const funds = oppFundScope(req);
+    if (funds && !funds.includes(o.fund_id))
+      return res.status(403).json({ error: 'That owner entity is not one of yours' });
+    const t = await reopenTally(o);
+    res.json({
+      status: o.status,
+      can_reopen: o.status === 'Funded',
+      unwinds_policy: t.policy_created && !!t.policy_id,
+      needs_confirm: t.policy_created && !!t.policy_id && t.activity > 0,
+      losses: reopenLosses(t),
+      taken_pct: o.taken_pct,
+      remaining_pct: o.remaining_pct,
+      ...t,
+    });
+  }));
+
+/**
+ * Put a funded opportunity back on the list.
+ *
+ * Admins and portfolio managers only, and a manager only within their own
+ * entities — the same reach that funded it in the first place.
+ */
+router.post('/opportunities/:id/reopen', blockInvestors, adminOrManager,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const o = await loadOpportunity(req, req.params.id);
+    const funds = oppFundScope(req);
+    if (funds && !funds.includes(o.fund_id))
+      return res.status(403).json({ error: 'That owner entity is not one of yours' });
+    if (o.status !== 'Funded')
+      return res.status(409).json({
+        error: 'Only a funded opportunity can be sent back to the list.' });
+
+    /* Who is leaving. A live commitment is one that is still holding space —
+       Requested or Confirmed. Anything else has already been released and
+       cannot be withdrawn twice. */
+    const live = (o.commitments || []).filter((c) => ['Requested', 'Confirmed'].includes(c.status));
+    const asked = [...new Set([].concat(req.body?.backing_out || [])
+      .map((x) => int(x)).filter(Boolean))];
+    const leaving = live.filter((c) => asked.includes(Number(c.investor_id)));
+    const unknown = asked.filter((id) => !live.some((c) => Number(c.investor_id) === id));
+    if (unknown.length)
+      return res.status(400).json({
+        error: 'One of the investors selected has no live commitment on this opportunity. '
+          + 'Reload the page and try again.' });
+
+    const t = await reopenTally(o);
+    const unwind = t.policy_created && !!t.policy_id;
+
+    // Typed confirmation, but only when the delete would take somebody's
+    // later work with it. Undoing a funding that nothing has happened to
+    // yet destroys nothing, and should not demand a ceremony.
+    if (unwind && t.activity > 0 && str(req.body?.confirm) !== str(t.policy_number))
+      return res.status(409).json({
+        error: `Policy ${t.policy_number} has picked up ${reopenLosses(t).join(', ')} since it `
+          + 'was funded. Type the policy number to confirm that going back to the list '
+          + 'should destroy that record too.',
+        needs_confirm: true,
+        losses: reopenLosses(t),
+        policy_number: t.policy_number,
+      });
+
+    const freed = leaving.reduce((s, c) => s + Number(c.pct), 0);
+    const closes = date(req.body?.offer_closes_on);
+    const note = str(req.body?.notes);
+
+    const client = await pool.connect();
+    let insuredCleared = false;
+    try {
+      await client.query('BEGIN');
+
+      for (const c of leaving)
+        await client.query(
+          `UPDATE opportunity_commitments
+              SET status = 'Withdrawn', decided_at = now(), decided_by = $1,
+                  notes = COALESCE(NULLIF($2,''), notes)
+            WHERE id = $3`, [req.user.uid, note, c.id]);
+
+      if (unwind) {
+        /* The insured was created by this funding and belongs to a person
+           whose policy is not ours. Once the policy goes, an insured with
+           nothing left pointing at it should not stay in the directory —
+           that is the whole reason an opportunity holds its insured on its
+           own row rather than in `insureds`. */
+        const { rows: pol } = await client.query(
+          'SELECT insured_id FROM policies WHERE id = $1', [o.policy_id]);
+        await client.query('DELETE FROM policies WHERE id = $1', [o.policy_id]);
+        const insuredId = pol[0]?.insured_id;
+        if (insuredId) {
+          const { rowCount } = await client.query(
+            `DELETE FROM insureds i WHERE i.id = $1
+               AND NOT EXISTS (SELECT 1 FROM policies p WHERE p.insured_id = i.id)
+               AND NOT EXISTS (SELECT 1 FROM policy_insureds pi WHERE pi.insured_id = i.id)`,
+            [insuredId]);
+          insuredCleared = rowCount > 0;
+        }
+      }
+
+      await client.query(
+        `UPDATE opportunities
+            SET status = 'Open', policy_id = NULL, policy_created = FALSE,
+                offer_closes_on = COALESCE($1::date, offer_closes_on),
+                updated_at = now()
+          WHERE id = $2`, [closes, req.params.id]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `sent back to the list · ${leaving.length} investor(s) withdrawn releasing ${freed}% · `
+      + (unwind
+        ? `policy ${t.policy_number} unwound (${t.allocations} allocation(s), `
+          + `${reopenLosses(t).join(', ') || 'nothing else'} destroyed`
+          + `${insuredCleared ? ', insured removed' : ''})`
+        : `policy ${t.policy_number || 'none'} kept — it was adopted, not created here`));
+
+    const after = await loadOpportunity(req, req.params.id);
+    res.json({
+      ok: true,
+      withdrew: leaving.length,
+      freed_pct: freed,
+      remaining_pct: after.remaining_pct,
+      unwound: unwind,
+      policy_number: t.policy_number,
+      policy_kept: !unwind && !!t.policy_id,
+      destroyed: unwind ? reopenLosses(t) : [],
+    });
   }));
 
 /* ------------------------------------------------------------------ *

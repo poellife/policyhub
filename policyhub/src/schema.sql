@@ -506,6 +506,29 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS account_value NUMERIC(16,2);
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS cash_surrender_value NUMERIC(16,2);
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS values_as_of DATE;
 
+-- Did funding CREATE the policy, or adopt one already on the books?
+--
+-- It matters when a deal comes apart. An investor backing out sends the
+-- opportunity back to the list, and the policy that funding created has to
+-- go with it — the purchase never completed, so a policy, an acquisition
+-- cost and a cap table for it are all fiction. But a policy that was
+-- already in the portfolio and merely LINKED to the opportunity is a real
+-- holding that predates the deal; deleting it would destroy a record the
+-- opportunity never created. Only the first kind is unwound.
+--
+-- The backfill reads the acquisition transaction this application writes at
+-- funding, which the linking path never writes, so opportunities funded
+-- before this column existed are classified correctly. It only ever sets
+-- the flag true, so it is safe to re-run on every boot.
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS policy_created BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE opportunities o SET policy_created = TRUE
+ WHERE o.policy_id IS NOT NULL AND NOT o.policy_created
+   AND EXISTS (SELECT 1 FROM transactions t
+                WHERE t.policy_id = o.policy_id
+                  AND t.txn_type = 'Acquisition Cost'
+                  AND t.remarks  = 'Funded from opportunity'
+                  AND t.source   = 'app');
+
 -- The premium schedule as offered. Beyond its last row the projection
 -- continues at the same annual rate, which the analysis states on its face.
 CREATE TABLE IF NOT EXISTS opportunity_premiums (
