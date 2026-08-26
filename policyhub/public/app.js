@@ -2152,6 +2152,8 @@ async function policyView() {
       </div>
       <div class="spacer"></div>
       ${shareToggle(p.my_pct)}
+      ${['admin', 'manager'].includes(state.user.role)
+        ? '<button id="offerPolicyBtn">Offer to investors</button>' : ''}
       ${['admin', 'manager'].includes(state.user.role) ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
       ${canEditData() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
       ${canEditData() ? '<button class="primary" id="editBtn">Edit policy</button>' : ''}
@@ -2242,6 +2244,9 @@ async function policyView() {
       wireShareToggle();
       $('#editBtn')?.addEventListener('click', () => openPolicyDialog(p));
       $('#deletePolicyBtn')?.addEventListener('click', () => openDeletePolicyDialog(p));
+      $('#offerPolicyBtn')?.addEventListener('click', () => {
+        openOfferDialog(p).catch((e) => alert(e.message));
+      });
       $('#editInsuredBtn')?.addEventListener('click', async () => {
         const ins = await api(`/insureds/${p.insured_id}`);
         openInsuredDialog(ins);
@@ -6099,6 +6104,117 @@ async function openReopenDialog(o) {
     b.addEventListener('change', paint));
   paint();
 }
+
+/**
+ * Offering a policy that was never an opportunity.
+ *
+ * A policy keyed straight into the portfolio has no opportunity behind
+ * it, so when an investor backs out there is nothing to send back. This
+ * builds the offer the deal never had, from the policy's own record, and
+ * carries the investors who are staying across at the percentages they
+ * already hold — so the share on offer is the freed one, not the whole
+ * policy.
+ *
+ * Unlike undoing a funding, what happens to the policy is a question.
+ * The application did not create this one and cannot know whether the
+ * purchase is collapsing or one investor is simply leaving, so it stays
+ * unless somebody says otherwise.
+ */
+async function openOfferDialog(p) {
+  const chk = await api(`/policies/${p.id}/offer-check`);
+  const owners = chk.owners || [];
+  const held = Number(chk.held_pct) || 0;
+
+  if (chk.existing_offer) {
+    openDialog(`${oppNameFromPolicy(p)} is already on offer`, `
+      <p style="margin:0;font-size:14px">
+        Policy <strong>${esc(chk.policy_number)}</strong> already has an offer on the
+        Opportunities list. Take the freed share off
+        <a href="#/opportunity/${chk.existing_offer.id}">that offer</a> rather than starting
+        a second one — two live offers for one policy is how the same share gets promised
+        to two people.
+      </p>`);
+    return;
+  }
+
+  const row = (o) => `
+    <label class="entity-opt">
+      <input type="checkbox" name="backing_out" value="${o.investor_id}">
+      <span>${esc(o.name)}<span class="pick-sub">holds this today</span></span>
+      <span class="pick-pct">${fmtPct(o.pct)}</span>
+    </label>`;
+
+  const dlg = openDialog(`Offer ${esc(chk.insured || chk.policy_number)} to investors`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      This puts policy <strong>${esc(chk.policy_number)}</strong> on the Opportunities list,
+      built from what is already on its record — the carrier, the death benefit, the insured,
+      the premium and what was paid for it. Investors who stay are carried across at the
+      percentage they hold today, so what is on offer is the share that came free.
+    </p>
+    <div class="field">
+      <label>Who is backing out</label>
+      ${owners.length
+        ? `<div class="pick-list">${owners.map(row).join('')}</div>`
+        : '<div class="muted" style="font-size:13px">Nobody is on this policy\\u2019s cap table yet.</div>'}
+      <span class="muted" style="font-size:12px" id="freedNote"></span>
+    </div>
+    ${moneyField('Asking price for the whole policy', 'asking_price', chk.asking_price ?? '')}
+    ${inputField('Offer closes on (optional)', 'offer_closes_on', '', 'date')}
+    <div class="field">
+      <label>The policy itself</label>
+      <label class="entity-opt"><input type="radio" name="policy_fate" value="keep" checked>
+        <span>Keep it in the portfolio<span class="pick-sub">The holding is real; only the
+          freed share is being reoffered.</span></span></label>
+      <label class="entity-opt"><input type="radio" name="policy_fate" value="remove">
+        <span>Take it out of the portfolio<span class="pick-sub">The purchase is not
+          going ahead. The policy and its ledger go with it.</span></span></label>
+    </div>
+    <div id="removeWarn" hidden>
+      ${chk.losses?.length ? `<div class="error-box" style="margin-bottom:14px">
+        Removing it destroys ${esc(chk.losses.join(', '))}${chk.paid_since
+          ? ` — <strong>${fmtExact(chk.paid_since)}</strong> of movement in the ledger` : ''},
+        and none of it comes back.</div>` : `<div class="error-box" style="margin-bottom:14px">
+        Removing it takes the policy out of the portfolio for good.</div>`}
+      ${chk.needs_confirm
+        ? inputField(`Type <strong>${esc(chk.policy_number)}</strong> to confirm`,
+          'confirm', '', 'text', 'autocomplete=off')
+        : ''}
+    </div>
+  `, async (v) => {
+    const remove = v.policy_fate === 'remove';
+    if (remove && chk.needs_confirm && String(v.confirm || '').trim() !== String(chk.policy_number))
+      throw new Error(`Type ${chk.policy_number} exactly to confirm.`);
+    const res = await api(`/policies/${p.id}/offer`, { method: 'POST', body: {
+      backing_out: [].concat(v.backing_out || []),
+      remove_policy: remove, confirm: v.confirm,
+      asking_price: v.asking_price, offer_closes_on: v.offer_closes_on } });
+    toast(res.withdrew
+      ? `On the list · ${fmtPct(res.freed_pct)} released · ${
+        fmtPct(res.remaining_pct)} available`
+      : `On the list · ${fmtPct(res.remaining_pct)} available`);
+    go(`#/opportunity/${res.opportunity_id}`);
+  }, 'Put it on the list');
+
+  const note = $('#freedNote', dlg);
+  const warn = $('#removeWarn', dlg);
+  const paint = () => {
+    const freed = [...dlg.querySelectorAll('input[name=backing_out]:checked')]
+      .reduce((sum, b) => sum
+        + Number(owners.find((o) => String(o.investor_id) === b.value)?.pct || 0), 0);
+    note.innerHTML = freed
+      ? `${fmtPct(freed)} comes free — <strong>${fmtPct(Math.max(0, 100 - held + freed))
+        }</strong> of the policy goes on offer.`
+      : `Nothing selected. ${fmtPct(Math.max(0, 100 - held))} is unheld and would go on offer.`;
+    warn.hidden = dlg.querySelector('input[name=policy_fate]:checked')?.value !== 'remove';
+  };
+  dlg.querySelectorAll('input[name=backing_out], input[name=policy_fate]')
+    .forEach((b) => b.addEventListener('change', paint));
+  paint();
+}
+
+/** A policy said the way the Opportunities screens say an insured. */
+const oppNameFromPolicy = (p) =>
+  [p.insured_last, p.insured_first].filter(Boolean).join(', ') || p.policy_number || 'This policy';
 
 /* ---------------------------- maturities ----------------------------- */
 

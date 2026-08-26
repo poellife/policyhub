@@ -4053,10 +4053,24 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
  * nothing that was not created by the funding being undone. Everything else
  * is somebody's later work, and is counted so it can be shown before it goes.
  */
-async function reopenTally(o) {
+/* The two rows funding seeds on the policy it creates. Discounted when
+   the funding is being undone — deleting them destroys nothing that was
+   not created by the act being reversed — and counted like anything else
+   when the policy was entered by hand and never had a funding to undo. */
+const SEEDED_TXN = "(t.txn_type = 'Acquisition Cost' "
+  + "AND t.remarks = 'Funded from opportunity' AND t.source = 'app')";
+const SEEDED_VALUE = "(v.notes = 'Quoted on the opportunity')";
+
+/**
+ * Everything hanging off a policy that would go if the policy went.
+ *
+ * Used before any offer to destroy one, so the warning names what is
+ * actually at stake rather than saying "this cannot be undone" and
+ * leaving the reader to imagine the rest.
+ */
+async function policyActivity(policyId, { discountSeeded = false } = {}) {
   const base = {
-    policy_id: o.policy_id || null,
-    policy_created: !!o.policy_created,
+    policy_id: policyId || null,
     policy_number: '',
     carrier_name: '',
     allocations: 0,
@@ -4069,27 +4083,25 @@ async function reopenTally(o) {
     premium_streams: 0,
     agreements: 0,
   };
-  if (!o.policy_id) return { ...base, activity: 0 };
+  if (!policyId) return { ...base, activity: 0 };
+  const txnCut = discountSeeded ? `AND NOT ${SEEDED_TXN}` : '';
+  const valCut = discountSeeded ? `AND NOT ${SEEDED_VALUE}` : '';
 
   const { rows } = await q(
     `SELECT p.policy_number, p.carrier_name,
        (SELECT COUNT(*)::int FROM policy_investors a WHERE a.policy_id = p.id) AS allocations,
-       (SELECT COUNT(*)::int FROM transactions t WHERE t.policy_id = p.id
-          AND NOT (t.txn_type = 'Acquisition Cost'
-                   AND t.remarks = 'Funded from opportunity'
-                   AND t.source = 'app'))                             AS transactions_since,
-       (SELECT COALESCE(SUM(ABS(t.amount)), 0) FROM transactions t WHERE t.policy_id = p.id
-          AND NOT (t.txn_type = 'Acquisition Cost'
-                   AND t.remarks = 'Funded from opportunity'
-                   AND t.source = 'app'))                             AS paid_since,
-       (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id
-          AND v.notes <> 'Quoted on the opportunity')                 AS values_since,
+       (SELECT COUNT(*)::int FROM transactions t WHERE t.policy_id = p.id ${txnCut})
+                                                                    AS transactions_since,
+       (SELECT COALESCE(SUM(ABS(t.amount)), 0) FROM transactions t
+         WHERE t.policy_id = p.id ${txnCut})                        AS paid_since,
+       (SELECT COUNT(*)::int FROM policy_values v WHERE v.policy_id = p.id ${valCut})
+                                                                    AS values_since,
        (SELECT COUNT(*)::int FROM documents d        WHERE d.policy_id = p.id) AS documents,
        (SELECT COUNT(*)::int FROM capital_call_items c WHERE c.policy_id = p.id) AS capital_call_items,
        (SELECT COUNT(*)::int FROM policy_reminders r WHERE r.policy_id = p.id) AS reminders,
        (SELECT COUNT(*)::int FROM premium_streams s  WHERE s.policy_id = p.id) AS premium_streams,
        (SELECT COUNT(*)::int FROM agreements g       WHERE g.policy_id = p.id) AS agreements
-     FROM policies p WHERE p.id = $1`, [o.policy_id]);
+     FROM policies p WHERE p.id = $1`, [policyId]);
 
   if (!rows[0]) return { ...base, policy_id: null, activity: 0, missing: true };
   const t = { ...base, ...rows[0] };
@@ -4097,10 +4109,16 @@ async function reopenTally(o) {
     'capital_call_items', 'reminders', 'premium_streams', 'agreements'])
     t[k] = Number(t[k]) || 0;
   t.paid_since = Number(t.paid_since) || 0;
-  // The cap table funding wrote is not activity — it is the thing being undone.
+  /* The cap table is not counted as activity by either caller: it is the
+     thing being rewritten, not collateral damage. */
   t.activity = t.transactions_since + t.values_since + t.documents
     + t.capital_call_items + t.reminders + t.premium_streams + t.agreements;
   return t;
+}
+
+async function reopenTally(o) {
+  const t = await policyActivity(o.policy_id, { discountSeeded: true });
+  return { ...t, policy_id: o.policy_id || null, policy_created: !!o.policy_created };
 }
 
 /** English for what is about to be destroyed, in the order it matters. */
@@ -4260,6 +4278,240 @@ router.post('/opportunities/:id/reopen', blockInvestors, adminOrManager,
       policy_number: t.policy_number,
       policy_kept: !unwind && !!t.policy_id,
       destroyed: unwind ? reopenLosses(t) : [],
+    });
+  }));
+
+/* ------------------------------------------------------------------ *
+ * Offering a policy that was never an opportunity
+ *
+ * Not every deal starts on the Opportunities tab. A policy keyed straight
+ * into the portfolio has no opportunity behind it to send back, and when
+ * one of its investors backs out there is still a share to place and no
+ * screen to place it from.
+ *
+ * So this builds the opportunity the deal never had. Everything the
+ * one-pager needs is already on the policy — carrier, face, the insured,
+ * the premium, what was paid for it — and copying it across by hand is
+ * how a price ends up transcribed wrong on the page an investor reads.
+ *
+ * The investors who are staying are carried over as confirmed
+ * commitments at the percentages they already hold, which is what makes
+ * the remaining figure honest: an offer that says 100% available when
+ * three quarters of it is spoken for is worse than no offer at all.
+ *
+ * What happens to the policy is asked rather than assumed. Undoing a
+ * funding is unambiguous — the app created that policy and the purchase
+ * never completed. This is not: a policy entered by hand is a primary
+ * record, and whether the whole purchase is collapsing or one investor
+ * is simply leaving is a fact only the person doing it knows. It stays
+ * by default, and removing it demands the same typed confirmation that
+ * deleting a policy anywhere else does.
+ * ------------------------------------------------------------------ */
+
+/** What the offer would carry across, and what removing the policy would cost. */
+router.get('/policies/:id/offer-check', blockInvestors, adminOrManager, inPolicyScope('id'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `SELECT p.*, f.code AS fund_code,
+              i.first_name AS insured_first, i.last_name AS insured_last, i.dob AS insured_dob
+         FROM policies p
+         LEFT JOIN funds f ON f.id = p.fund_id
+         LEFT JOIN insureds i ON i.id = p.insured_id
+        WHERE p.id = $1`, [req.params.id]);
+    const p = rows[0];
+    if (!p) return res.status(404).json({ error: 'Policy not found' });
+
+    const owners = await q(
+      `SELECT a.investor_id, a.pct, inv.name
+         FROM policy_investors a JOIN investors inv ON inv.id = a.investor_id
+        WHERE a.policy_id = $1 ORDER BY a.pct DESC, inv.name`, [req.params.id]);
+    const t = await policyActivity(Number(req.params.id));
+    /* An offer already on the table for this policy. Two live offers for
+       one policy is how the same share gets promised twice. */
+    const open = await q(
+      `SELECT id, status FROM opportunities
+        WHERE lower(policy_number) = lower($1) AND status IN ('Open','Closed')
+        ORDER BY id DESC LIMIT 1`, [str(p.policy_number)]);
+
+    const held = owners.rows.reduce((s, o) => s + Number(o.pct), 0);
+    res.json({
+      policy_id: p.id,
+      policy_number: p.policy_number,
+      carrier_name: p.carrier_name,
+      insured: [p.insured_last, p.insured_first].filter(Boolean).join(', '),
+      fund_code: p.fund_code,
+      asking_price: p.acquisition_cost,
+      annual_premium: p.premium_required,
+      face_amount: p.face_amount,
+      owners: owners.rows.map((o) => ({ ...o, pct: Number(o.pct) })),
+      held_pct: held,
+      unheld_pct: Math.max(0, 100 - held),
+      existing_offer: open.rows[0] || null,
+      losses: reopenLosses(t),
+      activity: t.activity,
+      paid_since: t.paid_since,
+      needs_confirm: t.activity > 0,
+    });
+  }));
+
+/**
+ * Build the opportunity this policy never had, and put the freed share on it.
+ */
+router.post('/policies/:id/offer', blockInvestors, adminOrManager, inPolicyScope('id'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `SELECT p.*, i.first_name AS ins_first, i.last_name AS ins_last, i.dob AS ins_dob,
+              i.gender AS ins_gender, i.state AS ins_state, i.le_months AS ins_le,
+              i.le_provider AS ins_le_provider, i.le_date AS ins_le_date
+         FROM policies p LEFT JOIN insureds i ON i.id = p.insured_id
+        WHERE p.id = $1`, [req.params.id]);
+    const p = rows[0];
+    if (!p) return res.status(404).json({ error: 'Policy not found' });
+
+    const dup = await q(
+      `SELECT id FROM opportunities
+        WHERE lower(policy_number) = lower($1) AND status IN ('Open','Closed') LIMIT 1`,
+      [str(p.policy_number)]);
+    if (dup.rows[0] && !req.body?.anyway)
+      return res.status(409).json({
+        error: `Policy ${p.policy_number} is already on the Opportunities list. Take the `
+          + 'share off that offer rather than starting a second one for the same policy.',
+        opportunity_id: dup.rows[0].id,
+      });
+
+    const owners = await q(
+      `SELECT a.investor_id, a.pct FROM policy_investors a WHERE a.policy_id = $1`,
+      [req.params.id]);
+    const asked = [...new Set([].concat(req.body?.backing_out || [])
+      .map((x) => int(x)).filter(Boolean))];
+    const unknown = asked.filter((id) => !owners.rows.some((o) => Number(o.investor_id) === id));
+    if (unknown.length)
+      return res.status(400).json({
+        error: 'One of the investors selected does not hold a piece of this policy. '
+          + 'Reload the page and try again.' });
+
+    const leaving = owners.rows.filter((o) => asked.includes(Number(o.investor_id)));
+    const staying = owners.rows.filter((o) => !asked.includes(Number(o.investor_id)));
+    const freed = leaving.reduce((s, o) => s + Number(o.pct), 0);
+
+    const remove = !!req.body?.remove_policy;
+    const t = await policyActivity(Number(req.params.id));
+    if (remove && t.activity > 0 && str(req.body?.confirm) !== str(p.policy_number))
+      return res.status(409).json({
+        error: `Policy ${p.policy_number} carries ${reopenLosses(t).join(', ')}. Type the `
+          + 'policy number to confirm that taking it out of the portfolio should '
+          + 'destroy that record too.',
+        needs_confirm: true,
+        losses: reopenLosses(t),
+        policy_number: p.policy_number,
+      });
+
+    /* The carrier's latest word on what the policy is worth, so the offer
+       does not go out with the values column blank. */
+    const val = await q(
+      `SELECT as_of_date, account_value, cash_surrender_value FROM policy_values
+        WHERE policy_id = $1 ORDER BY as_of_date DESC LIMIT 1`, [req.params.id]);
+    const v = val.rows[0] || {};
+
+    const price = num(req.body?.asking_price);
+    const client = await pool.connect();
+    let oppId; let insuredCleared = false;
+    try {
+      await client.query('BEGIN');
+      const { rows: made } = await client.query(
+        `INSERT INTO opportunities
+           (policy_number, carrier_name, product_type, face_amount,
+            insured_last_name, insured_first_name, insured_dob, insured_gender, insured_state,
+            le_months, le_provider, le_date,
+            asking_price, annual_premium, expected_close, offer_closes_on,
+            account_value, cash_surrender_value, values_as_of,
+            fund_id, status, notes, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                 'Open',$21,$22)
+         RETURNING id`,
+        [p.policy_number, p.carrier_name, p.product_type, p.face_amount,
+         str(p.ins_last), str(p.ins_first), p.ins_dob, p.ins_gender, p.ins_state,
+         p.ins_le, str(p.ins_le_provider), p.ins_le_date,
+         price === null ? p.acquisition_cost : price, p.premium_required,
+         date(req.body?.expected_close), date(req.body?.offer_closes_on),
+         v.account_value ?? null, v.cash_surrender_value ?? null, v.as_of_date ?? null,
+         p.fund_id, str(req.body?.notes), req.user.uid]);
+      oppId = made[0].id;
+
+      /* Everyone who was on the cap table can see it: those staying are in
+         it already, and the one leaving is being shown the thing they just
+         stepped out of, which they plainly know exists. */
+      for (const o of owners.rows)
+        await client.query(
+          `INSERT INTO opportunity_shares (opportunity_id, investor_id, shared_by)
+           VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [oppId, o.investor_id, req.user.uid]);
+
+      for (const o of staying)
+        await client.query(
+          `INSERT INTO opportunity_commitments
+             (opportunity_id, investor_id, pct, status, decided_at, decided_by, notes)
+           VALUES ($1,$2,$3,'Confirmed',now(),$4,'Carried over from the policy')`,
+          [oppId, o.investor_id, o.pct, req.user.uid]);
+
+      /* The ones leaving are recorded as Withdrawn rather than left out.
+         Withdrawn holds no space, so the share reads as available — and
+         the offer still says who was in it and stepped away. */
+      for (const o of leaving)
+        await client.query(
+          `INSERT INTO opportunity_commitments
+             (opportunity_id, investor_id, pct, status, decided_at, decided_by, notes)
+           VALUES ($1,$2,$3,'Withdrawn',now(),$4,$5)`,
+          [oppId, o.investor_id, o.pct, req.user.uid,
+           str(req.body?.notes) || 'Backed out after the policy was entered']);
+
+      if (remove) {
+        await client.query('DELETE FROM policies WHERE id = $1', [req.params.id]);
+        if (p.insured_id) {
+          const { rowCount } = await client.query(
+            `DELETE FROM insureds i WHERE i.id = $1
+               AND NOT EXISTS (SELECT 1 FROM policies pp WHERE pp.insured_id = i.id)
+               AND NOT EXISTS (SELECT 1 FROM policy_insureds pi WHERE pi.insured_id = i.id)`,
+            [p.insured_id]);
+          insuredCleared = rowCount > 0;
+        }
+      } else if (leaving.length) {
+        /* The policy stays, so the cap table has to stop claiming the
+           investor who left still owns a piece of it. */
+        await client.query(
+          `DELETE FROM policy_investors
+            WHERE policy_id = $1 AND investor_id = ANY($2::int[])`,
+          [req.params.id, leaving.map((o) => o.investor_id)]);
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      if (e.code === '23505')
+        return res.status(409).json({
+          error: 'An offer for this policy was created by somebody else a moment ago. '
+            + 'Reload and look at the Opportunities list.' });
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await audit(req.user.uid, 'opportunity', oppId, 'create',
+      `offered from policy ${p.policy_number} · ${staying.length} holder(s) carried over · `
+      + `${leaving.length} backed out releasing ${freed}% · `
+      + (remove
+        ? `policy removed from the portfolio (${reopenLosses(t).join(', ') || 'nothing else'} `
+          + `destroyed${insuredCleared ? ', insured removed' : ''})`
+        : 'policy kept on the books'));
+
+    const after = await loadOpportunity(req, oppId);
+    res.status(201).json({
+      ok: true,
+      opportunity_id: oppId,
+      carried: staying.length,
+      withdrew: leaving.length,
+      freed_pct: freed,
+      remaining_pct: after.remaining_pct,
+      policy_removed: remove,
+      destroyed: remove ? reopenLosses(t) : [],
     });
   }));
 

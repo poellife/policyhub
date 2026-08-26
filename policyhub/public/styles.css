@@ -1320,7 +1320,8 @@ dialog.wide { width: 760px; }
   cursor: pointer; white-space: nowrap;
 }
 .entity-opt:hover { background: var(--surface-2); }
-.entity-opt input[type=checkbox] {
+.entity-opt input[type=checkbox],
+.entity-opt input[type=radio] {
   flex: none; width: 15px; height: 15px; margin: 0; min-width: 0;
 }
 .entity-opt > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -1514,8 +1515,22 @@ table.dlg-list input[type=checkbox] { width: 15px; height: 15px; margin: 0; }
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
-.pick-list .pick-sub {
+/* Not scoped to .pick-list: the same sub-label sits under the radio
+   options in the offer dialog, where it has to break to its own line
+   too — left inline it reads as one run-on sentence. */
+.pick-sub {
   display: block;
   font-size: 12px;
   color: var(--text-secondary);
+  line-height: 1.45;
 }
+
+/* A radio row that carries an explanation under its label. Top-aligned so
+   the control sits against the first line rather than floating in the
+   middle of two. */
+.field > .entity-opt {
+  align-items: flex-start;
+  white-space: normal;
+  padding: 7px 2px;
+}
+.field > .entity-opt input { margin-top: 2px; }
