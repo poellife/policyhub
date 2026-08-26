@@ -863,7 +863,12 @@ const STAFF_NAV = [
 ];
 
 /** Menu entries an administrator has and nobody else does. */
-const ADMIN_ONLY_NAV = ['carry', 'valuation'];
+const ADMIN_ONLY_NAV = ['carry'];
+
+/* Policy Valuation is not a rank, it is a grant: an administrator has it,
+   and anybody else has it only if one gave it to them by name. So the menu
+   asks the account rather than the role. */
+const mayValue = () => !!state.user?.can_value;
 
 // An investor sees only their own holdings; the staff-only sections are absent
 // from the menu and refused by the server regardless.
@@ -883,7 +888,14 @@ const INVESTOR_NAV = [
 // somewhere to change their own password, so that becomes "Account".
 const MANAGER_NAV = STAFF_NAV
   .filter(([r]) => !ADMIN_ONLY_NAV.includes(r))
-  .map(([r, label]) => (r === 'settings' ? ['settings', 'Account'] : [r, label]));
+  /* Keep the whole entry. An earlier version rebuilt each one as [r, label]
+     and dropped the third element, which is what makes Policy Valuation a
+     path rather than a route -- so a manager who had been granted it got a
+     menu item pointing at a screen that does not exist. */
+  .map((e) => (e[0] === 'settings' ? ['settings', 'Account'] : e));
+/* Policy Valuation stays in this list on purpose: navItems takes it out
+   again unless the account holds the grant, which is the only place that
+   question can be answered. */
 
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
@@ -957,12 +969,25 @@ function premiumDues(svc) {
 }
 
 const isAdminUser    = () => state.user?.role === 'admin';
-const navItems = () =>
-  isInvestorUser() ? INVESTOR_NAV
+
+/**
+ * The menu this person is served.
+ *
+ * The role picks the list; the Policy Valuation entry is then taken out of
+ * whichever list it lands in unless this account has been granted it. Done
+ * as a last pass over every branch rather than inside one of them, because
+ * the manager's menu is built once at load and cannot ask about an account
+ * that has not signed in yet — which is exactly how a tab nobody was
+ * granted ends up on a manager's screen.
+ */
+const navItems = () => {
+  const list = isInvestorUser() ? INVESTOR_NAV
     : isManagerUser() ? MANAGER_NAV
     // An editor or viewer is staff but not an administrator.
     : state.user?.role === 'admin' ? STAFF_NAV
       : STAFF_NAV.filter(([r]) => !ADMIN_ONLY_NAV.includes(r));
+  return mayValue() ? list : list.filter(([r]) => r !== 'valuation');
+};
 
 /* Display multiplier.
  *
@@ -8154,6 +8179,20 @@ async function openUserDialog(u, funds, onSaved) {
         This login sees only the policies this investor holds a share of.</span>
     </div>
 
+    ${''/* Policy Valuation is a different application, handed to people by
+           name. Not offered for an administrator, who has it anyway, nor
+           for an investor, who may never have it. */}
+    <div class="field" id="valuePick" style="display:none">
+      <label>Tools</label>
+      <label class="dlg-check" style="margin:0">
+        <input type="checkbox" name="can_value" ${u.can_value ? 'checked' : ''}>
+        <span>May use <strong>Policy Valuation</strong> — the pricing model, which
+          says what the firm would pay for a policy. It is a separate application
+          reached from the menu; nothing in this portfolio changes when somebody
+          runs one. Every run is recorded against their name.</span>
+      </label>
+    </div>
+
     ${inputField('Set a new password (optional, 10+ characters)', 'password', '', 'password',
       'minlength=10 autocomplete=new-password')}
   `, async (v) => {
@@ -8165,6 +8204,7 @@ async function openUserDialog(u, funds, onSaved) {
       investor_id: v.investor_id || null,
       fund_ids: v.fund_ids || [],
       investor_ids: v.granted_investor_ids || [],
+      can_value: !!v.can_value,
     } });
     if (v.password) await api(`/users/${u.id}/password`, { method: 'POST', body: { password: v.password } });
     toast(v.password ? 'Account updated and password reset' : 'Account updated');
@@ -8176,6 +8216,10 @@ async function openUserDialog(u, funds, onSaved) {
     $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
     $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
     $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+    /* An administrator has it inherently and an investor may never have
+       it, so the choice is only meaningful for the roles in between. */
+    $('#valuePick', dlg).style.display =
+      ['manager', 'editor', 'viewer'].includes(roleSel.value) ? '' : 'none';
   };
   roleSel.addEventListener('change', sync);
   sync();
