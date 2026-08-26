@@ -28,7 +28,7 @@
    doing on purpose rather than as a side effect of sharing a domain.
    ===================================================================== */
 
-import { authenticate, requireRole } from './auth.js';
+import { authenticate } from './auth.js';
 import { audit } from './db.js';
 import { describeOrigin } from './security.js';
 
@@ -192,8 +192,27 @@ const refuseInHtml = (req, res, next) => {
   next();
 };
 
+/**
+ * Who may go through the door.
+ *
+ * Administrators inherently; anybody else only if an administrator has
+ * granted it by name in Settings. Not a role check, because it does not
+ * line up with the roles — one manager may price policies and another may
+ * not, and that is a decision about people rather than about ranks.
+ *
+ * `canValue` is recomputed from the account on every request, so a grant
+ * withdrawn takes effect on the next click rather than whenever the person
+ * happens to sign in again.
+ */
+const mayValue = (req, res, next) => {
+  if (req.user?.canValue) return next();
+  res.status(403).type('html').send(page('Not your screen',
+    'Policy Valuation has to be granted to an account. An administrator can '
+    + 'do that from Settings.'));
+};
+
 export function mountValuation(app) {
-  app.use(PREFIX, refuseInHtml, ...authenticate, requireRole('admin'),
+  app.use(PREFIX, refuseInHtml, ...authenticate, mayValue,
     async (req, res, next) => {
     const target = base();
     if (!target)

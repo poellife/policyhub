@@ -124,6 +124,62 @@ for (const [who, acct] of [['a manager', MANAGER1], ['an investor', INVESTOR1]])
 }
 
 const admin = await login(ADMIN.email, ADMIN.password);
+const api = (path, opts = {}) => fetch(`${BASE}/api${path}`, {
+  ...opts, body: opts.body && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
+  headers: { Cookie: admin, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+});
+const json = async (r) => { try { return await r.json(); } catch { return null; } };
+
+/* ------------------------- granted by name --------------------------- *
+ * Reaching the valuation model is not a rank. One manager prices policies
+ * and another does not, and that is a decision about people — so it is a
+ * grant an administrator makes in Settings, and it has to be checked at
+ * the door rather than merely left out of a menu.
+ * ------------------------------------------------------------------- */
+console.log('\nAND IT CAN BE GIVEN TO SOMEBODY BY NAME');
+const users = (await json(await api('/users'))) || [];
+const mgr = users.find((u) => u.email === MANAGER1.email);
+const held = !!mgr?.can_value;
+const setGrant = (on) => api(`/users/${mgr.id}`, { method: 'PUT', body: {
+  full_name: mgr.full_name, role: mgr.role, is_active: mgr.is_active,
+  fund_ids: mgr.fund_ids || [], investor_ids: mgr.granted_investor_ids || [],
+  can_value: on } });
+
+check('the manager is on the user list with the grant reported', !!mgr,
+  mgr ? `can_value=${held}` : 'not found');
+
+await setGrant(true);
+const granted = await login(MANAGER1.email, MANAGER1.password);
+check('once granted, the manager is let through the door',
+  (await get(granted)).status === 200, String((await get(granted)).status));
+const me = await (await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: granted } })).json();
+check('and their account says so, so the menu can offer the tab', me.can_value === true);
+
+await setGrant(false);
+const after = await login(MANAGER1.email, MANAGER1.password);
+check('withdrawn, they are turned away again', (await get(after)).status === 403,
+  String((await get(after)).status));
+check('and the tab goes with it',
+  (await (await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: after } })).json())
+    .can_value === false);
+/* The grant is re-read from the account on every request, so a session
+   already open loses it too — not at the next sign-in. */
+check('including in a session they already had open',
+  (await get(granted)).status === 403, String((await get(granted)).status));
+
+/* An investor may never hold it, whatever is asked for. */
+const inv = users.find((u) => u.role === 'investor');
+if (inv) {
+  await api(`/users/${inv.id}`, { method: 'PUT', body: {
+    full_name: inv.full_name, role: 'investor', is_active: inv.is_active,
+    investor_id: inv.investor_id, can_value: true } });
+  const back = ((await json(await api('/users'))) || []).find((u) => u.id === inv.id);
+  check('an investor cannot be granted it even by asking directly',
+    back?.can_value === false, `can_value=${back?.can_value}`);
+} else {
+  check('no investor account to check against', true, 'skipped');
+}
+if (held) await setGrant(true);          // leave it as it was found
 
 console.log('\nAND THE UPSTREAM PASSWORD STAYS ON THIS SERVER');
 const r = await get(admin);

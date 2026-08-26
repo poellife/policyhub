@@ -498,6 +498,10 @@ router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true
 router.get('/auth/me', authenticate, wrap(async (req, res) => {
   const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role,
                 must_change_password: !!req.user.mustChangePassword,
+                /* Whether this account may reach Policy Valuation, so the
+                   menu can draw the entry. The door checks for itself; this
+                   only decides whether the tab is offered. */
+                can_value: !!req.user.canValue,
                 /* Which build is actually answering. The page compares it
                    with its own and says so if they differ. */
                 build: BUILD };
@@ -985,7 +989,7 @@ router.delete('/me/prefs/:name', authenticate, wrap(async (req, res) => {
 router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
-            u.investor_id, i.name AS investor_name,
+            u.investor_id, i.name AS investor_name, u.can_value,
             COALESCE((SELECT string_agg(f.code, ', ' ORDER BY f.code)
                         FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
                        WHERE uf.user_id = u.id), '') AS fund_codes,

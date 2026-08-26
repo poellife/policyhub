@@ -21,7 +21,7 @@
    Nothing to set up and nothing to clean.
    ===================================================================== */
 import { chromium } from 'playwright';
-import { BASE, ADMIN, MANAGER1, INVESTOR1 } from './test-config.mjs';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, login } from './test-config.mjs';
 
 const PATH = '/valuation';
 const fails = [], errs = [];
@@ -100,18 +100,45 @@ for (const w of [1152, 1280, 1440, 1680]) {
 await p.setViewportSize({ width: 1600, height: 950 });
 await p.waitForTimeout(400);
 
-console.log('\nAND NOBODY ELSE IS');
+console.log('\nAND NOBODY ELSE IS, UNLESS THEY HAVE BEEN GRANTED IT');
+const reach = () => p.evaluate(async (path) => {
+  const r = await fetch(path, { redirect: 'manual' });
+  return r.status;
+}, PATH);
+
 for (const [who, acct] of [['a manager', MANAGER1], ['an investor', INVESTOR1]]) {
   await signIn(acct);
-  check(`${who} has no Policy Valuation entry`, (await entry().count()) === 0);
+  check(`${who} without the grant has no Policy Valuation entry`,
+    (await entry().count()) === 0);
   /* And not merely hidden: the path itself refuses them. */
-  const reached = await p.evaluate(async (path) => {
-    const r = await fetch(path, { redirect: 'manual' });
-    return r.status;
-  }, PATH);
+  const reached = await reach();
   check(`and ${who} is refused at the path as well as in the menu`,
     reached === 403 || reached === 302 || reached === 0, String(reached));
 }
+
+/* Granted, the tab appears — for the same manager, on the same menu. That
+   is the whole feature: it is a decision about a person, not a rank. */
+const admin = await login(ADMIN.email, ADMIN.password);
+const call = (path, opts = {}) => fetch(`${BASE}/api${path}`, {
+  ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined,
+  headers: { Cookie: admin, 'Content-Type': 'application/json' },
+});
+const list = await (await call('/users')).json();
+const mgr = list.find((u) => u.email === MANAGER1.email);
+const was = !!mgr?.can_value;
+const grant = (on) => call(`/users/${mgr.id}`, { method: 'PUT', body: {
+  full_name: mgr.full_name, role: mgr.role, is_active: mgr.is_active,
+  fund_ids: mgr.fund_ids || [], investor_ids: mgr.granted_investor_ids || [],
+  can_value: on } });
+
+await grant(true);
+await signIn(MANAGER1);
+check('granted, the same manager is offered the tab', (await entry().count()) === 1);
+check('and reaches it', (await reach()) === 200, String(await reach()));
+await grant(false);
+await signIn(MANAGER1);
+check('withdrawn, it is gone from their menu again', (await entry().count()) === 0);
+if (was) await grant(true);
 
 console.log('\nERRORS:', errs.length ? errs.join('\n  ') : 'none');
 check('no page errors', errs.length === 0);

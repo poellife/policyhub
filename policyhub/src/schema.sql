@@ -157,6 +157,20 @@ CREATE INDEX IF NOT EXISTS idx_user_investors_investor ON user_investors (invest
 -- instead of waiting out the 12-hour expiry.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
 
+/* Who may reach Policy Valuation.
+ *
+ * A separate application, joined to this one by a door at /valuation, and
+ * not everybody with a staff account should be able to walk through it: a
+ * valuation is what the firm would pay, which is a different thing from
+ * what the firm owns.
+ *
+ * A column rather than a role, because it does not line up with the roles.
+ * It is not "what a manager can do" — it is a tool handed to particular
+ * people, and it is granted by name in Settings. Administrators have it
+ * inherently and are not marked; an investor can never hold it, whatever
+ * this column says, because the door checks the role as well. */
+ALTER TABLE users ADD COLUMN IF NOT EXISTS can_value BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Failed sign-in attempts, kept in the database rather than in process memory
 -- so that the throttle survives a restart or redeploy and is shared by every
 -- instance. Rows older than the window are pruned as they are counted.

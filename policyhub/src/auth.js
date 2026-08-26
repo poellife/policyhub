@@ -120,7 +120,8 @@ export async function loadScope(req, res, next) {
   // their 12-hour token expires, a role change applies at once, and a deleted
   // account cannot keep using a still-valid cookie.
   const { rows } = await q(
-    `SELECT is_active, role, investor_id, token_version, must_change_password
+    `SELECT is_active, role, investor_id, token_version, must_change_password,
+            can_value
        FROM users WHERE id = $1`, [req.user.uid]
   );
   const u = rows[0];
@@ -161,6 +162,10 @@ export async function loadScope(req, res, next) {
 
   req.user.role = u.role;
   req.user.iid = u.investor_id;
+  /* Read from the account on every request, like the role is, so a grant
+     taken away applies at once rather than at the end of a session. An
+     investor never holds it whatever the column says. */
+  req.user.canValue = u.role !== 'investor' && (u.role === 'admin' || !!u.can_value);
   req.user.fundIds = null;
   req.user.investorIds = null;
   if (u.role === 'manager') {
@@ -221,10 +226,25 @@ export async function updateUser(req, res) {
   if (role === 'investor' && !Number.isInteger(investorId))
     return res.status(400).json({ error: 'Choose which investor this login belongs to' });
 
+  /* Policy Valuation, granted by name.
+   *
+   * Left as it was unless the request actually says something about it, so
+   * a screen that predates the grant cannot silently strip it by omission.
+   * Never held by an investor and never needed by an administrator, who
+   * has it inherently -- storing it on either would be a value the door
+   * ignores, which is a lie waiting in a table. */
+  const canValue = 'can_value' in req.body
+    ? !!req.body.can_value && role !== 'investor' && role !== 'admin'
+    : !!target.can_value && role !== 'investor' && role !== 'admin';
+
   await q(
-    `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4 WHERE id = $5`,
-    [String(req.body.full_name ?? target.full_name), role, isActive, investorId, id]
+    `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4,
+            can_value = $6 WHERE id = $5`,
+    [String(req.body.full_name ?? target.full_name), role, isActive, investorId, id, canValue]
   );
+  if (!!target.can_value !== canValue)
+    await audit(req.user.uid, 'user', id, 'update',
+      `${canValue ? 'granted' : 'withdrew'} Policy Valuation for ${target.email}`);
 
   // Entity access is replaced wholesale, so removing one is just leaving it out.
   if (role === 'manager') {
