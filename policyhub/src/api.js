@@ -239,7 +239,22 @@ const int = (v) => {
   const n = num(v);
   return n === null ? null : Math.round(n);
 };
-const str = (v) => (v === null || v === undefined ? '' : String(v).trim());
+/* Text on its way to a text column.
+ *
+ * Trimmed, and stripped of the control characters a keyboard cannot
+ * produce but a clipboard can. This is not tidiness: PostgreSQL text
+ * cannot hold a NUL byte at all, and one pasted in from a PDF or a Word
+ * document -- which is exactly how a medical summary or an underwriter's
+ * note arrives -- makes the INSERT fail with `invalid byte sequence for
+ * encoding "UTF8": 0x00`. That reached the browser as a five-word
+ * apology and a reference number, for a paste that looked perfectly
+ * ordinary on the screen.
+ *
+ * Tab, newline and carriage return are kept: the free-text fields are
+ * written one bullet per line, and stripping those would flatten them. */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+const str = (v) => (v === null || v === undefined ? ''
+  : String(v).replace(CONTROL_CHARS, '').trim());
 
 /**
  * The owner entities a screen is asking about.
@@ -297,6 +312,97 @@ export const date = (v) => {
   return null;
 };
 
+/* ------------------------- what will actually fit --------------------
+ *
+ * `num`, `int` and `date` are forgiving on purpose: they strip currency
+ * symbols, read a date four ways, and return null for anything they
+ * cannot make sense of. What they do NOT do is ask whether the result
+ * fits the column it is bound for — so a face amount with four extra
+ * digits, or a year typed as 19666, reached Postgres, came back as
+ * "numeric field overflow", and left the person looking at a five-word
+ * apology and a reference number.
+ *
+ * That is a validation failure wearing a server error's clothes. The
+ * limits below are the column types, checked at the door, and the reply
+ * names the field and says what will fit.
+ */
+const INT4_MAX = 2147483647;
+
+/* Where the column type is not the real limit.
+ *
+ * `le_months` is an INTEGER, so Postgres will take two billion of them
+ * quite happily — and then the analysis adds that many months to a date
+ * and throws, which took out the whole Opportunities list rather than the
+ * one bad row. A life expectancy is a number of months a person might
+ * live; a hundred years of them is already generous. */
+const FIELD_RANGE = {
+  le_months: [0, 1200], le_months_2: [0, 1200],
+  issue_age: [0, 120], grace_period_days: [0, 1825],
+};
+const NUMERIC_16_2_MAX = 1e14;      // NUMERIC(16,2): 14 digits before the point
+const YEAR_MIN = 1850, YEAR_MAX = 2200;
+
+/** A refusal the person reading it can act on, not a 500. */
+const bad = (message) => Object.assign(new Error(message), { status: 400 });
+
+/* Column names as the forms say them. Anything not listed reads well
+   enough with its underscores taken out. */
+const FIELD_LABEL = {
+  face_amount: 'Death benefit', death_benefit: 'Death benefit',
+  asking_price: 'Asking price', annual_premium: 'Annual premium',
+  premium_required: 'Premium', acquisition_cost: 'Acquisition cost',
+  account_value: 'Account value', cash_surrender_value: 'Cash surrender value',
+  cost_of_insurance: 'Cost of insurance', loan_balance: 'Loan balance',
+  premium_paid_to_date: 'Premium paid to date', monthly_deduction: 'Monthly deduction',
+  le_months: 'Life expectancy (months)', le_months_2: 'Second life expectancy (months)',
+  insured_dob: 'Date of birth', dob: 'Date of birth',
+  issue_age: 'Issue age', grace_period_days: 'Grace period (days)',
+  amount: 'Amount', face: 'Death benefit',
+};
+const fieldLabel = (col) => FIELD_LABEL[col] || col.replace(/_/g, ' ');
+
+/** Refuse a coerced value the column could not hold. */
+function fits(col, coerce, value) {
+  if (value === null || value === undefined) return value;
+  const range = FIELD_RANGE[col];
+  if (range && (coerce === int || coerce === num)) {
+    const [lo, hi] = range;
+    if (!Number.isFinite(value) || value < lo || value > hi)
+      throw bad(`${fieldLabel(col)} must be between ${lo} and ${hi}.`);
+    return value;
+  }
+  if (coerce === int) {
+    if (!Number.isFinite(value) || Math.abs(value) > INT4_MAX)
+      throw bad(`${fieldLabel(col)} is too large. Enter a whole number under `
+        + `${INT4_MAX.toLocaleString('en-US')}.`);
+  } else if (coerce === num) {
+    if (!Number.isFinite(value) || Math.abs(value) >= NUMERIC_16_2_MAX)
+      throw bad(`${fieldLabel(col)} is too large — the most this field holds is `
+        + '99,999,999,999,999.99. Check for an extra digit.');
+  } else if (coerce === date) {
+    /* `date` reads four notations and is deliberately forgiving about
+       which one it was given. What it does not do is ask whether the
+       result is a day that exists: "2030-13-45" satisfies the pattern,
+       reaches Postgres, and comes back as a date/time field overflow.
+       A month of 13 is a typo, and should read as one. */
+    /* Shape first, then the calendar. A year typed with five digits comes
+       back out of `date` as something that is not a date at all, and
+       telling somebody to check the month when the year is the problem
+       sends them looking in the wrong place. */
+    const shape = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value));
+    const y = shape && Number(shape[1]);
+    if (!shape || !(y >= YEAR_MIN && y <= YEAR_MAX))
+      throw bad(`${fieldLabel(col)} does not look like a real date — check the year.`);
+    const m = Number(shape[2]), d = Number(shape[3]);
+    const real = new Date(Date.UTC(y, m - 1, d));
+    const exists = real.getUTCFullYear() === y
+      && real.getUTCMonth() === m - 1 && real.getUTCDate() === d;
+    if (!exists)
+      throw bad(`${fieldLabel(col)} is not a day that exists — check the month and the day.`);
+  }
+  return value;
+}
+
 /** Build a parameterised INSERT/UPDATE from a whitelist of columns. */
 function buildSet(fields, body, start = 1) {
   const cols = [], vals = [], sets = [];
@@ -304,7 +410,7 @@ function buildSet(fields, body, start = 1) {
   for (const [col, coerce] of Object.entries(fields)) {
     if (!(col in body)) continue;
     cols.push(col);
-    vals.push(coerce(body[col]));
+    vals.push(fits(col, coerce, coerce(body[col])));
     sets.push(`${col} = $${i++}`);
   }
   return { cols, vals, sets, next: i };
@@ -2453,9 +2559,21 @@ async function loadOpportunity(req, id) {
      receive, and every figure on that page has to be the same money. */
   const { rows: fr } = await q('SELECT carry_pct FROM funds WHERE id = $1', [o.fund_id]);
   const oppCarry = me === null ? 0 : Number(fr[0]?.carry_pct) || 0;
-  o.analysis = analyseOpportunity(o, 1, oppCarry);
-  // Alongside the whole-policy figures, what their own slice would cost.
-  o.my_analysis = share > 0 ? analyseOpportunity(o, share, oppCarry) : null;
+  /* Same rule as the list: a deal whose figures cannot be run through the
+     analysis still has a page, showing everything else it holds. Refusing
+     to open it at all would hide the very record somebody needs to see in
+     order to correct it. */
+  try {
+    o.analysis = analyseOpportunity(o, 1, oppCarry);
+    // Alongside the whole-policy figures, what their own slice would cost.
+    o.my_analysis = share > 0 ? analyseOpportunity(o, share, oppCarry) : null;
+  } catch (e) {
+    console.error(`[opportunity ${o.id}] could not be analysed:`, e.message);
+    o.analysis = null;
+    o.my_analysis = null;
+    o.analysis_error = 'The scenarios could not be worked out from the figures on this '
+      + 'record — check the life expectancy, the dates and the premium schedule.';
+  }
   return o;
 }
 
@@ -2506,8 +2624,16 @@ router.get('/opportunities', wrap(async (req, res) => {
   const list = rows.map((o) => {
     const taken = Number(o.taken_pct) || 0;
     const withPremiums = { ...o, premiums: schedules.get(o.id) || [] };
-    const a = analyseOpportunity(withPremiums, 1,
-      me === null ? 0 : Number(o.carry_pct) || 0);
+    /* The analysis is arithmetic over dates and figures somebody typed,
+       and one impossible row must not take the list down with it. A deal
+       that cannot be analysed still belongs on the screen — without its
+       projected rate, which is the honest way to show that it has none. */
+    let a = {};
+    try {
+      a = analyseOpportunity(withPremiums, 1, me === null ? 0 : Number(o.carry_pct) || 0);
+    } catch (e) {
+      console.error(`[opportunity ${o.id}] could not be analysed:`, e.message);
+    }
     return {
       ...o,
       taken_pct: taken,

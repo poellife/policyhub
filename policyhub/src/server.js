@@ -178,6 +178,34 @@ app.use((err, req, res, _next) => {
     return res.status(400).json({ error: 'Too many files at once — 20 is the limit' });
   if (err.code === 'LIMIT_UNEXPECTED_FILE')
     return res.status(400).json({ error: 'Unexpected upload field' });
+  /* A figure or a date the database will not take. The field whitelists
+     check the common ones by name before they get this far and say which
+     field it was; this is the net under the rest — anything reaching a
+     column by another route. Either way it is the person's input that is
+     wrong, not the server, and a 500 says the opposite. */
+  if (err.code === '22003')
+    return res.status(400).json({
+      error: 'One of the figures is too large for the field it was entered in. '
+        + 'Check the amounts for an extra digit and try again.' });
+  if (err.code === '22007' || err.code === '22008')
+    return res.status(400).json({
+      error: 'One of the dates could not be read. Check the year and try again.' });
+  if (err.code === '22P02')
+    return res.status(400).json({
+      error: 'One of the values is not the kind of thing that field takes. '
+        + 'Check the figures and dates and try again.' });
+  if (err.code === '23514')
+    return res.status(400).json({
+      error: 'One of the values is outside what this field allows.' });
+  /* A byte the database cannot store — in practice a NUL carried in on a
+     paste from a PDF or a word processor. The text fields strip these
+     before they get here; this catches whatever arrives by another door,
+     an import most likely, and says something a person can act on. */
+  if (err.code === '22021')
+    return res.status(400).json({
+      error: 'Some of the text pasted in carries characters the database cannot store — '
+        + 'usually from a PDF or a Word document. Paste it into a plain text editor first, '
+        + 'or retype the affected field.' });
   // Deliberate, user-facing failures raised by the app itself.
   if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.message });
 

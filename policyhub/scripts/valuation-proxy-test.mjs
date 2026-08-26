@@ -225,6 +225,55 @@ if (!configured) {
     odd.status === 405, String(odd.status));
 }
 
+/* ---------------------- the history is a record ----------------------
+ * Running a valuation and reading back everything the desk has ever
+ * priced are different acts. The second is the firm's pipeline — for
+ * whom, at what, how often — so it stays with administrators even where
+ * the tool itself has been handed to a manager.
+ * ------------------------------------------------------------------ */
+console.log('\nBUT THE HISTORY STAYS WITH ADMINISTRATORS');
+
+const hist = (cookie, path = '/valuation/valuations') =>
+  fetch(`${BASE}${path}`, { headers: { Cookie: cookie }, redirect: 'manual' });
+
+if (mgr) {
+  await setGrant(true);
+  const priced = await login(MANAGER1.email, MANAGER1.password);
+
+  check('a granted manager can still reach the tool itself',
+    (await get(priced)).status === 200, String((await get(priced)).status));
+
+  const h = await hist(priced);
+  check('but the history page is refused', h.status === 403, String(h.status));
+  const words = await h.text();
+  check('in words rather than in JSON', /administrators/i.test(words),
+    words.slice(0, 120));
+  /* The refusal explains itself, so it says the words "valuation history"
+     on purpose. What must not be there is the history: no run table, no
+     column headings, no job identifiers. */
+  check('and nothing of the history itself reaches them',
+    !/<table|Ran by|<td|Priced at/i.test(words), words.slice(0, 160));
+
+  const api403 = await hist(priced, '/valuation/api/valuations');
+  check('the machine-readable one is refused too', api403.status === 403,
+    String(api403.status));
+  const del403 = await fetch(`${BASE}/valuation/valuations/del/anything`, {
+    method: 'POST', headers: { Cookie: priced }, redirect: 'manual' });
+  check('and so is deleting a run', del403.status === 403, String(del403.status));
+
+  /* The refusal is on the path, not on the word: pricing routes that
+     merely resemble it must still go through. */
+  const still = await fetch(`${BASE}/valuation/`, { headers: { Cookie: priced } });
+  check('the pricing screen is untouched by the rule', still.status === 200,
+    String(still.status));
+
+  await setGrant(false);
+}
+
+const adminHist = await hist(admin);
+check('an administrator reaches the history as before',
+  [200, 502, 503].includes(adminHist.status), String(adminHist.status));
+
 console.log(fails.length
   ? `\n${fails.length} VALUATION PROXY CHECK(S) FAILED:\n  ${fails.join('\n  ')}`
   : '\nALL VALUATION PROXY CHECKS PASSED');

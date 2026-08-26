@@ -211,8 +211,29 @@ const mayValue = (req, res, next) => {
     + 'do that from Settings.'));
 };
 
+/* The history of every run, and the paperwork each one produced.
+ *
+ * Running a valuation is one thing; reading back what the desk has priced
+ * — for whom, at what, and how often — is another. It is a record of the
+ * firm's pipeline, so it stays with administrators even when the tool
+ * itself has been granted to a manager.
+ *
+ * Enforced here rather than in the valuation service, because this is the
+ * side that knows what role the person holds. The service is told, so it
+ * can leave the link off the page, but it is not what decides. */
+const HISTORY_PATHS = /^\/(valuations|api\/valuations)(\/|\?|$)/;
+
+const historyIsAdminOnly = (req, res, next) => {
+  if (!HISTORY_PATHS.test(req.url)) return next();
+  if (req.user?.role === 'admin') return next();
+  res.status(403).type('html').send(page('Administrators only',
+    'The valuation history is the record of everything the desk has priced, so it '
+    + 'stays with administrators. Running a valuation is not affected — go back and '
+    + 'price a policy as usual.'));
+};
+
 export function mountValuation(app) {
-  app.use(PREFIX, refuseInHtml, ...authenticate, mayValue,
+  app.use(PREFIX, refuseInHtml, ...authenticate, mayValue, historyIsAdminOnly,
     async (req, res, next) => {
     const target = base();
     if (!target)
@@ -245,6 +266,10 @@ export function mountValuation(app) {
     headers['X-Forwarded-For'] = req.ip;
     headers['X-Forwarded-Proto'] = req.protocol;
     headers['X-Poel-User'] = String(req.user?.email || '');
+    /* So the service can leave the history link off the page for somebody
+       who would only be refused by it. The refusal above is what actually
+       holds — this only decides whether a link is drawn. */
+    headers['X-Poel-Role'] = String(req.user?.role || '');
 
     /* Producing a valuation is work, and work somebody paid for should be
        on the record like an export is. Reads are not logged: opening the

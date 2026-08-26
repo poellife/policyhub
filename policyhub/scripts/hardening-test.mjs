@@ -175,29 +175,41 @@ check('and names nothing about the database',
 const faultPolicy = await json(await api(admin, '/policies', { method: 'POST',
   body: { policy_number: `HARDEN-ERR-${Date.now()}`, carrier_name: 'Test Carrier',
           insured_last_name: 'Errprobe', fund_code: 'LCG1' } }));
-// A calendar-shaped date that is not a real date: it survives the input
-// sanitiser and fails in Postgres, which is exactly the class of unexpected
-// error whose message must not reach the browser.
+/* A calendar-shaped date that is not a real day.
+ *
+ * This used to reach Postgres and come back as a 500, and the check below
+ * asserted that it did — the point being that an unexpected fault must
+ * not carry a stack trace or a table name out to the browser.
+ *
+ * It is now caught at the door and refused by name, which is the better
+ * answer: "Values as of is not a day that exists" beats a reference
+ * number. So the assertion has changed with it. What still has to hold —
+ * and what this check is really for — is that whatever comes back, at
+ * whatever status, says nothing about the machinery behind it. */
 const fault = await api(admin, `/policies/${faultPolicy.id}/values`, { method: 'POST',
   body: { as_of_date: '2030-13-45' } });
 const faultBody = await json(fault);
 const faultText = JSON.stringify(faultBody);
 check('no stack trace ever comes back', !/\.js:\d+|at Object|node_modules/.test(faultText));
-if (mode === 'production') {
+check('and no database detail, whatever the status',
+  !/syntax|relation|column|pg_|SELECT|INSERT/i.test(faultText), faultText.slice(0, 90));
+if (mode === 'production' && fault.status === 500) {
   check('production returns a generic message', /Something went wrong/.test(faultBody?.error || ''),
     faultBody?.error);
   check('with a reference to quote', typeof faultBody?.ref === 'string' && faultBody.ref.length >= 6,
     faultBody?.ref);
-  check('and no database detail',
-    !/syntax|relation|column|pg_|SELECT|INSERT/i.test(faultText), faultText.slice(0, 90));
-} else {
+} else if (mode !== 'production') {
   console.log('  NOTE  server is in development mode — detailed errors are expected here;');
   console.log('        the generic-message path is asserted when NODE_ENV=production.');
   check('a reference is attached even in development',
     fault.status !== 500 || typeof faultBody?.ref === 'string', faultBody?.ref);
 }
-check('the fault really was a server error, not a handled one', fault.status === 500,
-  `status ${fault.status}`);
+check('an impossible date is refused rather than crashing the request',
+  fault.status === 400, `status ${fault.status}`);
+check('and the refusal names the field and the problem',
+  /day that exists|real date/i.test(faultBody?.error || ''), faultBody?.error);
+check('a fault is never answered with a 500 the caller caused',
+  fault.status !== 500, `status ${fault.status}`);
 await api(admin, `/policies/${faultPolicy.id}`, { method: 'DELETE',
   body: { confirm: faultPolicy.policy_number } });
 
