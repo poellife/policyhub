@@ -1,0 +1,10 @@
+node_modules/
+
+# Never commit anything that carries a working credential.
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+*.log
+shots/
