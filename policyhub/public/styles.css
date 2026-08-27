@@ -771,29 +771,29 @@ select[multiple] { padding: 6px; }
 .rpt-brand .brand-mark { background: #0a0a0a; }
 .rpt-brand-sub {
   font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
-  letter-spacing: 0.13em; color: #8f8f8f; margin-top: 5px; margin-left: 15px;
+  letter-spacing: 0.13em; color: #4a4a4a; margin-top: 5px; margin-left: 15px;
 }
 .rpt-head-right { text-align: right; }
 .rpt-title { font-size: 20px; font-weight: 700; letter-spacing: -0.03em; color: #0a0a0a; }
 .rpt-meta {
   font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
-  letter-spacing: 0.09em; color: #8f8f8f; margin-top: 4px;
+  letter-spacing: 0.09em; color: #4a4a4a; margin-top: 4px;
 }
 .rpt-confidential {
   font-family: var(--mono); font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.1em; color: #8f8f8f; margin-bottom: 20px;
+  letter-spacing: 0.1em; color: #4a4a4a; margin-bottom: 20px;
 }
 .rpt-h2 { font-size: 26px; font-weight: 700; letter-spacing: -0.035em; margin: 0 0 18px; color: #0a0a0a; }
 .rpt-h3 {
   font-family: var(--mono); font-size: 9.5px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.1em; color: #5c5c5c; margin: 0 0 10px;
+  letter-spacing: 0.1em; color: #333333; margin: 0 0 10px;
   padding-bottom: 6px; border-bottom: 1px solid #ededed;
 }
 .rpt-block { margin-bottom: 24px; }
 .rpt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
-.rpt-note { font-size: 11.5px; line-height: 1.6; color: #5c5c5c; margin: 0; }
+.rpt-note { font-size: 11.5px; line-height: 1.6; color: #3a3a3a; margin: 0; }
 /* The marker on a figure that carries a caveat, explained in the notes. */
-.rpt-flag { color: #8a8a8a; }
+.rpt-flag { color: #4a4a4a; }
 
 .rpt-tiles {
   display: grid; gap: 0; margin-bottom: 26px;
@@ -809,16 +809,16 @@ select[multiple] { padding: 6px; }
 .rpt-tile:last-child { border-right: none; }
 .rpt-tile-label {
   font-family: var(--mono); font-size: 8.5px; text-transform: uppercase;
-  letter-spacing: 0.1em; color: #8f8f8f; margin-bottom: 7px;
+  letter-spacing: 0.1em; color: #444444; margin-bottom: 7px;
 }
 .rpt-tile-value { font-size: 15.5px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.15;
   color: #0a0a0a; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.rpt-tile-note { font-size: 10px; color: #8f8f8f; margin-top: 6px; line-height: 1.4; }
+.rpt-tile-note { font-size: 10px; color: #444444; margin-top: 6px; line-height: 1.4; }
 
 table.rpt-table { width: 100%; border-collapse: collapse; font-size: 11.5px; color: #0a0a0a; }
 table.rpt-table th {
   font-family: var(--mono); font-size: 8.5px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.07em; color: #5c5c5c; text-align: left;
+  letter-spacing: 0.07em; color: #333333; text-align: left;
   padding: 7px 8px; border-bottom: 1px solid #c4c4c4; white-space: nowrap;
 }
 table.rpt-table td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; }
@@ -828,7 +828,7 @@ table.rpt-table tfoot td {
 }
 table.rpt-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 table.rpt-table .strong { font-weight: 600; }
-table.rpt-table .muted { color: #8f8f8f; }
+table.rpt-table .muted { color: #555555; }
 table.rpt-table-tight { font-size: 10px; }
 table.rpt-table-tight th { padding: 6px 5px; font-size: 8px; }
 table.rpt-table-tight td { padding: 5px; }
@@ -866,7 +866,7 @@ table.rpt-kv { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 table.rpt-kv td { padding: 5px 0; border-bottom: 1px solid #f4f4f4; }
 table.rpt-kv td:first-child {
   font-family: var(--mono); font-size: 8.5px; text-transform: uppercase;
-  letter-spacing: 0.07em; color: #8f8f8f; width: 45%;
+  letter-spacing: 0.07em; color: #444444; width: 45%;
 }
 table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
 
@@ -913,12 +913,12 @@ table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-n
 .opp-sheet .rpt-thesis { padding-top: 11px; margin-bottom: 10px; }
 
 .opp-sheet-sub {
-  font-size: 11.5px; color: #5c5c5c; margin: 0 0 16px; line-height: 1.5;
+  font-size: 11.5px; color: #333333; margin: 0 0 16px; line-height: 1.5;
 }
 .rpt-bullets { margin: 10px 0 0; padding-left: 16px; }
 .rpt-bullets li { font-size: 11.5px; line-height: 1.55; color: #2e2e2e; margin-bottom: 5px; }
 .rpt-para { font-size: 11.5px; line-height: 1.6; color: #2e2e2e; margin: 0; }
-span.rpt-dim { color: #a8a8a8; font-size: 10px; margin-left: 5px; }
+span.rpt-dim { color: #5f5f5f; font-size: 10px; margin-left: 5px; }
 .rpt-callout {
   border: 1px solid #e0e0e0; border-left: 3px solid #8f8f8f;
   padding: 12px 14px; background: #fafafa;
@@ -926,10 +926,10 @@ span.rpt-dim { color: #a8a8a8; font-size: 10px; margin-left: 5px; }
 .rpt-callout .rpt-h3 { border-bottom: none; padding-bottom: 2px; margin-bottom: 6px; }
 .rpt-thesis { border-top: 1px solid #ededed; padding-top: 16px; }
 table.rpt-scen tbody tr.at-le td { background: #f5f5f5; font-weight: 600; }
-table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
+table.rpt-table tr.rpt-zero td { color: #5f5f5f; }
 .rpt-disclaimer {
   margin-top: 26px; padding-top: 12px; border-top: 1px solid #ededed;
-  font-size: 8.5px; line-height: 1.5; color: #8f8f8f; text-align: justify;
+  font-size: 8.5px; line-height: 1.5; color: #444444; text-align: justify;
   break-inside: avoid;
 }
 /* The tail of the document — closing note, disclaimer, footer — belongs
@@ -950,12 +950,12 @@ table.rpt-table tr.rpt-zero td { color: #9a9a9a; }
   display: flex; justify-content: space-between; gap: 12px;
   margin-top: 26px; padding-top: 10px; border-top: 1px solid #ededed;
   font-family: var(--mono); font-size: 8.5px; text-transform: uppercase;
-  letter-spacing: 0.09em; color: #8f8f8f;
+  letter-spacing: 0.09em; color: #4a4a4a;
 }
 
 /* Reports always render on white, even when the app is in dark mode —
    they are documents, not screens. */
-.rpt-sheet .chart text { fill: #8f8f8f; }
+.rpt-sheet .chart text { fill: #4a4a4a; }
 .rpt-sheet .chart .gridline { stroke: #ededed; }
 .rpt-sheet .chart .axis-line { stroke: #c4c4c4; }
 .rpt-sheet .chart .line { stroke: #0a0a0a; }
