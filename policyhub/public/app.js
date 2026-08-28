@@ -5508,7 +5508,25 @@ async function opportunityView() {
 async function openOpportunityDialog(o) {
   if (!state.funds.length) { try { state.funds = await api('/funds'); } catch { /* scoped out */ } }
   const isNew = !o?.id;
-  openDialog(isNew ? 'New opportunity' : `Edit ${oppName(o)}`, `
+  /* Filled in by the reader below, posted after the opportunity exists —
+     a schedule has nowhere to attach until then. */
+  let readPremiums = [];
+  const dlg = openDialog(isNew ? 'New opportunity' : `Edit ${oppName(o)}`, `
+    ${isNew ? `
+    <div class="read-drop" id="readDrop">
+      <input type="file" id="readFiles" accept="application/pdf,.pdf" multiple hidden>
+      <div class="read-drop-face" id="readFace">
+        <strong>Read it off the documents</strong>
+        <span>Drop the illustration and any life-expectancy reports here, or
+          <button type="button" class="btn-link" id="readBrowse">choose files</button>.
+          They are read, the form below fills in, and the files are discarded.</span>
+      </div>
+      <div class="read-drop-busy" id="readBusy" hidden>
+        <span class="read-spin"></span>
+        <span id="readBusyText">Reading…</span>
+      </div>
+      <div id="readOut"></div>
+    </div>` : ''}
     <div class="field-row">
       ${inputField('Policy number', 'policy_number', o?.policy_number)}
       ${inputField('Carrier', 'carrier_name', o?.carrier_name)}
@@ -5582,13 +5600,133 @@ async function openOpportunityDialog(o) {
     if (v.fund_id === '') delete v.fund_id;
     if (isNew) {
       const made = await api('/opportunities', { method: 'POST', body: v });
-      toast('Opportunity created');
+      /* The illustration's ledger, as the schedule the one-pager prints.
+         Failing here must not lose the opportunity that was just created —
+         the schedule can be posted again from its own dialog. */
+      if (readPremiums.length) {
+        try {
+          await api(`/opportunities/${made.id}/premium-schedule`,
+            { method: 'POST', body: { rows: readPremiums } });
+        } catch (e) {
+          toast(`Created, but the premium schedule did not save: ${e.message}`);
+        }
+      }
+      toast(readPremiums.length
+        ? `Opportunity created with ${readPremiums.length} scheduled payment${
+          readPremiums.length === 1 ? '' : 's'}`
+        : 'Opportunity created');
       go(`#/opportunity/${made.id}`);
     } else {
       await api(`/opportunities/${o.id}`, { method: 'PUT', body: v });
       toast('Opportunity updated');
     }
   }, isNew ? 'Create' : 'Save');
+
+  if (isNew) wireDocumentReader(dlg, (rows) => { readPremiums = rows; });
+}
+
+/**
+ * The document reader on the New opportunity dialog.
+ *
+ * Everything it fills is an ordinary form field afterwards: nothing is
+ * locked, nothing is submitted, and a value it could not find is left
+ * blank rather than guessed at, so what still needs a person is visible.
+ */
+function wireDocumentReader(dlg, onPremiums) {
+  const zone = $('#readDrop', dlg);
+  if (!zone) return;
+  const input = $('#readFiles', dlg);
+  const face = $('#readFace', dlg);
+  const busy = $('#readBusy', dlg);
+  const busyText = $('#readBusyText', dlg);
+  const out = $('#readOut', dlg);
+
+  const setField = (name, value) => {
+    const el = dlg.querySelector(`[name="${name}"]`);
+    if (!el || value === undefined || value === null || value === '') return false;
+    if (el.tagName === 'SELECT') {
+      /* A product type or a state the list has never seen still belongs on
+         the form — as its own option, so it is visible and correctable
+         rather than silently dropped back to blank. */
+      if (![...el.options].some((op) => op.value === String(value)))
+        el.add(new Option(String(value), String(value)));
+      el.value = String(value);
+    } else if (el.hasAttribute('data-money')) {
+      el.value = groupDigits(String(value));
+    } else {
+      el.value = String(value);
+    }
+    el.classList.add('field-read');
+    return true;
+  };
+
+  const read = async (fileList) => {
+    const chosen = [...fileList].filter((f) => /\.pdf$/i.test(f.name));
+    if (!chosen.length) {
+      out.innerHTML = '<div class="error-box">Only PDFs can be read.</div>';
+      return;
+    }
+    face.hidden = true; busy.hidden = false; out.innerHTML = '';
+    busyText.textContent = `Reading ${chosen.length} document${chosen.length === 1 ? '' : 's'}…`;
+    /* A long illustration is minutes, and a progress bar that lies is worse
+       than none — so the wait says what it is doing and how long it takes. */
+    const started = Date.now();
+    const tick = setInterval(() => {
+      const s = Math.round((Date.now() - started) / 1000);
+      busyText.textContent = `Reading ${chosen.length} document${
+        chosen.length === 1 ? '' : 's'}… ${s}s — a long illustration takes a minute or two.`;
+    }, 1000);
+
+    const body = new FormData();
+    for (const f of chosen) body.append('files', f, f.name);
+    try {
+      const got = await api('/opportunities/extract', { method: 'POST', body });
+      const filled = Object.entries(got.fields || {})
+        .filter(([k, v]) => setField(k, v)).length;
+      onPremiums(got.premiums || []);
+      out.innerHTML = readSummary(got, filled);
+    } catch (e) {
+      out.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+    } finally {
+      clearInterval(tick);
+      busy.hidden = true; face.hidden = false;
+      input.value = '';
+    }
+  };
+
+  $('#readBrowse', dlg)?.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => input.files.length && read(input.files));
+  for (const ev of ['dragenter', 'dragover'])
+    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); });
+  for (const ev of ['dragleave', 'drop'])
+    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('over'); });
+  zone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files;
+    if (f?.length) read(f);
+  });
+}
+
+/** What was read, said plainly enough to check against the paperwork. */
+function readSummary(got, filled) {
+  const ROLE = {
+    illustration: 'in-force illustration', contract: 'policy contract',
+    statement: 'carrier statement', le_report: 'life-expectancy report', other: 'not recognised',
+  };
+  const files = (got.read || []).map((fn) => `<li><strong>${esc(fn)}</strong>
+    <span class="muted">— ${esc(ROLE[got.roles?.[fn]] || 'read')}</span></li>`).join('');
+  const les = (got.le_reports || []).map((r) => `<li>${esc(r.provider || 'LE report')}
+    — ${esc(String(r.mean_le50_months || '?'))} months${
+    r.report_date ? `, report ${esc(String(r.report_date))}` : ''}</li>`).join('');
+  return `
+    <div class="read-result">
+      <div class="read-result-head">${filled} field${filled === 1 ? '' : 's'} filled in${
+        got.premiums?.length ? ` · ${got.premiums.length} premium payments scheduled` : ''}</div>
+      ${files ? `<ul class="read-list">${files}</ul>` : ''}
+      ${les ? `<div class="read-sub">Life expectancy</div><ul class="read-list">${les}</ul>` : ''}
+      ${got.notes ? `<div class="read-note">${esc(got.notes)}</div>` : ''}
+      <div class="read-check">Check every figure against the documents before you post it.
+        The price is not read from anything — it is what you agreed.</div>
+    </div>`;
 }
 
 /** Months added to a YYYY-MM-DD date, clamped to the end of the month. */
