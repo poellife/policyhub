@@ -1,0 +1,136 @@
+import { chromium } from 'playwright';
+import { BASE, ADMIN, MANAGER1 } from './test-config.mjs';
+const S='/home/claude/shots';
+const fails=[]; const errs=[];
+const check=(n,ok,x='')=>{console.log(`${ok?'  PASS':'  FAIL'}  ${n}${x?` — ${x}`:''}`); if(!ok)fails.push(n);};
+const br=await chromium.launch({executablePath:'/opt/pw-browsers/chromium'});
+async function session(email,pass){
+  const ctx=await br.newContext({viewport:{width:1500,height:1000}});
+  const p=await ctx.newPage();
+  p.on('pageerror',e=>errs.push(`${email}: ${e.message}`));
+  p.on('console',m=>m.type()==='error'&&!/40[0134]/.test(m.text())&&errs.push(`${email}: ${m.text()}`));
+  await p.goto(BASE); await p.fill('#email',email); await p.fill('#password',pass);
+  await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeout:12000});
+  return p;
+}
+
+console.log('MANAGER NAVIGATION');
+const pm = await session(MANAGER1.email,MANAGER1.password);
+const nav = await pm.$$eval('.nav a', a=>a.map(x=>x.textContent.trim()));
+check('no Settings tab, only Account', !nav.includes('Settings') && nav.includes('Account'), nav.join('/'));
+check('has the working sections',
+  ['Dashboard','Policies','Servicing','Insureds','Investors','Documents','Reports']
+    .every(n=>nav.includes(n)), nav.join('/'));
+// Importing moved under Account, being a setup job rather than a daily one.
+check('and importing is no longer a menu item', !nav.includes('Import'), nav.join('/'));
+const bar = await pm.locator('.topbar-right').textContent();
+check('top bar shows their entity', bar.includes('LCG1'), bar.trim());
+await pm.screenshot({path:`${S}/m1-manager-dashboard.png`,fullPage:true});
+
+console.log('\nSCOPED DATA');
+await pm.goto(`${BASE}/#/policies`); await pm.waitForSelector('table.data tbody tr'); await pm.waitForTimeout(500);
+const rows = await pm.locator('table.data tbody tr').count();
+// Count against what the API reports for this manager rather than a fixed
+// number — other suites add and remove policies in the same database.
+const apiRows = await pm.evaluate(() => fetch('/api/policies').then((r) => r.json()).then((r) => r.length));
+check('sees only their entity\'s policies', rows > 0 && rows === apiRows, `${rows} rows`);
+const grid = await pm.locator('table.data').textContent();
+check('no other entity appears in the grid', !grid.includes('LCG2'));
+await pm.screenshot({path:`${S}/m2-manager-policies.png`,fullPage:true});
+
+console.log('\nWRITE CONTROLS PRESENT');
+check('New policy button present', (await pm.locator('#newPolicyBtn').count())===1);
+await pm.click('table.data tbody tr:first-child'); await pm.waitForSelector('.tabs'); await pm.waitForTimeout(600);
+check('Edit policy present', (await pm.locator('#editBtn').count())===1);
+check('Delete policy present', (await pm.locator('#deletePolicyBtn').count())===1);
+check('Add investor present', (await pm.locator('#addOwnerBtn').count())===1);
+check('Add insured present', (await pm.locator('#addLifeBtn').count())===1);
+await pm.screenshot({path:`${S}/m3-manager-policy.png`,fullPage:true});
+
+// actually perform an edit
+await pm.click('#editBtn'); await pm.waitForSelector('dialog[open]');
+await pm.fill('dialog textarea[name="notes"]', 'Reviewed by portfolio manager');
+await pm.click('dialog button[type=submit]'); await pm.waitForTimeout(1200);
+check('manager edit persists', (await pm.locator('.main').textContent()).includes('Reviewed by portfolio manager'));
+
+console.log('\nSETTINGS IS UNREACHABLE');
+await pm.goto(`${BASE}/#/settings`); await pm.waitForTimeout(1200);
+const settingsTxt = await pm.locator('#main').textContent();
+check('account page has no admin panels',
+  !settingsTxt.includes('Owner entities') && !settingsTxt.includes('Activity log') && !settingsTxt.includes('Add user'),
+  settingsTxt.slice(0,90).replace(/\s+/g,' '));
+check('account page still allows a password change', settingsTxt.includes('Change your password'));
+check('and carries the documents cabinet nowhere near it',
+  !settingsTxt.includes('A document with nobody named against it'),
+  settingsTxt.slice(0, 90).replace(/\s+/g, ' '));
+
+console.log('\nIMPORT IS AVAILABLE');
+check('their account page offers the importer',
+  (await pm.locator('a[href="#/import"]').count()) >= 1);
+await pm.goto(`${BASE}/#/import`); await pm.waitForSelector('#dropzone');
+check('import screen reachable', await pm.isVisible('#dropzone'));
+
+console.log('\nINVESTORS SCOPED');
+await pm.goto(`${BASE}/#/investors`);
+await pm.waitForFunction(()=>document.querySelector('h1')?.textContent==='Investors');
+await pm.waitForTimeout(600);
+const invRows = await pm.locator('table.data tbody tr').count();
+// Scoped means fewer than an admin sees, not fewer than some fixed number:
+// the fixture book gains investors as other suites run.
+const adminPeek = await session(ADMIN.email, ADMIN.password);
+const adminInvCount = await adminPeek.evaluate(
+  () => fetch('/api/investors').then((r) => r.json()).then((x) => x.length));
+check('investor directory is scoped', invRows >= 1 && invRows < adminInvCount,
+  `${invRows} of ${adminInvCount}`);
+await pm.screenshot({path:`${S}/m4-manager-investors.png`,fullPage:true});
+
+console.log('\nFILING A NEW POLICY');
+/* A manager files policies under the entities an administrator put in their
+   hands. Creating an entity is not theirs to do — and an entity they made
+   would not be one they were assigned, so the policy would disappear the
+   moment they saved it. The dialog therefore must not offer it: an option
+   that always fails on Save is worse than no option, because the failure
+   arrives after the form has been filled in. */
+await pm.goto(`${BASE}/#/policies`);
+await pm.waitForSelector('table.data tbody tr'); await pm.waitForTimeout(500);
+await pm.click('#newPolicyBtn');
+await pm.waitForSelector('dialog[open] #fundSelect'); await pm.waitForTimeout(400);
+const fundOptions = await pm.$$eval('dialog[open] #fundSelect option',
+  (o) => o.map((x) => ({ value: x.value, label: x.textContent.trim() })));
+check('the owner entity list offers their own entities',
+  fundOptions.some((o) => o.value === 'LCG1'), fundOptions.map((o) => o.label).join(' | '));
+check('and does not offer to create one',
+  !fundOptions.some((o) => o.value === '__new__'), fundOptions.map((o) => o.label).join(' | '));
+check('nor to leave it unowned, which they could not see afterwards',
+  !fundOptions.some((o) => o.value === '' && /No owner/i.test(o.label)),
+  fundOptions.map((o) => o.label).join(' | '));
+check('choosing one is required', await pm.locator('dialog[open] #fundSelect')
+  .evaluate((el) => el.required));
+await pm.locator('dialog[open] button', { hasText: 'Cancel' }).first().click();
+await pm.waitForTimeout(400);
+
+/* And an admin still can create one from here — the option is scoped, not
+   removed. */
+const adminMaker = await session(ADMIN.email, ADMIN.password);
+await adminMaker.goto(`${BASE}/#/policies`);
+await adminMaker.waitForSelector('table.data tbody tr'); await adminMaker.waitForTimeout(500);
+await adminMaker.click('#newPolicyBtn');
+await adminMaker.waitForSelector('dialog[open] #fundSelect'); await adminMaker.waitForTimeout(300);
+check('an administrator is still offered a new entity',
+  await adminMaker.locator('dialog[open] #fundSelect option[value="__new__"]').count() === 1);
+await adminMaker.locator('dialog[open] button', { hasText: 'Cancel' }).first().click();
+
+console.log('\nADMIN STILL SEES EVERYTHING');
+const admin = await session(ADMIN.email,ADMIN.password);
+const anav = await admin.$$eval('.nav a', a=>a.map(x=>x.textContent.trim()));
+check('admin keeps Settings', anav.includes('Settings'));
+await admin.goto(`${BASE}/#/settings`); await admin.waitForSelector('#pwForm'); await admin.waitForTimeout(700);
+const usersTbl = await admin.locator('.card').filter({hasText:'Users'}).textContent();
+check('user list shows manager entities', usersTbl.includes('LCG1'), usersTbl.replace(/\s+/g,' ').slice(0,140));
+await admin.screenshot({path:`${S}/m5-admin-users.png`,fullPage:true});
+
+console.log('\nERRORS:', errs.length?errs.join('\n  '):'none');
+check('no page errors', errs.length===0);
+await br.close();
+console.log(fails.length?`\nFAILED: ${fails.join(', ')}`:'\nALL MANAGER UI CHECKS PASSED');
+process.exit(fails.length?1:0);
