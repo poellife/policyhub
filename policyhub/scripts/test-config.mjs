@@ -37,6 +37,17 @@ for (const file of ['.env.test', '.env.test.local']) {
   }
 }
 
+/* A few suites import a server module directly — the mail templates, the
+   outbox, the account seeder — and those modules open the database as the
+   application does, from DATABASE_URL. The application no longer carries a
+   development fallback for that (a credential in source is a credential in
+   source, however local), so the tests have to supply one. They already
+   name the database in TEST_DATABASE_URL; this makes that one variable
+   enough, rather than asking anybody to set the same address twice.
+   An explicit DATABASE_URL always wins. */
+if (!process.env.DATABASE_URL && process.env.TEST_DATABASE_URL)
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+
 export const BASE = process.env.TEST_BASE || 'http://localhost:3000';
 
 function need(name) {
