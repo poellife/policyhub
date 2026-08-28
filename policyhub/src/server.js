@@ -7,10 +7,11 @@ import multer from 'multer';
 
 import crypto from 'node:crypto';
 
-import { initDb, explainDbError } from './db.js';
+import { initDb, explainDbError, audit } from './db.js';
 import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
+import { readDocuments } from './extract.js';
 import { startMailWorker } from './mail.js';
 // The valuation model is a separate program; this is the door to it.
 import { mountValuation } from './valuation.js';
@@ -118,6 +119,47 @@ const oneAtATime = (req, res, next) => {
    time, larger, and stored rather than parsed. A signed LLC agreement or a
    scanned K-1 runs past 5 MB often enough to be annoying, and only one is
    held in memory at once, so this gets its own limit. */
+/* Reading an opportunity off its paperwork.
+ *
+ * Same shape of upload as a document — a handful of PDFs, larger than a
+ * CSV, held in memory only for as long as it takes to post them on to
+ * the valuation service. Nothing is stored, here or there.
+ *
+ * One at a time per account: reading is minutes of somebody else's
+ * compute and costs real money, and a double-click should queue behind
+ * itself rather than buy the same answer twice.
+ */
+const readUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024, files: 6, fields: 8 },
+});
+const reading = new Set();
+app.post('/api/opportunities/extract', authenticate,
+  requireRole('admin', 'editor', 'manager'),
+  (req, res, next) => {
+    if (reading.has(req.user.uid))
+      return res.status(429).json({
+        error: 'Documents are already being read on this account. '
+          + 'Give it a moment — a long illustration takes a minute or two.' });
+    reading.add(req.user.uid);
+    res.on('finish', () => reading.delete(req.user.uid));
+    res.on('close', () => reading.delete(req.user.uid));
+    next();
+  },
+  readUpload.fields([{ name: 'files', maxCount: 6 }]),
+  wrap(async (req, res) => {
+    const list = req.files?.files || [];
+    if (!list.length) return res.status(400).json({ error: 'No documents uploaded' });
+    const out = await readDocuments(list);
+    /* Somebody's compute was spent, and a medical file passed through this
+       server. Both belong on the record; the filenames do, the contents
+       emphatically do not. */
+    await audit(req.user.uid, 'opportunity', null, 'read',
+      `read ${list.length} document(s) into a new opportunity: `
+      + list.map((f) => f.originalname).join(', '));
+    res.json(out);
+  }));
+
 const docUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 12 },
@@ -191,6 +233,17 @@ app.use((req, res, next) => {
  * against a short reference the user can quote, and return only that.
  */
 app.use((err, req, res, _next) => {
+  /* A failure the application raised on purpose, with a message written
+     for the person who will read it.
+     
+     `expose` is what separates one of those from a fault. The rule below
+     it passes 4xx through, which covers most of them — but a deliberate
+     503 ("that service is not configured") or 504 ("reading took too
+     long") is not a 4xx, and was arriving as a five-word apology and a
+     reference number. The status a deliberate failure chose is the status
+     it should get. */
+  if (err.expose && err.status >= 400 && err.status <= 599)
+    return res.status(err.status).json({ error: err.message });
   if (err.code === '23505') return res.status(409).json({ error: 'That record already exists' });
   if (err.code === '23503') return res.status(409).json({ error: 'Another record still refers to this one' });
   if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File is too large (5 MB max)' });
