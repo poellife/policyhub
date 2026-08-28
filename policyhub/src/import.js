@@ -185,22 +185,33 @@ async function importPolicies(rows, opts, user) {
 
       const insuredId = await resolveInsured(row);
       const fundId = await resolveFund(row);
-      const existingId = await findPolicyId(row);
 
-      // A portfolio manager may only import into their own entities, and may
-      // not overwrite a policy that currently belongs to someone else's.
+      /* Look the policy up INSIDE the caller's entities.
+       *
+       * This used to search the whole book and check afterwards. That was
+       * safe — the check rejected a match in somebody else's entity — but
+       * it was the wrong shape twice over. A row carrying no carrier
+       * matches on the policy number alone, and `ORDER BY id LIMIT 1`
+       * returns the oldest: a manager updating their own policy could be
+       * handed another entity's row of the same number, and told their
+       * own policy was not theirs. And every other importer here already
+       * passes the scope in. Scoping the query is the same rule, stated
+       * once, where it cannot be forgotten. */
+      const existingId = await findPolicyId(row, allowedFunds);
+
+      // A portfolio manager may only import into their own entities.
       if (allowedFunds) {
         if (!allowedFunds.includes(fundId)) {
           result.errors.push({ line,
             message: `Owner "${str(row.owner_account) || str(row.fund_code) || 'blank'}" is not one of your entities` });
           continue;
         }
-        if (existingId) {
-          const { rows: cur } = await q('SELECT fund_id FROM policies WHERE id = $1', [existingId]);
-          if (!cur[0] || !allowedFunds.includes(cur[0].fund_id)) {
-            result.errors.push({ line, message: 'That policy belongs to another entity' });
-            continue;
-          }
+        /* Nothing was found within reach. If the number exists outside it,
+           say so plainly — the unique constraint would refuse the insert a
+           moment later with a message that explains nothing. */
+        if (!existingId && await findPolicyId(row)) {
+          result.errors.push({ line, message: 'That policy belongs to another entity' });
+          continue;
         }
       }
 

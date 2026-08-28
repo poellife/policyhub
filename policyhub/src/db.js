@@ -14,12 +14,22 @@ pg.types.setTypeParser(1082, (v) => v); // keep DATE as plain YYYY-MM-DD string
 
 const isProd = process.env.NODE_ENV === 'production';
 
-const connectionString =
-  process.env.DATABASE_URL ||
-  (isProd ? '' : 'postgres://lcg:lcgdev@localhost:5432/lifesettle');
+/* No credential lives in this file, not even a local one.
+ *
+ * There used to be a development fallback here — a username and password
+ * for a localhost database, used when DATABASE_URL was unset outside
+ * production. It was harmless in the sense that it reached nothing real,
+ * and a liability in every other sense: a scanner cannot tell a throwaway
+ * password from a live one, a reader learns a credential this project
+ * uses, and "it is only the dev one" is the sentence that precedes most
+ * leaked secrets. The address belongs in .env, which is not committed. */
+const connectionString = process.env.DATABASE_URL || '';
 
 if (!connectionString)
-  throw new Error('DATABASE_URL is not set. Refusing to start.');
+  throw new Error(
+    'DATABASE_URL is not set. Refusing to start.\n'
+    + 'Copy .env.example to .env and put your database address in it, '
+    + 'or set DATABASE_URL in the environment.');
 
 // Managed Postgres (Render, Railway, Neon, …) expects TLS; a local dev server
 // usually has none. Default on that, with PGSSL as an explicit override.

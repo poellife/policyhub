@@ -20,6 +20,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
+/* Express announces itself in a header on every response. Knowing the
+   framework and often its version is the first thing an attacker looks
+   for, and nothing here needs it said. */
+app.disable('x-powered-by');
 app.use(cookieParser());
 
 // Baseline security headers. No external assets are loaded, so the policy is strict.
@@ -27,6 +31,22 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
+  /* Nothing in the portal uses a camera, a microphone, a location or a
+     payment handler, so nothing here — or anything that ever manages to
+     run here — may ask for one. */
+  res.setHeader('Permissions-Policy',
+    'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), '
+    + 'microphone=(), payment=(), usb=(), interest-cohort=()');
+  /* A window this application opens, and any window that opens it, are
+     severed from it: no other document gets a handle on ours. */
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Origin-Agent-Cluster', '?1');
+  /* Flash and Acrobat cross-domain policy files: none of this is ours. */
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  /* Prefetching leaks which hostnames a signed-in person's browser is
+     about to reach, to their resolver, before they click anything. */
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
   /* Nothing here belongs in a search result.
    *
    * index.html carries a robots meta tag, but that only covers the one
