@@ -1,0 +1,310 @@
+import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
+import cookieParser from 'cookie-parser';
+import multer from 'multer';
+
+import crypto from 'node:crypto';
+
+import { initDb, explainDbError, audit } from './db.js';
+import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } from './api.js';
+import { authenticate, requireRole } from './auth.js';
+import { previewUpload, runImport, TEMPLATES } from './import.js';
+import { readDocuments } from './extract.js';
+import { startMailWorker } from './mail.js';
+// The valuation model is a separate program; this is the door to it.
+import { mountValuation } from './valuation.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.set('trust proxy', 1);
+/* Express announces itself in a header on every response. Knowing the
+   framework and often its version is the first thing an attacker looks
+   for, and nothing here needs it said. */
+app.disable('x-powered-by');
+app.use(cookieParser());
+
+// Baseline security headers. No external assets are loaded, so the policy is strict.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  /* Nothing in the portal uses a camera, a microphone, a location or a
+     payment handler, so nothing here — or anything that ever manages to
+     run here — may ask for one. */
+  res.setHeader('Permissions-Policy',
+    'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), '
+    + 'microphone=(), payment=(), usb=(), interest-cohort=()');
+  /* A window this application opens, and any window that opens it, are
+     severed from it: no other document gets a handle on ours. */
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Origin-Agent-Cluster', '?1');
+  /* Flash and Acrobat cross-domain policy files: none of this is ours. */
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  /* Prefetching leaks which hostnames a signed-in person's browser is
+     about to reach, to their resolver, before they click anything. */
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  /* Nothing here belongs in a search result.
+   *
+   * index.html carries a robots meta tag, but that only covers the one
+   * HTML page a crawler is served — not a PDF, a CSV export, or any other
+   * response. The header covers every response there is, which is the
+   * point of using it instead.
+   *
+   * Deliberately NOT paired with a robots.txt that disallows crawling:
+   * a disallowed URL can still be listed in results, because the crawler
+   * was never permitted to fetch the page and read the instruction not to
+   * index it. "Do not index" has to be readable to be obeyed. */
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  );
+  if (process.env.NODE_ENV === 'production')
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
+/* Policy Valuation, before the JSON body parser.
+ *
+ * It is a proxy: what arrives — a carrier illustration, a workbook, a form
+ * post — has to reach the other service byte for byte, and a parser that
+ * has already read the stream leaves nothing to forward. Its own gate runs
+ * inside, so nothing here is reachable without an administrator's session.
+ */
+mountValuation(app);
+
+app.use(express.json({ limit: '2mb' }));
+
+// Health check must sit ahead of the API router's auth middleware.
+app.get('/api/health', (req, res) =>
+  res.json({ ok: true, mode: process.env.NODE_ENV === 'production' ? 'production' : 'development' }));
+
+app.use('/api', api);
+
+/* ------------------------- CSV import routes ------------------------ */
+// 5 MB a file, up to 20 files — a whole data dump can arrive in one go, while
+// no single request can exhaust a 512 MB instance. multer buffers in memory,
+// so these caps are the memory cap.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 20, fields: 8 },
+});
+// Accept the field under either name so a single-file client still works.
+const files = upload.fields([{ name: 'file', maxCount: 20 }, { name: 'files', maxCount: 20 }]);
+const uploaded = (req) => [...(req.files?.file || []), ...(req.files?.files || [])];
+
+const canImport = requireRole('admin', 'editor', 'manager');
+
+/**
+ * One import at a time per account. Parsing is synchronous and holds the event
+ * loop, so a person double-clicking Upload — or a script doing it deliberately
+ * — should queue behind themselves rather than multiply.
+ */
+const importing = new Set();
+const oneAtATime = (req, res, next) => {
+  if (importing.has(req.user.uid))
+    return res.status(429).json({ error: 'An import is already running on this account. Wait for it to finish.' });
+  importing.add(req.user.uid);
+  res.on('finish', () => importing.delete(req.user.uid));
+  res.on('close', () => importing.delete(req.user.uid));
+  next();
+};
+
+/* Documents are a different shape of upload from a CSV import: one file at a
+   time, larger, and stored rather than parsed. A signed LLC agreement or a
+   scanned K-1 runs past 5 MB often enough to be annoying, and only one is
+   held in memory at once, so this gets its own limit. */
+/* Reading an opportunity off its paperwork.
+ *
+ * Same shape of upload as a document — a handful of PDFs, larger than a
+ * CSV, held in memory only for as long as it takes to post them on to
+ * the valuation service. Nothing is stored, here or there.
+ *
+ * One at a time per account: reading is minutes of somebody else's
+ * compute and costs real money, and a double-click should queue behind
+ * itself rather than buy the same answer twice.
+ */
+const readUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024, files: 6, fields: 8 },
+});
+const reading = new Set();
+app.post('/api/opportunities/extract', authenticate,
+  requireRole('admin', 'editor', 'manager'),
+  (req, res, next) => {
+    if (reading.has(req.user.uid))
+      return res.status(429).json({
+        error: 'Documents are already being read on this account. '
+          + 'Give it a moment — a long illustration takes a minute or two.' });
+    reading.add(req.user.uid);
+    res.on('finish', () => reading.delete(req.user.uid));
+    res.on('close', () => reading.delete(req.user.uid));
+    next();
+  },
+  readUpload.fields([{ name: 'files', maxCount: 6 }]),
+  wrap(async (req, res) => {
+    const list = req.files?.files || [];
+    if (!list.length) return res.status(400).json({ error: 'No documents uploaded' });
+    const out = await readDocuments(list);
+    /* Somebody's compute was spent, and a medical file passed through this
+       server. Both belong on the record; the filenames do, the contents
+       emphatically do not. */
+    await audit(req.user.uid, 'opportunity', null, 'read',
+      `read ${list.length} document(s) into a new opportunity: `
+      + list.map((f) => f.originalname).join(', '));
+    res.json(out);
+  }));
+
+const docUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 12 },
+});
+app.post('/api/documents', authenticate, requireRole('admin', 'editor', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeDocument));
+
+/* A premium optimization is one workbook at a time, parsed and then filed —
+   closer to a document than to an import. It gets the document-sized limit
+   because sixty years of monthly rows in .xlsx runs past 5 MB less often
+   than a scanned K-1 does, but the same shape of upload. */
+app.post('/api/premium-streams/preview', authenticate, requireRole('admin', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(previewPremiumStream));
+app.post('/api/premium-streams', authenticate, requireRole('admin', 'manager'),
+  docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storePremiumStream));
+
+app.post('/api/import/preview', authenticate, canImport, oneAtATime, files,
+  wrap(async (req, res) => {
+    const list = uploaded(req);
+    if (!list.length) return res.status(400).json({ error: 'No file uploaded' });
+    res.json(previewUpload(list, req.body.type || 'policies'));
+  })
+);
+
+app.post('/api/import/run', authenticate, canImport, oneAtATime, files,
+  wrap(async (req, res) => {
+    const list = uploaded(req);
+    if (!list.length) return res.status(400).json({ error: 'No file uploaded' });
+    const result = await runImport(
+      list,
+      req.body.type || 'policies',
+      // A manager's import is confined to their own entities.
+      { asOfDate: req.body.asOfDate,
+        allowDuplicates: req.body.allowDuplicates === 'true' || req.body.allowDuplicates === true,
+        /* Clears the ledger on every policy the file touches before writing
+           its rows — for when the file is the record rather than an addition
+           to it. Administrators and editors only: a manager may import into
+           their own entities, but rewriting a book of record from a
+           spreadsheet is not the same act. */
+        replaceLedger: ['admin', 'editor'].includes(req.user.role)
+          && (req.body.replaceLedger === 'true' || req.body.replaceLedger === true),
+        fundScope: req.user.role === 'manager' ? (req.user.fundIds || [-1]) : null },
+      req.user
+    );
+    res.json(result);
+  })
+);
+
+app.get('/api/import/template/:type', authenticate, canImport, (req, res) => {
+  const csv = TEMPLATES[req.params.type];
+  if (!csv) return res.status(404).json({ error: 'Unknown template' });
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${req.params.type}-template.csv"`);
+  res.send(csv);
+});
+
+/* ----------------------------- static ------------------------------ */
+app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'] }));
+// SPA fallback (Express 5: no string wildcards, so use a terminal middleware)
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
+/* ---------------------------- errors ------------------------------- */
+/**
+ * Expected failures carry a message written for the person reading it.
+ * Anything else is a bug, and its message — a Postgres error naming a table
+ * and column, a stack-derived string — is reconnaissance. Log it in full
+ * against a short reference the user can quote, and return only that.
+ */
+app.use((err, req, res, _next) => {
+  /* A failure the application raised on purpose, with a message written
+     for the person who will read it.
+     
+     `expose` is what separates one of those from a fault. The rule below
+     it passes 4xx through, which covers most of them — but a deliberate
+     503 ("that service is not configured") or 504 ("reading took too
+     long") is not a 4xx, and was arriving as a five-word apology and a
+     reference number. The status a deliberate failure chose is the status
+     it should get. */
+  if (err.expose && err.status >= 400 && err.status <= 599)
+    return res.status(err.status).json({ error: err.message });
+  if (err.code === '23505') return res.status(409).json({ error: 'That record already exists' });
+  if (err.code === '23503') return res.status(409).json({ error: 'Another record still refers to this one' });
+  if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File is too large (5 MB max)' });
+  if (err.code === 'LIMIT_FILE_COUNT')
+    return res.status(400).json({ error: 'Too many files at once — 20 is the limit' });
+  if (err.code === 'LIMIT_UNEXPECTED_FILE')
+    return res.status(400).json({ error: 'Unexpected upload field' });
+  /* A figure or a date the database will not take. The field whitelists
+     check the common ones by name before they get this far and say which
+     field it was; this is the net under the rest — anything reaching a
+     column by another route. Either way it is the person's input that is
+     wrong, not the server, and a 500 says the opposite. */
+  if (err.code === '22003')
+    return res.status(400).json({
+      error: 'One of the figures is too large for the field it was entered in. '
+        + 'Check the amounts for an extra digit and try again.' });
+  if (err.code === '22007' || err.code === '22008')
+    return res.status(400).json({
+      error: 'One of the dates could not be read. Check the year and try again.' });
+  if (err.code === '22P02')
+    return res.status(400).json({
+      error: 'One of the values is not the kind of thing that field takes. '
+        + 'Check the figures and dates and try again.' });
+  if (err.code === '23514')
+    return res.status(400).json({
+      error: 'One of the values is outside what this field allows.' });
+  /* A byte the database cannot store — in practice a NUL carried in on a
+     paste from a PDF or a word processor. The text fields strip these
+     before they get here; this catches whatever arrives by another door,
+     an import most likely, and says something a person can act on. */
+  if (err.code === '22021')
+    return res.status(400).json({
+      error: 'Some of the text pasted in carries characters the database cannot store — '
+        + 'usually from a PDF or a Word document. Paste it into a plain text editor first, '
+        + 'or retype the affected field.' });
+  // Deliberate, user-facing failures raised by the app itself.
+  if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.message });
+
+  const ref = crypto.randomBytes(4).toString('hex');
+  console.error(`[error ${ref}] ${req.method} ${req.originalUrl}`, err);
+
+  if (process.env.NODE_ENV === 'production')
+    return res.status(500).json({
+      error: `Something went wrong. Quote reference ${ref} if you report this.`,
+      ref,
+    });
+  // Outside production the detail is what makes the failure fixable.
+  res.status(500).json({ error: err.message || 'Something went wrong', ref });
+});
+
+initDb()
+  .then(() => {
+    /* Email leaves on its own schedule, not inside the request that caused
+       it: a provider outage delays the post and nothing else. With no key
+       set the worker does not start and messages simply queue, which is the
+       right behaviour for a deployment that has not been given one yet. */
+    startMailWorker();
+    app.listen(PORT, () => console.log(`PolicyHub running on http://localhost:${PORT}`));
+  })
+  .catch((e) => {
+    const hint = explainDbError(e);
+    console.error(hint ? `Failed to start:\n\n${hint}\n` : 'Failed to start:', hint ? '' : e);
+    process.exit(1);
+  });
