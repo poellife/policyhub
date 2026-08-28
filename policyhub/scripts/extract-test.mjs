@@ -76,8 +76,13 @@ const stub = http.createServer((req, res) => {
       bytes: Buffer.concat(chunks).length,
       type: req.headers['content-type'] || '',
     };
-    res.writeHead(reply.status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(reply.body));
+    /* A body given as a string is sent as-is — an HTML 404 page, a bare
+       "Auth required" — because that is what a real upstream sends when it
+       fails, and handling only JSON is how the diagnosis got lost. */
+    const isText = typeof reply.body === 'string';
+    res.writeHead(reply.status, {
+      'Content-Type': isText ? 'text/html' : 'application/json' });
+    res.end(isText ? reply.body : JSON.stringify(reply.body));
   });
 });
 await new Promise((done) => stub.listen(0, '127.0.0.1', done));
@@ -176,6 +181,35 @@ reply = { status: 422, body: { error: 'The uploaded documents are too large for 
 err = await readDocuments([pdf('a.pdf')]).then(() => null, (e) => e);
 check('and a refusal from the reader is passed on as written',
   err?.status === 422 && /too large/.test(err.message), err?.message);
+
+/* The failure that actually turned up in use: PolicyHub deployed, the
+   valuation service not yet, so the route simply is not there. The old
+   message said "the documents could not be read", which sent somebody to
+   look at their PDF. It has to name the other end. */
+reply = { status: 404, body: '<!doctype html><title>404 Not Found</title><h1>Not Found</h1>' };
+err = await readDocuments([pdf('a.pdf')]).then(() => null, (e) => e);
+check('a service without the reader says the service needs deploying, not the PDF',
+  /has no document reader yet/i.test(err?.message || ''), err?.message);
+check('and does not blame the document', !/could not be read/i.test(err?.message || ''),
+  err?.message);
+
+reply = { status: 401, body: 'Auth required' };
+err = await readDocuments([pdf('a.pdf')]).then(() => null, (e) => e);
+check('a credential mismatch names the two settings to compare',
+  /VALUATION_USER/.test(err?.message || '') && /APP_USER/.test(err?.message || ''),
+  err?.message);
+
+reply = { status: 500, body: '<html><body><p>Internal Server Error</p></body></html>' };
+err = await readDocuments([pdf('a.pdf')]).then(() => null, (e) => e);
+check('an HTML fault carries its status and its words, with the tags stripped',
+  /answered 500/.test(err?.message || '') && /Internal Server Error/.test(err?.message || '')
+  && !/</.test(err?.message || ''), err?.message);
+
+reply = { status: 200, body: 'not json at all' };
+err = await readDocuments([pdf('a.pdf')]).then(() => null, (e) => e);
+check('a success that is not a reading is reported as an older build',
+  /older build/i.test(err?.message || ''), err?.message);
+
 reply = { status: 200, body: ANSWER };
 
 err = await readDocuments([pdf('huge.pdf', 26 * 1024 * 1024)]).then(() => null, (e) => e);
