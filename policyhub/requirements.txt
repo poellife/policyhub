@@ -1,0 +1,15 @@
+# Floors at the patched release for anything with a published advisory.
+# Loose ranges let a scanner assume the worst version they allow, and let
+# Docker's layer cache freeze an old resolution for months.
+
+flask>=3.0.3
+gunicorn>=23.0.0
+h11>=0.16.0
+numpy
+openpyxl
+pymort
+pdfplumber>=0.11.7
+pdfminer.six>=20251107    # CVE-2025-64512 pickle RCE via a crafted PDF
+pypdfium2
+reportlab>=4.0
+anthropic>=0.40
