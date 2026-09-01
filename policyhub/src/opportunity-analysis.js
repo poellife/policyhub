@@ -133,6 +133,13 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     projected_beyond_schedule: extended,
     annual_premium_assumed: annual,
     rate: a.rate,
+    /* Both readings of the same flows, always. Simple interest is what the
+       provider workbooks quote and what this desk has always priced on;
+       the date-exact compounding rate is what an investor comparing this
+       against a bond or a fund will want. Sending one and computing the
+       other on demand would be a second request to answer a question the
+       screen already has the numbers for. */
+    compound_rate: a.compound_rate ?? null,
     invested: a.invested,
     returned: a.returned,
     profit: a.profit,

@@ -1666,3 +1666,11 @@ table.data td.risk-note-cell {
   white-space: normal; font-size: 12.5px; line-height: 1.5;
   min-width: 340px; max-width: 620px;
 }
+
+/* The compounding figure beside the simple one. Quieter than its partner —
+   the pair is one reading, not two competing numbers — but never so quiet
+   that somebody quotes the first and misses the second. */
+.rate-alt {
+  font-size: .78em; font-weight: 500; color: var(--text-secondary);
+  white-space: nowrap;
+}

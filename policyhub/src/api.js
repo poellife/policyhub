@@ -1046,11 +1046,24 @@ const cleanRateBasis = (value) => {
   return RATE_BASES.includes(want) ? { basis: want } : null;
 };
 
+/* Simple interest, the compounding equivalent, or both side by side.
+   A different axis from rate_basis above -- that one is how several
+   policies are combined into one figure; this one is how a single
+   return is expressed. Kept apart deliberately, because one control
+   carrying two meanings is how somebody quotes the wrong number. */
+const INTEREST_SHOWN = ['simple', 'compound', 'both'];
+const cleanInterestShown = (value) => {
+  const want = typeof value === 'string' ? value
+    : (value && typeof value === 'object' ? str(value.shown) : '');
+  return INTEREST_SHOWN.includes(want) ? { shown: want } : null;
+};
+
 const PREF_CLEANERS = {
   policy_columns: cleanArrangement,
   report_columns: cleanArrangement,
   view_defaults: cleanView,
   rate_basis: cleanRateBasis,
+  interest_shown: cleanInterestShown,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -2648,6 +2661,7 @@ router.get('/opportunities', wrap(async (req, res) => {
       min_commitment_pct: minimumTake(
         Math.max(0, 100 - taken) + (Number(o.my_pct) || 0)),
       rate_at_le: a.base?.rate ?? null,
+      rate_at_le_compound: a.base?.compound_rate ?? null,
       matures_on: a.base?.matures_on ?? null,
       shared_with: me === null ? o.shared_with : undefined,
     };

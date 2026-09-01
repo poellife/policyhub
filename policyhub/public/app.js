@@ -53,6 +53,11 @@ const state = {
      'simple'. See rateToggle below. Saved against the account the moment
      it changes, because it is a way of reading rather than a filter. */
   rateBasis: 'weighted',
+  /* How a single return is expressed on the Opportunities screens:
+     'simple' | 'compound' | 'both'. A different axis from rateBasis
+     above, which is how several returns are combined. See
+     interestToggle below. */
+  interestShown: 'simple',
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -95,6 +100,8 @@ async function loadPrefs() {
     state.reportCols = prefs?.report_columns || null;
     applyViewDefault(prefs?.view_defaults || null);
     state.rateBasis = prefs?.rate_basis?.basis === 'simple' ? 'simple' : 'weighted';
+    state.interestShown = ['simple', 'compound', 'both']
+      .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : 'simple';
   } catch {
     state.policyCols = null;
   }
@@ -442,6 +449,87 @@ const wireRateToggle = () => {
        worth saying so -- otherwise it silently reverts tomorrow. */
     try {
       await api('/me/prefs/rate_basis', { method: 'PUT', body: { basis: state.rateBasis } });
+    } catch (err) { toast(`That was not saved: ${err.message}`); }
+  });
+};
+
+
+/* ------------------------- simple or compounded ----------------------
+ * How a single return is expressed on the Opportunities screens.
+ *
+ * A different question from the capital-weighting control above, and
+ * kept apart from it on purpose: that one is how several policies are
+ * combined into one figure, this one is how one figure is stated. The
+ * word "simple" carries both meanings in this trade and a single control
+ * carrying both axes is how somebody quotes the wrong number.
+ *
+ * Simple interest is the desk's own convention and what the provider
+ * workbooks quote, so it is the default and it is what "Return" means
+ * with no qualifier. The compounding equivalent is the same cash flows
+ * solved date-exactly -- what an investor comparing this against a bond
+ * or a fund is actually holding in their head. Neither is more correct;
+ * they answer different questions, and on a ten-year hold they are very
+ * far apart.
+ *
+ * Both are computed and sent with every deal, so the choice costs no
+ * request and the two can never disagree.
+ * ------------------------------------------------------------------- */
+
+const interestShown = () => (['simple', 'compound', 'both']
+  .includes(state.interestShown) ? state.interestShown : 'simple');
+
+const INTEREST_WORDS = {
+  simple: 'simple interest',
+  compound: 'compounded',
+  both: 'simple interest and compounded',
+};
+
+/**
+ * A return, said the way this account has asked for it.
+ *
+ * `both` puts the compounding figure beside the simple one rather than
+ * under it, because the gap between them IS the information: a case at
+ * 35% simple over eleven years is not a case at 35% compounded, and
+ * anybody quoting one had better be able to see the other.
+ */
+function rateText(simple, compound, { size = '' } = {}) {
+  const mode = interestShown();
+  if (mode === 'compound') return fmtRate(compound);
+  if (mode === 'simple' || compound === null || compound === undefined)
+    return fmtRate(simple);
+  return `${fmtRate(simple)}<span class="rate-alt"${
+    size ? ` style="font-size:${size}"` : ''}> · ${fmtRate(compound)} cmp</span>`;
+}
+
+/** What the figure above it is, in words. For the note under a tile. */
+const interestNote = () => (interestShown() === 'both'
+  ? 'simple · compounded'
+  : INTEREST_WORDS[interestShown()]);
+
+/** The control. Staff only — an investor is shown one convention. */
+const interestToggle = () => (isInvestorUser() ? '' : `
+  <select id="interestShown" class="head-select"
+    aria-label="How a return is expressed">
+    <option value="simple" ${interestShown() === 'simple' ? 'selected' : ''}
+      >Simple interest</option>
+    <option value="compound" ${interestShown() === 'compound' ? 'selected' : ''}
+      >Compounded</option>
+    <option value="both" ${interestShown() === 'both' ? 'selected' : ''}
+      >Both</option>
+  </select>`);
+
+/** Wire it up. Call from a view's `after`. */
+const wireInterestToggle = () => {
+  $('#interestShown')?.addEventListener('change', async (e) => {
+    state.interestShown = ['simple', 'compound', 'both'].includes(e.target.value)
+      ? e.target.value : 'simple';
+    render();
+    /* Saved after the screen has already changed, like the weighting
+       control: a setting about how to read a number is not worth a modal
+       if the save fails, but it is worth saying so. */
+    try {
+      await api('/me/prefs/interest_shown', {
+        method: 'PUT', body: { shown: state.interestShown } });
     } catch (err) { toast(`That was not saved: ${err.message}`); }
   });
 };
@@ -4941,8 +5029,9 @@ async function opportunitiesView() {
           <div class="note">${o.face_amount && o.asking_price
             ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
         <div><div class="label">Return at life expectancy</div>
-          <div class="value">${fmtRate(o.rate_at_le)}</div>
-          <div class="note">${o.le_months ? `LE ${o.le_months} months` : 'no LE on file'}</div></div>
+          <div class="value">${rateText(o.rate_at_le, o.rate_at_le_compound)}</div>
+          <div class="note">${interestNote()}${
+  o.le_months ? ` · LE ${o.le_months} months` : ' · no LE on file'}</div></div>
         <div><div class="label">Projected maturity</div>
           <div class="value" style="font-size:16px">${o.matures_on ? fmtDate(o.matures_on) : '—'}</div>
           <div class="note">at life expectancy</div></div>
@@ -4970,6 +5059,7 @@ async function opportunitiesView() {
               rest.length - funded.length ? ` · ${rest.length - funded.length} closed` : ''}${
               passed.length ? ` · ${passed.length} passed` : ''}`}</div></div>
       <div class="spacer"></div>
+      ${interestToggle()}
       ${staff && archived ? `<button id="oppShowAll" ${showAll ? 'class="active-toggle"' : ''}>${
         showAll ? 'Hide closed' : `Show all (${archived})`}</button>` : ''}
       ${canEditData() && !isInvestorUser()
@@ -5026,6 +5116,7 @@ async function opportunitiesView() {
     html,
     after: () => {
       $('#newOppBtn')?.addEventListener('click', () => openOpportunityDialog(null));
+      wireInterestToggle();
       $('#oppShowAll')?.addEventListener('click', () => {
         state.oppShowAll = !state.oppShowAll;
         render();
@@ -5116,9 +5207,11 @@ async function opportunityView() {
               s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
           <tr><td class="strong">Multiple</td>
             ${a.scenarios.map((s) => cell(s, (x) => `${x.multiple.toFixed(2)}×`)).join('')}</tr>
-          <tr><td class="strong">Return</td>
+          <tr><td class="strong">Return
+              <span class="muted" style="font-weight:400">· ${interestNote()}</span></td>
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}"
-              style="font-size:16px">${fmtRate(s.rate)}</td>`).join('')}</tr>
+              style="font-size:16px">${
+  rateText(s.rate, s.compound_rate, { size: '13px' })}</td>`).join('')}</tr>
         </tbody>
       </table></div>`;
   };
@@ -5137,6 +5230,7 @@ async function opportunityView() {
           · ${o.status === 'Open' ? deadlineChip(o) : `<span class="opp-deadline closed">${esc(o.status)}</span>`}</div>
       </div>
       <div class="spacer"></div>
+      ${interestToggle()}
       ${staff && canEditData() ? `
         <button id="editOppBtn">Edit</button>
         <button id="scheduleBtn">Premium schedule</button>
@@ -5244,8 +5338,19 @@ async function opportunityView() {
           ${a.le_from ? `The estimate runs from ${fmtDate(a.le_from)}, the date of the LE report,
           not from today.` : ''}
           ${projected ? 'Premiums beyond the posted schedule are continued at the same annual rate.' : ''}
-          The return is simple interest over actual days — no compounding — the same
-          convention the operating agreements use.
+          ${interestShown() === 'compound'
+    ? `The return shown is the compounding rate — the same cash flows solved date-exactly,
+       which is what an investor comparing this against a bond or a fund is holding in their
+       head. It is <strong>not</strong> the convention the operating agreements use: those
+       are written in simple interest, and switching this control back is what reads them.`
+    : interestShown() === 'both'
+      ? `Two readings of the same cash flows. The first is simple interest over actual days —
+         no compounding — which is the convention the operating agreements are written in and
+         what the provider workbooks quote. The second is the compounding equivalent, solved
+         date-exactly. On a hold this long they are far apart, and which one is being quoted
+         matters more than either figure.`
+      : `The return is simple interest over actual days — no compounding — the same
+         convention the operating agreements use.`}
         </span>
       </div>
     </div>
@@ -5408,6 +5513,7 @@ async function opportunityView() {
   return {
     html,
     after: () => {
+      wireInterestToggle();
       if (o.valuations !== undefined) wireValuationPanel('opportunity', o.id);
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
