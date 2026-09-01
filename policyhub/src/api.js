@@ -1574,6 +1574,10 @@ router.get('/policies/:id', wrap(async (req, res) => {
     transactions: txns.rows,
     additionalInsureds: extra.rows,
     owners: owners.rows,
+    /* Staff only, the same rule the opportunity follows. What the desk
+       paid is the investor's business; what the desk's model thinks the
+       policy is worth is the desk's. */
+    valuations: scope === null ? await valuationsFor('policy', req.params.id) : undefined,
     reminders: reminders.rows,
   });
 }));
@@ -2529,6 +2533,9 @@ async function loadOpportunity(req, id) {
   ]);
 
   o.premiums = prem.rows;
+  /* Staff only: an investor is shown the deal, not the desk's pricing of
+     it. `loadOpportunity` is what an investor reads too. */
+  o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
   o.remaining_pct = Math.max(0, 100 - o.taken_pct);
@@ -4069,6 +4076,8 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
       }
       // Adopted, not created: this policy was in the portfolio before the
       // deal, so unwinding the deal must never delete it.
+      await q(`UPDATE valuations SET policy_id = $1, opportunity_id = NULL, carried_from = $2
+                WHERE opportunity_id = $2`, [policyId, req.params.id]);
       await q(`UPDATE opportunities
                   SET status = 'Funded', policy_id = $1, policy_created = FALSE,
                       updated_at = now()
@@ -4123,6 +4132,14 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
         allocated++;
       }
 
+      /* The pricing the deal was agreed on follows it onto the policy.
+         `carried_from` keeps the opportunity it came from, so the trail
+         from the price somebody said yes to and the policy that was
+         bought is readable afterwards rather than inferred. */
+      await client.query(
+        `UPDATE valuations SET policy_id = $1, opportunity_id = NULL,
+                               carried_from = $2
+          WHERE opportunity_id = $2`, [policyId, req.params.id]);
       await client.query(
         `UPDATE opportunities
             SET status = 'Funded', policy_id = $1, policy_created = TRUE, updated_at = now()
@@ -4372,6 +4389,16 @@ router.post('/opportunities/:id/reopen', blockInvestors, adminOrManager,
         }
       }
 
+      /* The price goes back where it came from.
+         A valuation that followed this deal onto the policy is the deal's
+         pricing, and the deal is on the list again — so it returns to the
+         opportunity, and `carried_from` is cleared because it is no longer
+         somewhere it was carried to. A valuation filed against the policy
+         by hand is untouched: it was never this deal's. */
+      await client.query(
+        `UPDATE valuations
+            SET opportunity_id = carried_from, policy_id = NULL, carried_from = NULL
+          WHERE carried_from = $1`, [req.params.id]);
       await client.query(
         `UPDATE opportunities
             SET status = 'Open', policy_id = NULL, policy_created = FALSE,
@@ -4640,6 +4667,173 @@ router.post('/policies/:id/offer', blockInvestors, adminOrManager, inPolicyScope
       destroyed: remove ? reopenLosses(t) : [],
     });
   }));
+
+/* ------------------------------------------------------------------ *
+ * Valuations, and what they were run against
+ *
+ * The desk prices a policy before there is anything to attach the price
+ * to as often as after. So the link is makeable from either end and in
+ * either order: from the list of runs, or from the policy or the
+ * opportunity itself.
+ *
+ * The run stays where it belongs — in the valuation service, with its
+ * inputs and its workbook. What is kept here is the headline and the
+ * link, refreshed from that service whenever the list is read, so a run
+ * priced five minutes ago is attachable without anybody syncing anything
+ * by hand.
+ * ------------------------------------------------------------------ */
+
+/** The headline of every run the valuation service holds. */
+async function fetchRuns() {
+  const target = String(process.env.VALUATION_URL || '').replace(/\/+$/, '');
+  if (!target) return null;
+  const user = process.env.VALUATION_USER;
+  const headers = user
+    ? { Authorization: `Basic ${Buffer.from(`${user}:${process.env.VALUATION_PASSWORD || ''}`)
+      .toString('base64')}` }
+    : {};
+  try {
+    const res = await fetch(`${target}/api/valuations`,
+      { headers, signal: AbortSignal.timeout(20000) });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return Array.isArray(body?.valuations) ? body.valuations : null;
+  } catch {
+    /* The service being down is not a reason to fail the screen: what is
+       already known is still worth showing, and it says so. */
+    return null;
+  }
+}
+
+/**
+ * Bring the local record of what has been run up to date.
+ *
+ * Inserts what is new and refreshes the headline of what is not. The
+ * attachment is never touched — that is this application's own fact, and
+ * the valuation service has no opinion about it.
+ */
+async function syncRuns() {
+  const runs = await fetchRuns();
+  if (!runs) return { synced: false, added: 0 };
+  let added = 0;
+  for (const r of runs) {
+    if (!str(r.job)) continue;
+    const { rows } = await q(
+      `INSERT INTO valuations (job, ran_at, ran_by, case_name, insured, face, price, irr,
+                               mode, target, mean_le, seen_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+       ON CONFLICT (job) DO UPDATE SET
+         ran_at = COALESCE(EXCLUDED.ran_at, valuations.ran_at),
+         ran_by = CASE WHEN EXCLUDED.ran_by <> '' THEN EXCLUDED.ran_by ELSE valuations.ran_by END,
+         case_name = EXCLUDED.case_name, insured = EXCLUDED.insured,
+         face = EXCLUDED.face, price = EXCLUDED.price, irr = EXCLUDED.irr,
+         mode = EXCLUDED.mode, target = EXCLUDED.target, mean_le = EXCLUDED.mean_le,
+         seen_at = now()
+       RETURNING (xmax = 0) AS inserted`,
+      [str(r.job), r.ts || null, str(r.who), str(r.name), str(r.insured),
+       num(r.face), num(r.price), num(r.irr), str(r.mode), num(r.value), num(r.mean_le)]);
+    if (rows[0]?.inserted) added++;
+  }
+  return { synced: true, added };
+}
+
+/* What a manager may see. A run attached to something is scoped by the
+   entity of the thing it is attached to; an unattached run belongs to
+   nobody yet, so anybody who may attach one may see it. */
+const VALUATION_SELECT = `
+  SELECT v.*, p.policy_number, p.carrier_name,
+         o.policy_number AS opp_policy_number, o.insured_last_name AS opp_insured,
+         COALESCE(p.fund_id, o.fund_id) AS fund_id,
+         COALESCE(pf.code, of_.code)    AS fund_code,
+         u.full_name AS attached_by_name
+    FROM valuations v
+    LEFT JOIN policies p       ON p.id = v.policy_id
+    LEFT JOIN opportunities o  ON o.id = v.opportunity_id
+    LEFT JOIN funds pf         ON pf.id = p.fund_id
+    LEFT JOIN funds of_        ON of_.id = o.fund_id
+    LEFT JOIN users u          ON u.id = v.attached_by`;
+
+const valuationScope = (req) => {
+  const funds = fundScope(req);
+  return funds
+    ? { where: 'AND (COALESCE(p.fund_id, o.fund_id) IS NULL '
+        + 'OR COALESCE(p.fund_id, o.fund_id) = ANY($1))', params: [funds] }
+    : { where: '', params: [] };
+};
+
+router.get('/valuations', blockInvestors, requireRole('admin', 'editor', 'manager'),
+  wrap(async (req, res) => {
+    const sync = await syncRuns();
+    const { where, params } = valuationScope(req);
+    const { rows } = await q(
+      `${VALUATION_SELECT} WHERE TRUE ${where} ORDER BY v.ran_at DESC NULLS LAST, v.id DESC`,
+      params);
+    res.json({
+      /* Said plainly rather than left to be inferred from a short list:
+         a screen that quietly shows yesterday's runs is worse than one
+         that admits it could not reach the service. */
+      live: sync.synced,
+      note: sync.synced ? '' : 'The valuation service could not be reached, so this list '
+        + 'is what was known at the last successful read.',
+      valuations: rows,
+    });
+  }));
+
+/**
+ * Attach a run to a policy or an opportunity, or take it off one.
+ *
+ * An empty body detaches. Only one end is ever set; naming both is a
+ * mistake worth refusing rather than resolving.
+ */
+router.put('/valuations/:job', blockInvestors, requireRole('admin', 'editor', 'manager'),
+  wrap(async (req, res) => {
+    const job = str(req.params.job);
+    const { rows: cur } = await q('SELECT * FROM valuations WHERE job = $1', [job]);
+    if (!cur[0]) {
+      await syncRuns();
+      const { rows: again } = await q('SELECT * FROM valuations WHERE job = $1', [job]);
+      if (!again[0]) return res.status(404).json({ error: 'That valuation is not on file' });
+      cur[0] = again[0];
+    }
+
+    const policyId = int(req.body?.policy_id);
+    const oppId = int(req.body?.opportunity_id);
+    if (policyId && oppId)
+      return res.status(400).json({
+        error: 'A valuation belongs to one thing or the other, not both.' });
+
+    if (policyId && !(await assertPolicyInScope(req, policyId)))
+      return res.status(404).json({ error: 'Policy not found' });
+    if (oppId && !(await oppVisible(req, oppId)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+
+    const { rows } = await q(
+      /* Every placeholder cast: a CASE whose branches are a parameter and
+         a bare NULL gives the planner nothing to infer a type from, and
+         it refuses the statement rather than guessing. */
+      `UPDATE valuations
+          SET policy_id = $1::int, opportunity_id = $2::int,
+              attached_by = CASE WHEN $1::int IS NULL AND $2::int IS NULL
+                                 THEN NULL ELSE $3::int END,
+              attached_at = CASE WHEN $1::int IS NULL AND $2::int IS NULL
+                                 THEN NULL ELSE now() END
+        WHERE job = $4 RETURNING *`,
+      [policyId || null, oppId || null, req.user.uid, job]);
+
+    await audit(req.user.uid, 'valuation', rows[0].id, 'update',
+      policyId ? `attached to policy ${policyId}`
+        : oppId ? `attached to opportunity ${oppId}`
+          : 'detached');
+    res.json(rows[0]);
+  }));
+
+/** The runs attached to one record, for its own page. */
+export async function valuationsFor(kind, id) {
+  const col = kind === 'policy' ? 'v.policy_id' : 'v.opportunity_id';
+  const { rows } = await q(
+    `${VALUATION_SELECT} WHERE ${col} = $1 ORDER BY v.ran_at DESC NULLS LAST, v.id DESC`, [id]);
+  return rows;
+}
 
 /* ------------------------------------------------------------------ *
  * internal rate of return

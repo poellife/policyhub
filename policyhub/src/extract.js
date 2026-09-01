@@ -118,10 +118,34 @@ export async function readDocuments(files) {
       : 'The valuation service could not be reached, so the documents were not read.');
   }
 
-  const out = await res.json().catch(() => null);
-  if (!res.ok)
-    throw bad(res.status === 503 ? 503 : 422,
-      out?.error || 'The documents could not be read.');
+  /* Read the body once, as text, and try to make JSON of it afterwards.
+     A failing upstream does not always answer in JSON — a missing route
+     answers in HTML — and asking for .json() first throws away the only
+     evidence of what actually happened. */
+  const raw = await res.text().catch(() => '');
+  let out = null;
+  try { out = JSON.parse(raw); } catch { /* not JSON, which is itself a clue */ }
+
+  if (!res.ok) {
+    /* Say which end is wrong. "Could not be read" sent somebody looking at
+       their PDF when the answer was that the other service had not been
+       deployed yet. */
+    if (res.status === 404)
+      throw bad(503, 'The valuation service has no document reader yet. Its own update — '
+        + 'the one that adds /api/extract — has not been deployed. Deploy it and try again.');
+    if (res.status === 401 || res.status === 403)
+      throw bad(503, 'The valuation service refused this server’s credentials. Check that '
+        + 'VALUATION_USER and VALUATION_PASSWORD here match APP_USER and APP_PASSWORD there.');
+    if (res.status === 502 || res.status === 503 || res.status === 504)
+      throw bad(503, out?.error
+        || 'The valuation service is not answering. It may be starting up — try again in a minute.');
+    throw bad(422, out?.error
+      || `The documents could not be read — the valuation service answered ${res.status}`
+         + `${raw ? `: ${raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160)}` : '.'}`);
+  }
+  if (!out)
+    throw bad(502, 'The valuation service answered, but not with a reading. '
+      + 'It may be running an older build.');
 
   const p = out.policy || {};
   const med = out.medical || {};

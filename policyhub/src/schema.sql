@@ -1140,3 +1140,51 @@ CREATE TABLE IF NOT EXISTS premium_stream_rows (
 );
 CREATE INDEX IF NOT EXISTS idx_premium_stream_rows
   ON premium_stream_rows (stream_id, due_date);
+
+/* ====================================================================
+   Valuations, and what they were run against
+   ====================================================================
+
+   The pricing desk runs a valuation before there is anything to attach
+   it to as often as after: a policy arrives, it gets priced, and only
+   then does somebody decide whether to post it as an opportunity. So the
+   link has to be makeable in either order and from either end.
+
+   The run itself lives in the valuation service, which owns its inputs,
+   its workbook and its PDF. What is kept here is the headline — enough
+   to recognise a run in a list and to show what a policy was bought on —
+   plus the one fact that service has no way to know: which record in
+   this book it belongs to.
+
+   Both sides of the link are nullable and only one is ever set. A run
+   attached to an opportunity that is later funded follows the deal onto
+   the policy, because the pricing a policy was bought on is part of the
+   policy's own story.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS valuations (
+  id             SERIAL PRIMARY KEY,
+  job            TEXT NOT NULL UNIQUE,     -- the valuation service's own id
+  ran_at         TIMESTAMPTZ,
+  ran_by         TEXT NOT NULL DEFAULT '', -- the address the service recorded
+  case_name      TEXT NOT NULL DEFAULT '',
+  insured        TEXT NOT NULL DEFAULT '',
+  face           NUMERIC(16,2),
+  price          NUMERIC(16,2),
+  irr            NUMERIC(9,4),
+  mode           TEXT NOT NULL DEFAULT '', -- IRR | Purchase Price
+  target         NUMERIC(12,4),
+  mean_le        NUMERIC(9,2),
+
+  policy_id      INTEGER REFERENCES policies(id)      ON DELETE SET NULL,
+  opportunity_id INTEGER REFERENCES opportunities(id) ON DELETE SET NULL,
+  attached_by    INTEGER REFERENCES users(id)         ON DELETE SET NULL,
+  attached_at    TIMESTAMPTZ,
+  /* Carried across when an opportunity is funded, so the trail from the
+     price somebody agreed to the policy they bought is not guesswork. */
+  carried_from   INTEGER,
+  seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (policy_id IS NULL OR opportunity_id IS NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_valuations_policy ON valuations (policy_id);
+CREATE INDEX IF NOT EXISTS idx_valuations_opp    ON valuations (opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_valuations_ran    ON valuations (ran_at DESC);
