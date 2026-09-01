@@ -8,6 +8,8 @@ import { reportsView, buildOpportunitySheet, wireReports } from './reports.js';
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
 import { analyzeFlows, fmtRate, today as irrToday } from './irr.js';
+import { longevityRisk, concentration, classifyImpairments,
+         CATEGORIES, CATEGORY_KEYS } from './longevity.js';
 // The build this page was served from. The server reports the same
 // constant on /auth/me; if the two differ the deployment is half updated.
 import { BUILD } from './build.js';
@@ -856,6 +858,20 @@ const STAFF_NAV = [
    * Administrators only, filtered out below the same way carried interest
    * is: absent from the menu rather than a tab that refuses on arrival. */
   ['valuation', 'Policy Valuation', '/valuation'],
+  /* The runs themselves, which *are* a screen of this one.
+   *
+   * What the model priced is that application's; which policy or which
+   * deal the price belongs to is this one's, and nothing over there can
+   * answer it. So the list of runs and the link between a run and a
+   * record live here. Anybody who may edit a record may make that link;
+   * a viewer may not, and is filtered out below rather than refused on
+   * arrival. */
+  ['valuations', 'Valuation runs'],
+  /* A bench, kept apart from the book on purpose. It reads no policy and
+     writes nothing anywhere -- the judgements in it are new, and until they
+     have earned their place they should not be able to mark the record.
+     Administrators only, filtered out below the way carried interest is. */
+  ['longevity', 'Longevity'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
   // unchanged, and the dashboard still offers it directly.
@@ -863,7 +879,7 @@ const STAFF_NAV = [
 ];
 
 /** Menu entries an administrator has and nobody else does. */
-const ADMIN_ONLY_NAV = ['carry'];
+const ADMIN_ONLY_NAV = ['carry', 'longevity'];
 
 /* Policy Valuation is not a rank, it is a grant: an administrator has it,
    and anybody else has it only if one gave it to them by name. So the menu
@@ -986,7 +1002,12 @@ const navItems = () => {
     // An editor or viewer is staff but not an administrator.
     : state.user?.role === 'admin' ? STAFF_NAV
       : STAFF_NAV.filter(([r]) => !ADMIN_ONLY_NAV.includes(r));
-  return mayValue() ? list : list.filter(([r]) => r !== 'valuation');
+  /* Two separate questions, deliberately. The grant decides who may open
+     the pricing model; the role decides who may say what a price belongs
+     to. A viewer reads the book and changes nothing in it, so the runs
+     list is not theirs even though the prices in it are. */
+  const shown = mayValue() ? list : list.filter(([r]) => r !== 'valuation');
+  return canEditData() ? shown : shown.filter(([r]) => r !== 'valuations');
 };
 
 /* Display multiplier.
@@ -2404,7 +2425,11 @@ function overviewTab(p) {
       ${p.notes ? `<div style="margin-top:16px"><label>Notes</label><div class="secondary">${esc(p.notes)}</div></div>` : ''}
       </div>
     </div>
-  </div>`;
+  </div>
+  ${''/* Absent entirely for an investor: the server does not send them, and
+         what the desk's model thinks this policy is worth is not a figure
+         they are shown. */}
+  ${p.valuations === undefined ? '' : valuationPanel(p.valuations, 'policy', p.id)}`;
 }
 
 function openOwnerDialog(p, existing) {
@@ -3067,6 +3092,7 @@ function wireReturnTab(p, d) {
 
 function wireDetailTab(p, values, irrData) {
   if (detailTab === 'overview') {
+    if (p.valuations !== undefined) wireValuationPanel('policy', p.id);
     $('#addOwnerBtn')?.addEventListener('click', async () => {
       if (!state.investors.length) state.investors = await api('/investors');
       if (!state.investors.length) {
@@ -5373,11 +5399,16 @@ async function opportunityView() {
               </tr>`;
             }).join('')}</tbody>
           </table></div>`}
-    </div>` : ''}`;
+    </div>` : ''}
+
+    ${''/* Staff only, and the server decides that rather than this line:
+           an investor's copy of the deal arrives without the field at all. */}
+    ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}`;
 
   return {
     html,
     after: () => {
+      if (o.valuations !== undefined) wireValuationPanel('opportunity', o.id);
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
       $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
@@ -9309,6 +9340,567 @@ function openVoidDialog(a) {
   }, 'Void it');
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Longevity risk — a bench, deliberately apart
+ *
+ * A settlement is a short position in longevity, and that position is
+ * three risks rather than one: how long it is open, how fat this life's
+ * own right tail is, and whether a therapy arrives and re-rates every
+ * case of this kind at once. They are scored and shown apart because
+ * they are reduced by different things.
+ *
+ * WHY THIS SCREEN TOUCHES NOTHING
+ * -------------------------------
+ * The judgements underneath it are new and untested against any
+ * experience, and a screen that writes onto policies and deals would put
+ * them into the record before anybody had decided whether they are any
+ * good. So this reads nothing from the book and writes nothing to it:
+ * no route, no table, no column, no foreign key. Cases are typed in, and
+ * the bench of them is kept in this browser and nowhere else.
+ *
+ * That means it can be deleted by deleting two files, and it means that
+ * everything on it is arguable without anything being at stake. When the
+ * judgements have earned it, wiring it to the book is a separate
+ * decision made on purpose.
+ * ------------------------------------------------------------------ */
+
+/* The bench lives in localStorage: it is one person's working notes, not
+   a record of anything, and it should survive a reload without becoming
+   the firm's data. Wrapped because a browser told to block site data
+   throws on the accessor itself rather than returning nothing. */
+const BENCH_KEY = 'ph-longevity-bench';
+const loadBench = () => {
+  try {
+    const raw = localStorage.getItem(BENCH_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+};
+const saveBench = (list) => {
+  try { localStorage.setItem(BENCH_KEY, JSON.stringify(list)); } catch { /* fine */ }
+};
+
+const riskBar = (label, value, hint) => `
+  <div class="risk-row" title="${esc(hint)}">
+    <div class="risk-label">${label}</div>
+    <div class="risk-track"><span style="width:${value}%"></span></div>
+    <div class="risk-num">${value}</div>
+  </div>`;
+
+/** The reading of one case: the three risks, the composite, and why. */
+function riskReading(s) {
+  if (!s.scored)
+    return `<p class="muted" style="margin:0">${esc(s.why[0])}</p>`;
+  const cat = CATEGORIES[s.category];
+  return `
+    <div class="risk-headline">
+      <span class="risk-badge risk-${s.tone}">${s.composite} · ${esc(s.band)}</span>
+      <span class="muted">${esc(cat.label)}</span>
+    </div>
+    <div class="risk-bars">
+      ${riskBar('Duration', s.duration,
+    'How long the position is open at all. First-order: it multiplies everything else.')}
+      ${riskBar('Tail', s.tail,
+    'The right-hand end of this life’s own survival curve. The mean is quoted; the tail is what hurts.')}
+      ${riskBar('Breakthrough', s.breakthrough,
+    'The chance a therapy arrives and re-rates every case of this kind at once. Correlated — it does not average out across a book.')}
+    </div>
+    <ul class="risk-why">${s.why.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>
+    <div class="risk-cat-note">${esc(cat.note)}</div>`;
+}
+
+/** The form's current contents, read straight off the inputs. */
+const benchForm = () => ({
+  label: $('#lgLabel')?.value || '',
+  age: $('#lgAge')?.value || '',
+  gender: $('#lgSex')?.value || '',
+  leMonths: $('#lgLe')?.value || '',
+  category: $('#lgCat')?.value || '',
+  weight: $('#lgCost')?.value || '',
+});
+
+/* An age is what a person has to hand; the score wants a date of birth.
+   Given one and not the other, a birthday of today that many years ago is
+   exact enough for a screen whose bands are twenty points wide. */
+const asDob = (age) => {
+  const n = Number(age);
+  if (!Number.isFinite(n) || n <= 0 || n > 120) return null;
+  const d = new Date();
+  return `${d.getFullYear() - n}-${String(d.getMonth() + 1).padStart(2, '0')}-${
+    String(d.getDate()).padStart(2, '0')}`;
+};
+
+const benchScore = (c) => longevityRisk({
+  dob: asDob(c.age), gender: c.gender, leMonths: c.leMonths, category: c.category });
+
+async function longevityView() {
+  /* Refused here rather than merely absent from the menu.
+     There is nothing secret on this screen -- it holds no policy and no
+     person -- but "administrators only" should mean the address is
+     refused too, not just that the tab is hidden. Client-side is the
+     whole of it because the screen asks the server for nothing; if that
+     ever changes, the route it starts calling is where the real lock
+     goes. */
+  if (!isAdminUser())
+    return { html: `
+      <div class="page-head"><div><h1>Longevity risk</h1></div></div>
+      <div class="empty">
+        <p>This one is kept to administrators for now. It is a bench for working out
+           how exposed a case is to living longer than expected, and the judgements
+           in it are still being argued about.</p></div>` };
+
+  const bench = loadBench();
+  const scored = bench.map((c) => ({ ...c, s: benchScore(c) }));
+  const con = concentration(bench.map((c) => ({
+    dob: asDob(c.age), gender: c.gender, leMonths: c.leMonths,
+    category: c.category, weight: Number(c.weight) || 0 })));
+
+  const catOptions = (sel) => CATEGORY_KEYS.filter((k) => k !== 'unknown')
+    .map((k) => `<option value="${k}" ${sel === k ? 'selected' : ''}>${
+      esc(CATEGORIES[k].label)}</option>`).join('');
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Longevity risk</h1>
+        <div class="sub">A bench for working out how exposed a case is. Nothing here reads
+          or writes the portfolio &mdash; type a case in and it is scored.</div></div>
+    </div>
+
+    <div class="notice-box">
+      <strong>Separate on purpose.</strong> This is a screen, not a model: nothing in it is
+      fitted to experience, because a book of a thousand lives throws off perhaps sixty
+      deaths a year and that is not a dataset. The numbers behind it are stated judgements
+      about clinical direction, kept in one file so every case is read the same way. It is
+      not connected to any policy or opportunity, and the cases below are kept in this
+      browser only. A high score is not a case to refuse &mdash; it is a case to be paid for.
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head"><h2>Score a case</h2></div>
+        <div class="card-body">
+          <div class="field"><label>Call it</label>
+            <input id="lgLabel" placeholder="Delp — Lincoln 11M" autocomplete="off"></div>
+          <div class="field-row">
+            <div class="field"><label>Age</label>
+              <input id="lgAge" type="number" min="40" max="110" value="80"></div>
+            <div class="field"><label>Sex</label>
+              <select id="lgSex">
+                <option value="M">Male</option>
+                <option value="F">Female</option>
+                <option value="Joint">Survivorship</option>
+                <option value="">Not stated</option>
+              </select></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Life expectancy (months)</label>
+              <input id="lgLe" type="number" min="1" max="400" value="96"></div>
+            <div class="field"><label>Cost, for the bench below</label>
+              <input id="lgCost" type="number" min="0" step="1000" placeholder="780000"></div>
+          </div>
+          <div class="field"><label>What is driving mortality</label>
+            <select id="lgCat">
+              <option value="">Not stated</option>
+              ${catOptions('')}
+            </select></div>
+          <div class="field"><label>Or paste the medical bullets and let it read them</label>
+            <textarea id="lgText" rows="3"
+              placeholder="Cardiovascular: CAD s/p 5 stents (2023)&#10;Endocrine: type 2 diabetes"></textarea>
+            <span class="muted" style="font-size:12px" id="lgRead"></span></div>
+          <button class="primary" id="lgAdd">Add to the bench</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>The reading</h2></div>
+        <div class="card-body" id="lgOut"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>The bench</h2><div class="spacer"></div>
+        ${bench.length ? `<span class="muted" style="font-size:12px">${bench.length} case${
+  bench.length === 1 ? '' : 's'} &middot; this browser only</span>
+        <button class="btn-sm btn-danger" id="lgClear">Clear</button>` : ''}</div>
+      ${!bench.length ? `<div class="card-body"><div class="empty">
+        Nothing on the bench yet. Score a case and add it, and this becomes a shape:
+        how much of a hypothetical book sits in any one impairment.</div></div>`
+    : `<div class="table-wrap"><table class="data">
+        <thead><tr>
+          <th>Case</th><th>Age</th><th>Sex</th><th class="num">LE</th>
+          <th>Impairment</th><th class="num">Cost</th>
+          <th class="num">Dur</th><th class="num">Tail</th><th class="num">Brk</th>
+          <th class="num">LR</th><th></th>
+        </tr></thead>
+        <tbody>${scored.map((c, i) => `<tr>
+          <td class="strong">${esc(c.label || `Case ${i + 1}`)}</td>
+          <td>${esc(String(c.age || '—'))}</td>
+          <td>${c.gender === 'Joint' ? 'Joint' : esc(c.gender || '—')}</td>
+          <td class="num">${esc(String(c.leMonths || '—'))}</td>
+          <td class="secondary">${esc(CATEGORIES[c.s.category].label)}</td>
+          <td class="num">${c.weight ? fmtMoney(c.weight, 0) : '—'}</td>
+          <td class="num">${c.s.scored ? c.s.duration : '—'}</td>
+          <td class="num">${c.s.scored ? c.s.tail : '—'}</td>
+          <td class="num">${c.s.scored ? c.s.breakthrough : '—'}</td>
+          <td class="num">${c.s.scored
+    ? `<span class="risk-chip risk-${c.s.tone}">${c.s.composite}</span>` : '—'}</td>
+          <td class="row-actions">
+            <button class="btn-sm" data-lg-drop="${i}">Remove</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`}
+    </div>
+
+    ${bench.length < 2 ? '' : `
+    <div class="card">
+      <div class="card-head"><h2>Where the bench is concentrated</h2><div class="spacer"></div>
+        ${con.bookScore === null ? '' : `<span class="risk-badge risk-${con.bookTone}">${
+  con.bookScore} · ${esc(con.bookBand)}</span>`}</div>
+      <div class="card-body">
+        <p class="muted" style="margin:0 0 14px;font-size:13px">Breakthrough risk is the one
+          that does not average out: it arrives for a whole impairment at once, on the day of
+          a readout. So the exposure worth watching is not any case's score but how much of
+          the money sits in one category &mdash; weighted by cost, because ten small dialysis
+          cases do not offset one very large cardiometabolic one.</p>
+        <div class="risk-conc">
+          <div class="risk-conc-row risk-conc-head">
+            <div>Impairment</div><div>Share by cost</div>
+            <div class="risk-num">Share</div><div class="risk-num">Score</div>
+          </div>
+          ${con.groups.map((g) => `
+            <div class="risk-conc-row">
+              <div class="risk-conc-name">${esc(g.label)}
+                <span class="muted">· ${g.count}</span></div>
+              <div class="risk-track ${con.over.some((o) => o.key === g.key) ? 'over' : ''}">
+                <span style="width:${Math.round(g.share * 100)}%"></span></div>
+              <div class="risk-num">${fmtPct(Math.round(g.share * 1000) / 10)}</div>
+              <div class="risk-num muted">${g.meanScore ?? '—'}</div>
+            </div>`).join('')}
+        </div>
+        ${con.over.length ? `<div class="risk-effect warn">
+          <strong>${con.over.map((g) => esc(g.label)).join(' and ')}</strong> ${
+  con.over.length === 1 ? 'is' : 'are'} over 30% of the bench by cost with a deep
+          therapeutic pipeline pointed at ${con.over.length === 1 ? 'it' : 'them'}. That is
+          the exposure that does not diversify away inside a category.</div>`
+    : `<div class="risk-effect">No single impairment with a deep pipeline is over 30% of the
+          bench. Being heavily concentrated in something nobody is researching is a position;
+          being concentrated in cardiometabolic is a bet on a research programme.</div>`}
+      </div>
+    </div>`}
+
+    <div class="card">
+      <div class="card-head"><h2>How it is scored</h2></div>
+      <div class="card-body">
+        <dl class="kv">
+          <dt>Duration</dt><dd>From the life expectancy alone &mdash; 36 months scores 0,
+            168 scores 100. The first-order term, because it multiplies everything else.</dd>
+          <dt>Tail</dt><dd>Starts from sex (40 male, 60 female, 68 survivorship, 52 unstated),
+            adjusted by impairment, and raised by 10 at age 90 and over: reaching that age is
+            itself evidence of robustness no impairment rating accounts for.</dd>
+          <dt>Breakthrough</dt><dd>Pipeline depth for the impairment, scaled by how much time
+            there is for it to land &mdash; from 35% of the raw figure at the shortest
+            durations to all of it at the longest. Never zero: a drug already approved
+            re-rates a case immediately rather than waiting.</dd>
+          <dt>Composite</dt><dd>0.40 duration + 0.25 tail + 0.35 breakthrough. Bands are
+            Low under 25, Moderate to 45, Elevated to 65, High above.</dd>
+        </dl>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Impairment</th><th class="num">Tail</th><th class="num">Pipeline</th>
+            <th>Why it is scored there</th></tr></thead>
+          <tbody>${CATEGORY_KEYS.map((k) => `<tr>
+            <td class="strong">${esc(CATEGORIES[k].label)}</td>
+            <td class="num">${CATEGORIES[k].tail > 0 ? '+' : ''}${CATEGORIES[k].tail}</td>
+            <td class="num">${CATEGORIES[k].pipeline}</td>
+            <td class="secondary risk-note-cell">${esc(CATEGORIES[k].note)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+        <p class="muted" style="font-size:12px;margin:14px 0 0">
+          All of it lives in <code>public/longevity.js</code>. Change a number
+          there and every case re-scores the same way &mdash; which is the point: the value
+          of this is consistency, not accuracy.</p>
+      </div>
+    </div>`;
+
+  return {
+    html,
+    after: () => {
+      const draw = () => {
+        const f = benchForm();
+        const text = $('#lgText')?.value || '';
+        /* The bullets only ever suggest, and only while nothing is chosen —
+           a person who has picked a category has decided, and a box that
+           argues with them afterwards is a box nobody trusts. */
+        const guess = f.category ? null : classifyImpairments(text);
+        if (guess && $('#lgCat')) {
+          $('#lgRead').textContent = `Reads as ${CATEGORIES[guess.category].label
+          } — from “${guess.matched}”. Choose it above to keep it.`;
+        } else if ($('#lgRead')) {
+          $('#lgRead').textContent = text.trim() && !f.category
+            ? 'Nothing recognised in that. Choose an impairment above.' : '';
+        }
+        const s = longevityRisk({ dob: asDob(f.age), gender: f.gender,
+          leMonths: f.leMonths, category: f.category, impairments: text });
+        $('#lgOut').innerHTML = riskReading(s);
+      };
+      ['#lgAge', '#lgSex', '#lgLe', '#lgCat', '#lgText'].forEach((sel) => {
+        $(sel)?.addEventListener('input', draw);
+        $(sel)?.addEventListener('change', draw);
+      });
+      draw();
+
+      $('#lgAdd')?.addEventListener('click', () => {
+        const f = benchForm();
+        if (!Number(f.leMonths))
+          return alert('A life expectancy in months is what makes a case scorable.');
+        /* Whatever the text suggested is fixed at the moment of adding, so a
+           row on the bench never changes its mind later. */
+        const guess = f.category ? null
+          : classifyImpairments($('#lgText')?.value || '');
+        saveBench([...loadBench(), { ...f, category: f.category || guess?.category || '' }]);
+        toast('On the bench'); render();
+      });
+      document.querySelectorAll('[data-lg-drop]').forEach((b) =>
+        b.addEventListener('click', () => {
+          const list = loadBench();
+          list.splice(Number(b.dataset.lgDrop), 1);
+          saveBench(list); render();
+        }));
+      $('#lgClear')?.addEventListener('click', () => {
+        if (!confirm('Clear every case off the bench?')) return;
+        saveBench([]); render();
+      });
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Valuations
+ *
+ * The desk's runs, and what each one was run against. The pricing itself
+ * lives in a different application; this is the list, and the one thing
+ * that application cannot know — which policy or which deal the price
+ * belongs to.
+ * ------------------------------------------------------------------ */
+
+/** A plain number, trimmed of the zeros nobody reads. */
+const fmtNum = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return n % 1 ? String(Number(n.toFixed(2))) : String(n);
+};
+
+/** The paperwork the run produced, through the door this app already has.
+    Only for accounts holding the Policy Valuation grant — anybody else
+    would be sent to a 403, and a link that refuses is worse than no link. */
+const valReport = (v) => (mayValue()
+  ? ` <a class="btn btn-sm" href="/valuation/download/${encodeURIComponent(v.job)}/report"
+       target="_blank" rel="noopener noreferrer">Report</a>` : '');
+
+/** A run said in one line: the price, and the terms it was priced on. */
+const valPrice = (v) => (v.price == null
+  ? '—'
+  : `${fmtMoney(v.price, 0)}${v.mode === 'IRR' && v.target != null
+    ? ` <span class="muted">@ ${fmtNum(v.target)}% IRR</span>` : ''}`);
+
+const valReturn = (v) => (v.irr == null ? '' : `${fmtNum(v.irr)}% IRR`);
+
+/** What a run is attached to, as a link or as an invitation. */
+const valAttachment = (v) => {
+  if (v.policy_id)
+    return `<a href="#/policy/${v.policy_id}">${esc(v.policy_number || 'policy')}</a>
+      <span class="muted">· policy${v.carried_from ? ', carried on funding' : ''}</span>`;
+  if (v.opportunity_id)
+    return `<a href="#/opportunity/${v.opportunity_id}">${
+      esc(v.opp_insured || v.opp_policy_number || 'opportunity')}</a>
+      <span class="muted">· opportunity</span>`;
+  return '<span class="muted">not attached</span>';
+};
+
+async function valuationsView() {
+  const out = await api('/valuations');
+  const list = out.valuations || [];
+  const loose = list.filter((v) => !v.policy_id && !v.opportunity_id).length;
+
+  const html = `
+    <div class="page-head">
+      <div><h1>Valuation runs</h1>
+        <div class="sub">${list.length} run${list.length === 1 ? '' : 's'} on file${
+  loose ? ` · ${loose} not yet attached to anything` : ''}</div></div>
+      <div class="spacer"></div>
+      ${mayValue() ? '<button class="primary" id="priceBtn">Price a policy</button>' : ''}
+    </div>
+    ${out.live ? '' : `<div class="error-box" style="margin-bottom:16px">${esc(out.note)}</div>`}
+    ${list.length ? `
+    <div class="table-wrap"><table class="data">
+      <thead><tr>
+        <th>Ran</th><th>Ran by</th><th>Case</th><th>Insured</th>
+        <th class="num">Face</th><th class="num">Price</th><th class="num">Mean LE</th>
+        <th>Attached to</th><th></th>
+      </tr></thead>
+      <tbody>
+        ${list.map((v) => `<tr>
+          <td>${fmtDate(v.ran_at)}</td>
+          <td class="secondary">${esc(v.ran_by || '—')}</td>
+          <td>${esc(v.case_name || '—')}</td>
+          <td>${esc(v.insured || '—')}</td>
+          <td class="num">${v.face == null ? '—' : fmtMoney(v.face, 0)}</td>
+          <td class="num">${valPrice(v)}</td>
+          <td class="num">${v.mean_le == null ? '—' : `${fmtNum(v.mean_le)} mo`}</td>
+          <td>${valAttachment(v)}</td>
+          <td class="row-actions">${valReport(v)}
+            <button class="btn-sm" data-attach="${esc(v.job)}">${
+  v.policy_id || v.opportunity_id ? 'Change' : 'Attach…'}</button>
+            ${v.policy_id || v.opportunity_id
+    ? `<button class="btn-sm" data-detach="${esc(v.job)}">Detach</button>` : ''}
+          </td></tr>`).join('')}
+      </tbody>
+    </table></div>` : `<div class="empty">
+      <p>No valuations yet. Price a policy and it appears here, ready to attach
+         to a deal or to a policy — in whichever order suits.</p></div>`}`;
+
+  return {
+    html,
+    after: () => {
+      $('#priceBtn')?.addEventListener('click', () => { location.href = '/valuation'; });
+      document.querySelectorAll('[data-attach]').forEach((b) =>
+        b.addEventListener('click', () => openAttachDialog(
+          list.find((v) => v.job === b.dataset.attach))));
+      document.querySelectorAll('[data-detach]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          await api(`/valuations/${encodeURIComponent(b.dataset.detach)}`,
+            { method: 'PUT', body: {} });
+          toast('Detached'); render();
+        }));
+    },
+  };
+}
+
+/**
+ * Attach one run to a policy or a deal.
+ *
+ * Both lists in one dialog rather than two screens: which of the two it
+ * belongs to is usually obvious to the person doing it, and making them
+ * choose a kind before choosing a thing is a step for the software's
+ * benefit rather than theirs.
+ */
+async function openAttachDialog(v) {
+  if (!v) return;
+  const [policies, opps] = await Promise.all([
+    api('/policies').catch(() => []),
+    api('/opportunities').catch(() => []),
+  ]);
+  const open = opps.filter((o) => o.status !== 'Funded');
+
+  openDialog(`Attach the ${esc(v.insured || v.case_name || 'valuation')} valuation`, `
+    <p style="margin:0 0 14px;font-size:14px">
+      Priced ${fmtDate(v.ran_at)}${v.ran_by ? ` by ${esc(v.ran_by)}` : ''} at
+      <strong>${v.price == null ? '—' : fmtMoney(v.price, 0)}</strong>${
+  v.mode === 'IRR' && v.target != null ? ` on a ${fmtNum(v.target)}% target` : ''}.
+      Attaching it does not change either record — it files the pricing where somebody
+      looking at that policy or that deal will find it.
+    </p>
+    <div class="field"><label>An opportunity</label>
+      <select name="opportunity_id">
+        <option value="">—</option>
+        ${open.map((o) => `<option value="${o.id}" ${
+  Number(v.opportunity_id) === Number(o.id) ? 'selected' : ''}>${
+  esc(o.insured_last_name || o.policy_number || `#${o.id}`)}${
+  o.carrier_name ? ` · ${esc(o.carrier_name)}` : ''}</option>`).join('')}
+      </select></div>
+    <div class="field"><label>…or a policy</label>
+      <select name="policy_id">
+        <option value="">—</option>
+        ${policies.map((p) => `<option value="${p.id}" ${
+  Number(v.policy_id) === Number(p.id) ? 'selected' : ''}>${
+  esc(p.policy_number || `#${p.id}`)}${
+  p.insured_last ? ` · ${esc(p.insured_last)}` : ''}</option>`).join('')}
+      </select>
+      <span class="muted" style="font-size:12px">
+        One or the other. A valuation attached to an opportunity follows it onto the
+        policy when the deal is funded, so there is rarely a reason to attach it to
+        both — and it will not let you.</span></div>
+  `, async (val) => {
+    if (val.policy_id && val.opportunity_id)
+      throw new Error('Choose the opportunity or the policy, not both.');
+    await api(`/valuations/${encodeURIComponent(v.job)}`, { method: 'PUT', body: {
+      policy_id: val.policy_id || null, opportunity_id: val.opportunity_id || null } });
+    toast(val.policy_id || val.opportunity_id ? 'Valuation attached' : 'Valuation detached');
+  }, 'Attach it');
+}
+
+/**
+ * The panel that hangs on a policy or an opportunity.
+ *
+ * Read-only apart from the one button: the run itself belongs to the
+ * valuation application, and this is a reference to it, not a copy of it.
+ */
+function valuationPanel(list, kind, id) {
+  const rows = (list || []).map((v) => `
+    <tr>
+      <td>${fmtDate(v.ran_at)}</td>
+      <td class="secondary">${esc(v.ran_by || '—')}</td>
+      <td class="num">${valPrice(v)}</td>
+      <td class="num">${v.mean_le == null ? '—' : `${fmtNum(v.mean_le)} mo`}</td>
+      <td>${v.carried_from
+    ? '<span class="muted">carried over when the deal was funded</span>' : ''}</td>
+      <td class="row-actions">${valReport(v)}
+        ${canEditData()
+    ? `<button class="btn-sm" data-val-detach="${esc(v.job)}">Detach</button>` : ''}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="card" style="margin-top:22px">
+      <div class="card-head">
+        <h2>Valuations</h2><div class="spacer"></div>
+        ${canEditData() ? '<button class="btn-sm" id="attachValBtn">Attach a valuation…</button>' : ''}
+      </div>
+      <div class="card-body">
+        ${rows ? `<div class="table-wrap"><table class="data"><thead><tr>
+            <th>Priced</th><th>By</th><th class="num">Price</th>
+            <th class="num">Mean LE</th><th></th><th></th>
+          </tr></thead><tbody>${rows}</tbody></table></div>`
+    : `<p class="muted" style="margin:0">Nothing attached yet. A valuation run in
+         Policy Valuation can be filed here at any time — before this record existed
+         or long after.</p>`}
+      </div>
+    </div>`;
+}
+
+/** Wire the panel's two buttons. Call from a view's `after`. */
+function wireValuationPanel(kind, id) {
+  $('#attachValBtn')?.addEventListener('click', async () => {
+    const out = await api('/valuations');
+    const free = (out.valuations || []).filter((v) => !v.policy_id && !v.opportunity_id);
+    if (!free.length) {
+      openDialog('Nothing to attach', `
+        <p style="margin:0;font-size:14px">Every valuation on file is already attached to
+        something. Price a policy in <a href="/valuation">Policy Valuation</a> and it will
+        be waiting here, or detach one from wherever it is now.</p>`);
+      return;
+    }
+    openDialog('Attach a valuation', `
+      <div class="field"><label>Which run</label>
+        <select name="job">
+          ${free.map((v) => `<option value="${esc(v.job)}">${[fmtDate(v.ran_at),
+    esc(v.insured || v.case_name || v.job),
+    v.price == null ? 'no price' : fmtMoney(v.price, 0)].join(' · ')}</option>`).join('')}
+        </select>
+        <span class="muted" style="font-size:12px">Only runs not already attached to
+          something are listed.</span></div>
+    `, async (val) => {
+      await api(`/valuations/${encodeURIComponent(val.job)}`, { method: 'PUT', body:
+        kind === 'policy' ? { policy_id: id } : { opportunity_id: id } });
+      toast('Valuation attached');
+    }, 'Attach it');
+  });
+  document.querySelectorAll('[data-val-detach]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      await api(`/valuations/${encodeURIComponent(b.dataset.valDetach)}`,
+        { method: 'PUT', body: {} });
+      toast('Detached'); render();
+    }));
+}
+
 /* ------------------------------ render ------------------------------- */
 
 const VIEWS = {
@@ -9325,6 +9917,8 @@ const VIEWS = {
   investors: investorsView,
   investor: investorView,
   documents: documentsView,
+  valuations: valuationsView,
+  longevity: longevityView,
   reports: () => reportsView(api, state),
   import: importView,
   // An investor has an Agreements tab of their own; for staff the list
