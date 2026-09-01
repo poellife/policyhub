@@ -148,6 +148,49 @@ check('and on simple it is the original sentence again',
   (await note()).replace(/\s+/g, ' ').slice(-160));
 
 /* ------------------------------------------------------------------ *
+ * The one-pager
+ *
+ * The document is built by a different module from the screens, so it is
+ * the place the setting is most likely to be forgotten -- and the worst
+ * place to forget it, because the sheet is what leaves the building.
+ * ------------------------------------------------------------------ */
+console.log('\nAND THE ONE-PAGER IS BUILT THE SAME WAY');
+await set('both');
+await p.goto(`${BASE}/#/opportunity/${opp.id}/sheet-100`);
+await p.waitForSelector('.rpt-sheet', { timeout: 20000 });
+await p.waitForTimeout(900);
+const sheet = () => p.locator('.rpt-sheet').innerText();
+let sheetText = await sheet();
+check('the sheet carries both readings, not just the simple one',
+  sheetText.includes(SIMPLE) && sheetText.includes(CMP),
+  sheetText.replace(/\s+/g, ' ').slice(0, 180));
+check('the headline line says both',
+  /at life expectancy/i.test(sheetText) && sheetText.indexOf(CMP) < sheetText.indexOf('DEAL TERMS'),
+  sheetText.replace(/\s+/g, ' ').slice(0, 200));
+check('the Return column is labelled so the reader knows which is which',
+  /simple\s*·\s*compounded/i.test(sheetText));
+check('and the footnote no longer claims the figures are simple interest only',
+  /Two readings are shown/i.test(sheetText),
+  sheetText.replace(/\s+/g, ' ').match(/Rates are solved[^.]*\.[^.]*\./)?.[0] || '');
+
+console.log('\nAND THE SHEET CAN BE SWITCHED WITHOUT LEAVING IT');
+check('the control is on the one-pager screen too',
+  await p.locator('#interestShown').count() === 1);
+await set('simple');
+sheetText = await sheet();
+check('back to simple, the compounding figure is gone from the document',
+  sheetText.includes(SIMPLE) && !sheetText.includes(CMP),
+  sheetText.replace(/\s+/g, ' ').slice(0, 160));
+check('and the footnote is the simple-interest sentence again',
+  /simple interest over actual days, not compounded/i.test(sheetText));
+
+await set('compound');
+sheetText = await sheet();
+check('on compounded the sheet warns it is not the agreements’ convention',
+  /not the\s+simple-interest convention/i.test(sheetText),
+  sheetText.replace(/\s+/g, ' ').match(/The rate shown[^.]*\.[^.]*\./)?.[0] || '');
+
+/* ------------------------------------------------------------------ *
  * It is remembered
  * ------------------------------------------------------------------ */
 console.log('\nAND IT IS REMEMBERED AGAINST THE ACCOUNT, NOT THE BROWSER');

@@ -6197,6 +6197,7 @@ async function opportunitySheetView() {
           <h1>One-pager</h1>
           <div class="sub">${esc(oppName(o))}${share < 100 ? ` · ${share}% participation` : ''}</div></div>
         <div class="spacer"></div>
+        ${interestToggle()}
         <button class="primary" id="sheetPrint">Save as PDF</button>
       </div>
       <div class="rpt-hint no-print">
@@ -6204,8 +6205,12 @@ async function opportunitySheetView() {
         <strong>Default</strong>, turn <strong>off</strong> "Headers and footers", and tick
         <strong>Background graphics</strong> so the rules and shading come through.
       </div>
-      <div class="rpt-output">${buildOpportunitySheet(o, { share })}</div>`,
-    after: () => { $('#sheetPrint')?.addEventListener('click', () => window.print()); },
+      <div class="rpt-output">${buildOpportunitySheet(o, {
+    share, interest: interestShown() })}</div>`,
+    after: () => {
+      wireInterestToggle();
+      $('#sheetPrint')?.addEventListener('click', () => window.print());
+    },
   };
 }
 

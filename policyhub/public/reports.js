@@ -1516,6 +1516,19 @@ const SCENARIO_LABEL = { '-24': '24 months early', 0: 'At life expectancy', 24: 
  */
 export function buildOpportunitySheet(o, opts = {}) {
   const share = Number(opts.share) > 0 ? Number(opts.share) : 100;
+  /* Simple interest, the compounding equivalent, or both -- passed in
+     rather than read from anywhere, because this module builds documents
+     and holds no state. The screen that opens the sheet hands it whatever
+     the reader has the Opportunities screens set to, so the paper and the
+     screen can never quote different conventions. */
+  const interest = ['simple', 'compound', 'both'].includes(opts.interest)
+    ? opts.interest : 'simple';
+  const rateCell = (simple, compound) => {
+    if (interest === 'compound') return fmtRate(compound);
+    if (interest === 'simple' || compound === null || compound === undefined)
+      return fmtRate(simple);
+    return `${fmtRate(simple)} <span class="rpt-dim">${fmtRate(compound)} cmp</span>`;
+  };
   const f = share / 100;
   const partial = share < 100 - 1e-9;
 
@@ -1547,7 +1560,7 @@ export function buildOpportunitySheet(o, opts = {}) {
     ? `${o.le_provider_2 || 'second report'} ${o.le_months_2} mo` : null;
 
   const scen = (a.scenarios || []);
-  const irrHead = base ? fmtRate(base.rate) : '—';
+  const irrHead = base ? rateCell(base.rate, base.compound_rate) : '—';
 
   const runningRows = (() => {
     let cum = 0;
@@ -1594,7 +1607,9 @@ export function buildOpportunitySheet(o, opts = {}) {
         <thead><tr><th>Maturity</th><th class="num">Premiums paid</th>
           <th class="num">Total invested</th><th class="num">Death benefit</th>
           <th class="num">Profit</th><th class="num">Multiple</th>
-          <th class="num">Years</th><th class="num">Return</th></tr></thead>
+          <th class="num">Years</th><th class="num">Return${
+  interest === 'both' ? '<br><span class="rpt-dim">simple · compounded</span>'
+    : interest === 'compound' ? '<br><span class="rpt-dim">compounded</span>' : ''}</th></tr></thead>
         <tbody>${scen.map((s) => `<tr class="${s.offset_months === 0 ? 'at-le' : ''}">
           <td>${esc(SCENARIO_LABEL[String(s.offset_months)] || `${s.offset_months} mo`)}
             <span class="rpt-dim">${fmtDate(s.matures_on)}</span></td>
@@ -1604,13 +1619,20 @@ export function buildOpportunitySheet(o, opts = {}) {
           <td class="num">${fmtExact(s.profit * f)}</td>
           <td class="num">${s.multiple ? `${s.multiple.toFixed(2)}×` : '—'}</td>
           <td class="num">${Number(s.years).toFixed(1)}</td>
-          <td class="num strong">${fmtRate(s.rate)}</td></tr>`).join('')
+          <td class="num strong">${rateCell(s.rate, s.compound_rate)}</td></tr>`).join('')
           || '<tr><td colspan="8">Not priced — an asking price and a death benefit are needed.</td></tr>'}</tbody>
       </table>
       <p class="rpt-note">Life expectancy is a median, not a promise — around half of insureds
         outlive it, and every extra month is another premium paid. The late row is the case worth
-        underwriting against. Rates are solved on the actual date of every cash flow over a
-        actual days as simple interest, not compounded, and are identical at any participation percentage.</p>
+        underwriting against. Rates are solved on the actual date of every cash flow and are
+        identical at any participation percentage.${interest === 'both'
+    ? ' Two readings are shown: simple interest over actual days -- the convention the'
+      + ' operating agreements are written in -- and beside it the compounding equivalent,'
+      + ' solved date-exactly.'
+    : interest === 'compound'
+      ? ' The rate shown is the compounding equivalent, solved date-exactly. It is not the'
+        + ' simple-interest convention the operating agreements are written in.'
+      : ' They are simple interest over actual days, not compounded.'}</p>
     </div>
 
     <div class="rpt-cols">
