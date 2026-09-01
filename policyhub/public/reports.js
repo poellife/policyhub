@@ -1554,7 +1554,24 @@ export function buildOpportunitySheet(o, opts = {}) {
   const avg = years ? total / years : 0;
   const dynamics = describeRuns(rows, o.insured_dob);
 
-  const name = `${o.insured_first_name || ''} ${o.insured_last_name || ''}`.trim() || o.policy_number || '—';
+  /* Initials, never the name.
+   *
+   * This document leaves the building. It carries a life expectancy, a
+   * date of birth's worth of age, a state, and a list of the diagnoses
+   * driving that expectancy -- which is to say it is a medical file, and
+   * a medical file with a name on it is a different object from one
+   * without. The recipients are qualified investors who have signed for
+   * it, and they still do not need to know who she is.
+   *
+   * The full name stays on the screens inside the application, where the
+   * reader is signed in and the record is the record. It comes off here,
+   * at the one point the paper is handed to somebody. */
+  const initial = (v) => {
+    const c = String(v || '').trim().replace(/[^\p{L}\p{N}]/gu, '').charAt(0);
+    return c ? `${c.toUpperCase()}.` : '';
+  };
+  const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
+    || o.policy_number || '—';
   const leYears = o.le_months ? (Number(o.le_months) / 12).toFixed(1) : null;
   const leSecond = o.le_months_2
     ? `${o.le_provider_2 || 'second report'} ${o.le_months_2} mo` : null;
@@ -1575,7 +1592,9 @@ export function buildOpportunitySheet(o, opts = {}) {
     ${letterhead('Life Settlement Investment Opportunity',
       `${esc(o.carrier_name || '—')}${o.policy_number ? ` · ${esc(o.policy_number)}` : ''}`,
       opts.asOf || longDate())}
-    <div class="rpt-confidential">Confidential — for qualified investors only. Do not distribute.</div>
+    <div class="rpt-confidential">Confidential — for qualified investors only. Do not distribute.
+      The insured is identified by initials: this sheet carries the medical picture behind the
+      life expectancy, and a name is not needed to weigh the deal.</div>
 
     <h2 class="rpt-h2">${esc(name)}</h2>
     <div class="opp-sheet-sub">
@@ -1622,17 +1641,6 @@ export function buildOpportunitySheet(o, opts = {}) {
           <td class="num strong">${rateCell(s.rate, s.compound_rate)}</td></tr>`).join('')
           || '<tr><td colspan="8">Not priced — an asking price and a death benefit are needed.</td></tr>'}</tbody>
       </table>
-      <p class="rpt-note">Life expectancy is a median, not a promise — around half of insureds
-        outlive it, and every extra month is another premium paid. The late row is the case worth
-        underwriting against. Rates are solved on the actual date of every cash flow and are
-        identical at any participation percentage.${interest === 'both'
-    ? ' Two readings are shown: simple interest over actual days -- the convention the'
-      + ' operating agreements are written in -- and beside it the compounding equivalent,'
-      + ' solved date-exactly.'
-    : interest === 'compound'
-      ? ' The rate shown is the compounding equivalent, solved date-exactly. It is not the'
-        + ' simple-interest convention the operating agreements are written in.'
-      : ' They are simple interest over actual days, not compounded.'}</p>
     </div>
 
     <div class="rpt-cols">
@@ -1686,27 +1694,64 @@ export function buildOpportunitySheet(o, opts = {}) {
       ${bulletList(o.thesis)}
     </div>` : ''}
 
-    <div class="rpt-block opp-sheet-schedule">
-      <h3 class="rpt-h3">Premiums, year by year${partial ? ` — ${share}% participation` : ''}</h3>
-      <table class="rpt-table rpt-table-tight">
-        <thead><tr><th class="num">Year</th><th class="num">Age</th><th>Due</th>
-          <th class="num">Full premium</th>${partial ? `<th class="num">${share}% share</th>` : ''}
-          <th class="num">Cumulative${partial ? ` (${share}%)` : ''}</th></tr></thead>
-        <tbody>${runningRows.map((r) => `<tr class="${r.amount === 0 ? 'rpt-zero' : ''}">
-          <td class="num">${r.n}</td><td class="num">${r.age ?? '—'}</td>
-          <td>${fmtDate(r.date)}${r.projected ? ' <span class="rpt-dim">projected</span>' : ''}</td>
-          <td class="num">${fmtExact(r.amount)}</td>
-          ${partial ? `<td class="num strong">${fmtExact(r.amount * f)}</td>` : ''}
-          <td class="num">${fmtExact(r.cum * f)}</td></tr>`).join('')
-          || '<tr><td colspan="6">No schedule posted.</td></tr>'}</tbody>
-        ${runningRows.length ? `<tfoot><tr><td colspan="3">Total over ${years} year${years === 1 ? '' : 's'}</td>
+    ${(() => {
+    /* The schedule, side by side when it is long.
+     *
+     * The sheet prints landscape, so a single column of sixteen years
+     * leaves two and a half inches of white down the right and then
+     * spills one row onto a third page -- a page carrying one premium,
+     * a total and a footer. Split in half it fits beside itself and the
+     * document ends where it should. Under a dozen years there is
+     * nothing to gain, and a split table reads worse than a short one.
+     *
+     * The halves are contiguous, first years on the left, so it is still
+     * read top-to-bottom-then-across the way a schedule is read. */
+    const head = `<thead><tr><th class="num">Year</th><th class="num">Age</th><th>Due</th>
+        <th class="num">Full premium</th>${partial ? `<th class="num">${share}% share</th>` : ''}
+        <th class="num">Cumulative${partial ? ` (${share}%)` : ''}</th></tr></thead>`;
+    const body = (list) => list.map((r) => `<tr class="${r.amount === 0 ? 'rpt-zero' : ''}">
+        <td class="num">${r.n}</td><td class="num">${r.age ?? '—'}</td>
+        <td>${fmtDate(r.date)}${r.projected ? ' <span class="rpt-dim">projected</span>' : ''}</td>
+        <td class="num">${fmtExact(r.amount)}</td>
+        ${partial ? `<td class="num strong">${fmtExact(r.amount * f)}</td>` : ''}
+        <td class="num">${fmtExact(r.cum * f)}</td></tr>`).join('');
+    const foot = !runningRows.length ? ''
+      : `<tfoot><tr><td colspan="3">Total over ${years} year${years === 1 ? '' : 's'}</td>
           <td class="num">${fmtExact(total)}</td>
           ${partial ? `<td class="num">${fmtExact(total * f)}</td>` : ''}
-          <td class="num">${fmtExact(total * f)}</td></tr></tfoot>` : ''}
-      </table>
+          <td class="num">${fmtExact(total * f)}</td></tr></tfoot>`;
+
+    /* Split only when the table is narrow enough to halve. A participation
+       sheet carries an extra share column, and six columns squeezed into
+       half a landscape page wrap and cost more height than the split
+       saves. */
+    const split = runningRows.length > 12 && !partial;
+    const half = Math.ceil(runningRows.length / 2);
+    const tables = !runningRows.length
+      ? `<table class="rpt-table rpt-table-tight">${head}
+           <tbody><tr><td colspan="6">No schedule posted.</td></tr></tbody></table>`
+      : split
+        /* Two cells of an outer table rather than a grid or a flex row.
+           Print engines fragment CSS grid badly -- Chromium lays the
+           tracks out correctly on screen and then stacks them when it
+           paginates -- and a nested table is the one two-column
+           construction that survives a page break intact. */
+        ? `<table class="opp-sheet-schedule-frame"><tbody><tr>
+             <td><table class="rpt-table rpt-table-tight">${head}
+               <tbody>${body(runningRows.slice(0, half))}</tbody></table></td>
+             <td><table class="rpt-table rpt-table-tight">${head}
+               <tbody>${body(runningRows.slice(half))}</tbody>${foot}</table></td>
+           </tr></tbody></table>`
+        : `<table class="rpt-table rpt-table-tight">${head}
+             <tbody>${body(runningRows)}</tbody>${foot}</table>`;
+
+    return `<div class="rpt-block opp-sheet-schedule ${split ? 'is-split' : ''}">
+      <h3 class="rpt-h3">Premiums, year by year${partial ? ` — ${share}% participation` : ''}</h3>
+      <div class="opp-sheet-schedule-cols">${tables}</div>
       ${projected.length ? `<p class="rpt-note">Rows marked projected fall past the end of the posted
         schedule and continue at its last annual rate, to life expectancy.</p>` : ''}
-    </div>
+    </div>`;
+  })()}
 
     <div class="rpt-disclaimer">
       This document is for information only and is not an offer to sell, a solicitation to buy, or a

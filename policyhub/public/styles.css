@@ -937,7 +937,10 @@ table.rpt-table tr.rpt-zero td { color: #5f5f5f; }
 .opp-sheet .rpt-disclaimer, .opp-sheet .rpt-footer { break-before: avoid; }
 /* Two deliberate pages: the case, then the arithmetic behind it. Letting the
    schedule start wherever page one happens to end splits it across a fold. */
-@media print { .opp-sheet-schedule { break-before: page; } }
+/* The year-by-year table used to be forced onto a page of its own. That
+   was right in portrait, where it filled one; on a landscape page it is
+   capped at 7.6in and leaves most of a sheet blank. It now flows, and the
+   rules below keep it readable if it does break. */
 
 /* A section rule inside a long dialog, so the form reads in parts. */
 .dlg-section {
@@ -1674,3 +1677,36 @@ table.data td.risk-note-cell {
   font-size: .78em; font-weight: 500; color: var(--text-secondary);
   white-space: nowrap;
 }
+
+/* ------------------------- the one-pager, landscape -------------------
+   The sheet prints on Letter landscape (see setSheetOrientation), which
+   gives the scenario grid the width it was drawn for. Two blocks then
+   need holding back, or they sprawl across ten inches for the sake of
+   five narrow columns and read as a spreadsheet rather than a document. */
+.opp-sheet-schedule { max-width: 7.6in; }
+.opp-sheet .rpt-thesis { max-width: 7.6in; }
+
+@media print {
+  /* The year-by-year table is the last thing on the sheet and the one
+     most likely to be read across a rule, so it keeps its banding and
+     its header if it has to break. */
+  .opp-sheet-schedule table { break-inside: auto; }
+  .opp-sheet-schedule thead { display: table-header-group; }
+  .opp-sheet-schedule tr { break-inside: avoid; }
+  /* The total is the last row of the table, not a page of its own. Left to
+     itself the browser will happily start a fresh sheet for one line, a
+     rule and a footer -- which is how a two-page document became three. */
+  .opp-sheet-schedule tfoot { break-before: avoid; break-inside: avoid; }
+  .opp-sheet-schedule tbody tr:last-child { break-after: avoid; }
+}
+
+/* A long schedule prints as two contiguous halves side by side. Landscape
+   has the width for it, and it is the difference between a two-page sheet
+   and a three-page one whose last page carries a single row. */
+.opp-sheet-schedule.is-split { max-width: none; }
+.opp-sheet-schedule-frame { width: 100%; border-collapse: separate; border-spacing: 0; }
+.opp-sheet-schedule-frame > tbody > tr > td {
+  width: 50%; vertical-align: top; padding: 0; border: 0;
+}
+.opp-sheet-schedule-frame > tbody > tr > td:first-child { padding-right: 22px; }
+.opp-sheet-schedule-frame > tbody > tr > td:last-child { padding-left: 22px; }

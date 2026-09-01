@@ -129,7 +129,13 @@ check('three LE scenarios are shown',
   /24 months early/i.test(detail) && /At life expectancy/i.test(detail) && /24 months late/i.test(detail));
 check('the life-expectancy column is the emphasised one',
   (await inv.locator('.scenario-table .at-le').count()) > 5);
-check('it says LE is a median, not a promise', /half of insureds outlive it/i.test(detail));
+/* The "life expectancy is a median" caveat under the scenario table was
+   removed from this screen on request. Asserted as absent rather than
+   deleted, so that if it ever comes back it is because somebody meant it
+   to. The warning itself still travels on the one-pager's disclaimer,
+   which is the copy that leaves the building. */
+check('the median caveat is deliberately not on this screen',
+  !/half of insureds outlive it/i.test(detail));
 check('the premium schedule is published', /PREMIUM SCHEDULE/i.test(detail));
 check('and the investor sees what their own share would cost', /YOUR SHARE/i.test(detail));
 const irrs = await inv.$$eval('.scenario-table tbody tr:last-child td',
@@ -294,7 +300,13 @@ check('and the benefit that share of the face', /\$1,100,000\.00|\$300,000\.00/.
 check('the whole-policy price is still shown for context', /\$780,000\.00 for the whole policy/.test(sheet));
 check('three maturity scenarios are on it',
   /24 months early/.test(sheet) && /At life expectancy/.test(sheet) && /24 months late/.test(sheet));
-check('the median caveat is on the page, not buried', /half of insureds outlive it/i.test(sheet));
+/* The footnote under the scenario table is gone; the disclaimer at the
+   foot of the sheet still carries the substance, and it is the paragraph
+   a recipient would be pointed at. */
+check('the sheet still warns that a longer life reduces the return',
+  /live materially longer or shorter than the estimate/i.test(sheet)
+  && /a longer life reduces the return/i.test(sheet),
+  (sheet.match(/Life expectancy estimates[^.]*\.[^.]*\./) || [''])[0].slice(0, 150));
 check('the typed medical factors are reproduced', /CAD s\/p 5 stents/.test(sheet));
 check('so is the underwriter assessment', /higher than at prior underwriting/.test(sheet));
 check('and the investment case', /Two independent LE reports/.test(sheet));
@@ -313,12 +325,22 @@ await staff.screenshot({ path: `${S}/oi6-sheet.png`, fullPage: true });
 
 // A real trip through the print stylesheet: the layout is the deliverable.
 await staff.emulateMedia({ media: 'print' });
-await staff.pdf({ path: `${S}/oi6-sheet.pdf`, printBackground: true, format: 'Letter',
-  margin: { top: '0.5in', bottom: '0.5in', left: '0.5in', right: '0.5in' } });
+/* preferCSSPageSize, so this is the page the sheet actually asks for --
+   Letter landscape, set by setSheetOrientation -- rather than a portrait
+   one forced here. Forcing the format was testing a layout the
+   application no longer produces. */
+await staff.pdf({ path: `${S}/oi6-sheet.pdf`, printBackground: true,
+  preferCSSPageSize: true });
 await staff.emulateMedia({ media: 'screen' });
-const pages = (await import('node:fs')).readFileSync(`${S}/oi6-sheet.pdf`).toString('latin1')
-  .split('/Type /Page').length - 1;
+/* `/Type /Page` also matches `/Type /Pages`, the page-tree node, so the
+   naive split counted one page more than the document has. */
+const raw = (await import('node:fs')).readFileSync(`${S}/oi6-sheet.pdf`).toString('latin1');
+const pages = (raw.split('/Type /Page').length - 1) - (raw.split('/Type /Pages').length - 1);
 check('it prints as a short document, not a sprawl', pages <= 3, `${pages} PDF pages`);
+const box = (await import('node:fs')).readFileSync(`${S}/oi6-sheet.pdf`).toString('latin1')
+  .match(/\/MediaBox \[([^\]]+)\]/);
+const dims = box ? box[1].trim().split(/\s+/).map(Number) : [];
+check('and it prints landscape', dims[2] > dims[3], JSON.stringify(dims));
 
 await staff.goto(`${BASE}/#/opportunity/${open.id}/sheet-100`);
 await staff.waitForSelector('.opp-sheet'); await staff.waitForTimeout(700);

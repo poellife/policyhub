@@ -5216,7 +5216,6 @@ async function opportunityView() {
       </table></div>`;
   };
 
-  const projected = a.scenarios.some((s) => s.projected_beyond_schedule > 0);
 
   const html = `
     <div class="page-head">
@@ -5330,29 +5329,12 @@ async function opportunityView() {
       <div class="card-head"><h2>Return if the insured lives to…</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">life expectancy, and two years either side</span></div>
       <div class="card-body flush">${scenarioTable()}</div>
-      <div class="card-body">
-        <span class="muted" style="font-size:12px">
-          Life expectancy is a median, not a promise — around half of insureds outlive it, and
-          every extra month is another premium paid and another month of waiting. That is why
-          the late column is here: it is the case worth underwriting against.
-          ${a.le_from ? `The estimate runs from ${fmtDate(a.le_from)}, the date of the LE report,
-          not from today.` : ''}
-          ${projected ? 'Premiums beyond the posted schedule are continued at the same annual rate.' : ''}
-          ${interestShown() === 'compound'
-    ? `The return shown is the compounding rate — the same cash flows solved date-exactly,
-       which is what an investor comparing this against a bond or a fund is holding in their
-       head. It is <strong>not</strong> the convention the operating agreements use: those
-       are written in simple interest, and switching this control back is what reads them.`
-    : interestShown() === 'both'
-      ? `Two readings of the same cash flows. The first is simple interest over actual days —
-         no compounding — which is the convention the operating agreements are written in and
-         what the provider workbooks quote. The second is the compounding equivalent, solved
-         date-exactly. On a hold this long they are far apart, and which one is being quoted
-         matters more than either figure.`
-      : `The return is simple interest over actual days — no compounding — the same
-         convention the operating agreements use.`}
-        </span>
-      </div>
+      ${''/* The footnote that used to sit here -- life expectancy is a
+             median, what the late column is for, which interest convention
+             the figures are in -- was removed on request. The column
+             headings and the interest control say what the numbers are;
+             the reader of this screen is staff or an investor who has the
+             one-pager's disclosure. */}
     </div>
 
     ${staff && (o.account_value != null || o.cash_surrender_value != null) ? `
@@ -6201,7 +6183,8 @@ async function opportunitySheetView() {
         <button class="primary" id="sheetPrint">Save as PDF</button>
       </div>
       <div class="rpt-hint no-print">
-        In the print dialog choose <strong>Save as PDF</strong>. Set Margins to
+        In the print dialog choose <strong>Save as PDF</strong>. It is set to print
+        <strong>landscape</strong> — leave Layout on whatever the dialog offers. Set Margins to
         <strong>Default</strong>, turn <strong>off</strong> "Headers and footers", and tick
         <strong>Background graphics</strong> so the rules and shading come through.
       </div>
@@ -6214,7 +6197,16 @@ async function opportunitySheetView() {
   };
 }
 
-/** The sheet is portrait; the schedule reports set this to landscape. */
+/**
+ * The one-pager prints landscape.
+ *
+ * It is a two-column document with wide tables in both columns -- the
+ * scenario grid is eight columns and the premium schedule is five -- and
+ * a landscape page gives them the width they were drawn for instead of
+ * squeezing them into a portrait column. The schedule reports in
+ * reports.js set this same tag for themselves; whichever screen was
+ * opened last wins, which is correct because only one is ever printed.
+ */
 function setSheetOrientation() {
   let tag = document.getElementById('printPageStyle');
   if (!tag) {
@@ -6222,7 +6214,7 @@ function setSheetOrientation() {
     tag.id = 'printPageStyle';
     document.head.appendChild(tag);
   }
-  tag.textContent = '@page { size: Letter portrait; margin: 0.5in; }';
+  tag.textContent = '@page { size: Letter landscape; margin: 0.45in; }';
 }
 
 async function openShareDialog(o) {

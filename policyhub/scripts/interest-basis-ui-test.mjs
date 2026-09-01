@@ -126,26 +126,21 @@ check('every scenario column, not just the one at life expectancy',
   (await table.locator('tr:has(td:text-matches("^Return")) .rate-alt').count()) === 3,
   String(await table.locator('tr:has(td:text-matches("^Return")) .rate-alt').count()));
 
-console.log('\nTHE FOOTNOTE STOPS CLAIMING WHAT IS NO LONGER TRUE');
-/* The footnote, not the label inside the table: the card-body span that
-   carries the life-expectancy caveat is the one that also states the
-   convention. */
-const note = () => p.locator('.card:has(.scenario-table) .card-body span.muted')
-  .filter({ hasText: 'Life expectancy is a median' }).innerText();
-check('on both, it says the numbers are two readings of the same flows',
-  /Two readings of the same cash flows/i.test(await note()),
-  (await note()).replace(/\s+/g, ' ').slice(-160));
-
-await set('compound');
-check('on compounded, it says plainly that this is NOT the agreements’ convention',
-  /not.{0,30}the convention the operating agreements use/is.test(await note()),
-  (await note()).replace(/\s+/g, ' ').slice(-200));
-
-await set('simple');
-check('and on simple it is the original sentence again',
-  /simple interest over actual days — no compounding — the same\s+convention/i
-    .test(await note()),
-  (await note()).replace(/\s+/g, ' ').slice(-160));
+/* The footnote under this table -- life expectancy is a median, which
+   convention the rates are in -- was removed on request. What is checked
+   instead is that it stayed removed: a caption that reappears saying the
+   figures are simple interest, above a table showing compounded ones,
+   is worse than no caption at all. */
+console.log('\nAND THE FOOTNOTE UNDER IT IS GONE, IN EVERY MODE');
+for (const mode of ['both', 'compound', 'simple']) {
+  await set(mode);
+  const card = await p.locator('.card:has(.scenario-table)').innerText();
+  check(`no life-expectancy caveat on ${mode}`,
+    !/Life expectancy is a median/i.test(card));
+  check(`and no claim about the interest convention on ${mode}`,
+    !/operating agreements/i.test(card),
+    card.replace(/\s+/g, ' ').slice(-120));
+}
 
 /* ------------------------------------------------------------------ *
  * The one-pager
@@ -169,9 +164,8 @@ check('the headline line says both',
   sheetText.replace(/\s+/g, ' ').slice(0, 200));
 check('the Return column is labelled so the reader knows which is which',
   /simple\s*·\s*compounded/i.test(sheetText));
-check('and the footnote no longer claims the figures are simple interest only',
-  /Two readings are shown/i.test(sheetText),
-  sheetText.replace(/\s+/g, ' ').match(/Rates are solved[^.]*\.[^.]*\./)?.[0] || '');
+check('and the sheet carries no interest-convention footnote either',
+  !/Rates are solved|operating agreements|Life expectancy is a median/i.test(sheetText));
 
 console.log('\nAND THE SHEET CAN BE SWITCHED WITHOUT LEAVING IT');
 check('the control is on the one-pager screen too',
@@ -181,14 +175,11 @@ sheetText = await sheet();
 check('back to simple, the compounding figure is gone from the document',
   sheetText.includes(SIMPLE) && !sheetText.includes(CMP),
   sheetText.replace(/\s+/g, ' ').slice(0, 160));
-check('and the footnote is the simple-interest sentence again',
-  /simple interest over actual days, not compounded/i.test(sheetText));
+check('and still no footnote', !/Rates are solved/i.test(sheetText));
 
 await set('compound');
 sheetText = await sheet();
-check('on compounded the sheet warns it is not the agreements’ convention',
-  /not the\s+simple-interest convention/i.test(sheetText),
-  sheetText.replace(/\s+/g, ' ').match(/The rate shown[^.]*\.[^.]*\./)?.[0] || '');
+check('nor on compounded', !/Rates are solved|operating agreements/i.test(sheetText));
 
 /* ------------------------------------------------------------------ *
  * It is remembered
