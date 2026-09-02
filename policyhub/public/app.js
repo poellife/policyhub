@@ -10262,7 +10262,11 @@ async function leReportsView() {
     <div class="page-head">
       <div><h1>LE reports</h1>
         <div class="sub">${list.length} case${list.length === 1 ? '' : 's'}${
-  running.length ? ` · ${running.length} still running` : ''}</div></div>
+  running.length ? ` · ${running.length} still running` : ''}${
+  /* Said rather than left to be inferred: a manager sees only what they
+     ran, and a list that quietly omits the desk's other cases should say
+     so instead of looking like the whole book. */
+  out.scope === 'mine' ? ' · yours only' : ''}</div></div>
     </div>
 
     ${!out.configured ? `<div class="error-box" style="margin-bottom:16px">
@@ -10272,6 +10276,11 @@ async function leReportsView() {
       <div class="card-head"><h2>Run a case</h2></div>
       <div class="card-body">${leDropZone('', '')}</div>
     </div>`}
+
+    ${out.scope === 'mine' ? `<div class="notice-box" style="margin:18px 0 0">
+      <strong>These are your cases.</strong> You see the reports you ran and nobody else's.
+      An administrator sees them all, which is how one gets deleted if it should not have
+      been run.</div>` : ''}
 
     <div class="notice-box" style="margin:18px 0">
       <strong>What is kept.</strong> The records are handed to the report service and are not

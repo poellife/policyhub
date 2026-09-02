@@ -225,10 +225,22 @@ await granted.click('nav a:has-text("LE reports")');
 await granted.waitForSelector('h1:has-text("LE reports")', { timeout: 20000 });
 await granted.waitForTimeout(700);
 check('and somewhere to drop the records', await granted.locator('#leDrop').count() === 1);
+/* The administrator's finished case is on the book at this point, so an
+   empty list here is the rule working rather than an empty database. */
+check('but not the administrator\u2019s case', await granted.locator('.le-case').count() === 0,
+  `${await granted.locator('.le-case').count()} cards`);
+check('and the screen says the list is theirs rather than looking like the whole book',
+  /These are your cases/i.test(await granted.locator('.notice-box').first().innerText()));
+check('with the header saying so too',
+  /yours only/i.test(await granted.locator('.page-head .sub').innerText()),
+  (await granted.locator('.page-head .sub').innerText()).trim());
 await granted.goto(`${BASE}/#/opportunity/${target.id}`);
 await granted.waitForTimeout(1800);
 check('and the deal carries the panel for them too',
   await granted.locator('.card:has(h2:text-is("Life-expectancy reports"))').count() === 1);
+check('with nothing in it, because the case on that deal is not theirs',
+  await granted.locator('.card:has(h2:text-is("Life-expectancy reports")) .le-case')
+    .count() === 0);
 await granted.context().close();
 
 /* Put it back, so the suite leaves the book as it found it. */

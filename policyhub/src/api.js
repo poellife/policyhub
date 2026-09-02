@@ -1604,7 +1604,7 @@ router.get('/policies/:id', wrap(async (req, res) => {
        administrator holds it inherently; anybody else only if one has
        granted it by name. */
     le_reports: scope === null && req.user?.canLe
-      ? await leReportsFor('policy', req.params.id) : undefined,
+      ? await leReportsFor('policy', req.params.id, req) : undefined,
     reminders: reminders.rows,
   });
 }));
@@ -2564,7 +2564,7 @@ async function loadOpportunity(req, id) {
      it. `loadOpportunity` is what an investor reads too. */
   o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
   o.le_reports = scopeId(req) === null && req.user?.canLe
-    ? await leReportsFor('opportunity', id) : undefined;
+    ? await leReportsFor('opportunity', id, req) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
   o.remaining_pct = Math.max(0, 100 - o.taken_pct);
@@ -5076,15 +5076,49 @@ export const mayLe = (req, res, next) => {
     + 'An administrator can do that from Settings.' });
 };
 
+/**
+ * Whose cases these are.
+ *
+ * An administrator sees the whole book, because somebody has to: cases
+ * cost money, they carry PHI, and a case nobody can see is a case nobody
+ * can delete. Everybody else sees only what they themselves ran.
+ *
+ * The reason is not tidiness. A life-expectancy report is a reading of a
+ * named person's medical file, and a grant that hands one manager the
+ * tool should not also hand them every other manager's cases and every
+ * insured the desk has ever looked at. The grant is permission to run
+ * reports, not permission to read the firm's medical files.
+ *
+ * Returns a fragment and its parameter so the same rule can be dropped
+ * into a list query and a single-row lookup without either restating it.
+ */
+const leMine = (req) => (req.user?.role === 'admin'
+  ? { sql: '', args: [] }
+  : { sql: 'r.ran_by = $MINE', args: [req.user.uid] });
+
+/* A case somebody else ran is not hidden, it is absent -- 404 rather
+   than 403, so the list and the address agree with each other and
+   neither confirms that a case exists. */
+const LE_NOT_YOURS = { error: 'That report is not on file' };
+
 router.get('/le-reports', blockInvestors, mayLe, wrap(async (req, res) => {
-  const { rows } = await q(`${LE_SELECT} ORDER BY r.ran_at DESC, r.id DESC LIMIT 200`);
-  res.json({ configured: leConfigured(), reports: await withFreshStatus(rows) });
+  const mine = leMine(req);
+  const { rows } = await q(
+    `${LE_SELECT} ${mine.sql ? `WHERE ${mine.sql.replace('$MINE', '$1')}` : ''}
+      ORDER BY r.ran_at DESC, r.id DESC LIMIT 200`, mine.args);
+  res.json({ configured: leConfigured(), reports: await withFreshStatus(rows),
+    /* So the screen can say whose list this is rather than leaving a
+       manager wondering where the desk's other cases went. */
+    scope: req.user.role === 'admin' ? 'all' : 'mine' });
 }));
 
 /** One case, always with a fresh reading of where it has got to. */
 router.get('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
-  const { rows } = await q(`${LE_SELECT} WHERE r.id = $1`, [int(req.params.id)]);
-  if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+  const mine = leMine(req);
+  const { rows } = await q(
+    `${LE_SELECT} WHERE r.id = $1${mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}`,
+    [int(req.params.id), ...mine.args]);
+  if (!rows[0]) return res.status(404).json(LE_NOT_YOURS);
   res.json(await refreshLeReport(rows[0]));
 }));
 
@@ -5096,8 +5130,12 @@ router.get('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
  */
 router.get('/le-reports/:id/report.pdf', blockInvestors, mayLe,
   wrap(async (req, res) => {
-    const { rows } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
-    if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+    const mine = leMine(req);
+    const { rows } = await q(
+      `SELECT * FROM le_reports r WHERE r.id = $1${
+        mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}`,
+      [int(req.params.id), ...mine.args]);
+    if (!rows[0]) return res.status(404).json(LE_NOT_YOURS);
     const pdf = await casePdf(rows[0].case_id);
     await audit(req.user.uid, 'le_report', rows[0].id, 'read',
       `downloaded the life-expectancy report · ${describeOrigin(req)}`);
@@ -5110,8 +5148,12 @@ router.get('/le-reports/:id/report.pdf', blockInvestors, mayLe,
 
 /** Attach to a policy or an opportunity, or take it off one. */
 router.put('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
-  const { rows: cur } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
-  if (!cur[0]) return res.status(404).json({ error: 'That report is not on file' });
+  const mine = leMine(req);
+  const { rows: cur } = await q(
+    `SELECT * FROM le_reports r WHERE r.id = $1${
+      mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}`,
+    [int(req.params.id), ...mine.args]);
+  if (!cur[0]) return res.status(404).json(LE_NOT_YOURS);
 
   const policyId = int(req.body?.policy_id);
   const oppId = int(req.body?.opportunity_id);
@@ -5141,9 +5183,12 @@ router.put('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
 
 /** Forget it here, and ask the service to forget it too. */
 router.delete('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
-  const { rows } = await q('DELETE FROM le_reports WHERE id = $1 RETURNING *',
-    [int(req.params.id)]);
-  if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+  const mine = leMine(req);
+  const { rows } = await q(
+    `DELETE FROM le_reports r WHERE r.id = $1${
+      mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''} RETURNING *`,
+    [int(req.params.id), ...mine.args]);
+  if (!rows[0]) return res.status(404).json(LE_NOT_YOURS);
   await purgeCase(rows[0].case_id);
   await audit(req.user.uid, 'le_report', rows[0].id, 'delete',
     `deleted the life-expectancy report for ${rows[0].initials || 'an unnamed case'}`);
@@ -5192,10 +5237,16 @@ export function startLeSweeper() {
 }
 
 /** The reports attached to one record, for its own page. */
-export async function leReportsFor(kind, id) {
+export async function leReportsFor(kind, id, req = null) {
   const col = kind === 'policy' ? 'r.policy_id' : 'r.opportunity_id';
+  /* The panel on a deal follows the same rule as the list. Without this
+     a manager could not see another manager's case on the LE screen but
+     could read it off the opportunity, which is the same leak with a
+     longer route. */
+  const mine = req ? leMine(req) : { sql: '', args: [] };
   const { rows } = await q(
-    `${LE_SELECT} WHERE ${col} = $1 ORDER BY r.ran_at DESC, r.id DESC`, [id]);
+    `${LE_SELECT} WHERE ${col} = $1${mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}
+      ORDER BY r.ran_at DESC, r.id DESC`, [id, ...mine.args]);
   return rows;
 }
 

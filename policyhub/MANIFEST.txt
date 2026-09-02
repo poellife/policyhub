@@ -1,0 +1,49 @@
+PolicyHub — build 2026-09-02c
+Minimal update, on top of what you already have deployed (2026-09-02a).
+
+HOW TO USE THIS
+  Unzip it and copy these files into the `policyhub` folder of your
+  poellife repo, keeping the folder structure exactly as it is here.
+  Every path below is relative to `policyhub/`. Overwrite what is there.
+  Commit, push, let Render rebuild, hard-refresh the portal.
+
+  No database step. The one new column applies itself on boot.
+  No new environment variables. LE_SERVICE_URL and LE_SERVICE_KEY are
+  already set from the last deploy.
+
+  The footer should read 2026-09-02c when it is live.
+
+WHAT IS IN HERE
+
+  src/schema.sql      Adds the `can_le` column to users. Applied on boot.
+  src/auth.js         Reads and writes the grant; audits both directions.
+  src/api.js          The mayLe guard, the per-user scoping on every LE
+                      route and on the deal panel, the live progress log
+                      passed through from the report service, and the
+                      two-minute sweeper that keeps a case moving whether
+                      or not anybody has the page open.
+  src/server.js       The upload route now asks for the grant rather than
+                      the admin role; starts the sweeper.
+  src/le-service.js   Unchanged in substance; included so the folder is
+                      internally consistent.
+
+  public/app.js       The progress block (steps, clock, log, estimate),
+                      the LE reports screen, the grant tick box in
+                      Settings, and the "yours only" wording.
+  public/styles.css   The progress block's styling. Light and dark both
+                      come from existing tokens.
+  public/build.js     The build stamp. This is what the footer reads.
+
+  scripts/le-report-test.mjs      \
+  scripts/le-report-ui-test.mjs    >  The suites covering all of the above.
+  scripts/le-stub.mjs             /   Not needed to run the app; included
+  scripts/reports-test.mjs            so the test run stays green.
+
+AFTER IT IS LIVE
+  To give a manager the LE report service:
+    Settings -> Users -> Edit on that person -> tick "May use LE reports"
+    -> Save. It takes effect on their next click. Untick to take it back,
+    same immediacy. Both actions are written to the activity log.
+
+  A manager sees only the cases they ran themselves. An administrator
+  sees them all, and can delete one that should not have been run.

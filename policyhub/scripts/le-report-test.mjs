@@ -290,6 +290,65 @@ check('withdrawing it shuts the door again on the next click',
 check('and the withdrawal is on the record too',
   /withdrew LE reports for/i.test(JSON.stringify(await json(await api(admin, '/audit?limit=20')))));
 
+/* ------------------------------------------------------------------ *
+ * And a grant is not the run of the book
+ *
+ * The point of the rule: holding the tool lets somebody run reports, not
+ * read everybody else's. These are medical files on named people, so a
+ * manager sees their own cases and an administrator sees the lot.
+ * ------------------------------------------------------------------ */
+console.log('\nA MANAGER SEES THEIR OWN CASES AND NOBODY ELSE\u2019S');
+await setLe(true);
+
+/* One run by the administrator, one by the manager, both attached to the
+   same deal so the panel is tested as well as the list. */
+const byAdmin = await json(await api(admin, '/le-reports', { method: 'POST', body: records() }));
+await api(admin, `/le-reports/${byAdmin.id}`, { method: 'PUT',
+  body: { opportunity_id: o1.id } });
+const byMgr = await json(await api(pm1, '/le-reports', { method: 'POST', body: records() }));
+await api(pm1, `/le-reports/${byMgr.id}`, { method: 'PUT', body: { opportunity_id: o1.id } });
+
+const mgrList = await json(await api(pm1, '/le-reports'));
+const mgrIds = (mgrList.reports || []).map((r) => r.id);
+check('the list holds the case they ran', mgrIds.includes(byMgr.id));
+check('and not the one an administrator ran', !mgrIds.includes(byAdmin.id),
+  `saw ${mgrIds.length}`);
+check('and the screen is told it is a partial list', mgrList.scope === 'mine',
+  String(mgrList.scope));
+
+check('somebody else\u2019s case is absent rather than forbidden, at the address too',
+  (await api(pm1, `/le-reports/${byAdmin.id}`)).status === 404);
+check('the report itself cannot be pulled either',
+  (await api(pm1, `/le-reports/${byAdmin.id}/report.pdf`)).status === 404);
+check('nor re-filed against something',
+  (await api(pm1, `/le-reports/${byAdmin.id}`, { method: 'PUT',
+    body: { opportunity_id: null } })).status === 404);
+check('nor deleted',
+  (await api(pm1, `/le-reports/${byAdmin.id}`, { method: 'DELETE' })).status === 404);
+check('and it is still there afterwards',
+  (await db.query('SELECT 1 FROM le_reports WHERE id = $1', [byAdmin.id])).rowCount === 1);
+
+/* The same rule on the deal, because a panel that showed it would be the
+   identical leak by a longer route. */
+const mgrOpp = await json(await api(pm1, `/opportunities/${o1.id}`));
+const oppIds = (mgrOpp.le_reports || []).map((r) => r.id);
+check('the panel on the deal is filtered the same way',
+  oppIds.includes(byMgr.id) && !oppIds.includes(byAdmin.id), `panel: ${oppIds.join(',')}`);
+
+const adminList = await json(await api(admin, '/le-reports'));
+const adminIds = (adminList.reports || []).map((r) => r.id);
+check('an administrator sees both, because somebody has to',
+  adminIds.includes(byMgr.id) && adminIds.includes(byAdmin.id));
+check('and is not told the list is partial', adminList.scope === 'all', String(adminList.scope));
+check('and can delete a case a manager ran',
+  (await api(admin, `/le-reports/${byMgr.id}`, { method: 'DELETE' })).ok);
+check('the administrator is told who ran what',
+  (adminList.reports.find((r) => r.id === byMgr.id) || {}).ran_by_name != null
+  || (adminList.reports.find((r) => r.id === byMgr.id) || {}).ran_by != null);
+
+await api(admin, `/le-reports/${byAdmin.id}`, { method: 'DELETE' });
+await setLe(false);
+
 /* An investor is refused whatever the column says -- the guard asks the
    role again rather than trusting the grant alone. */
 const invUser = (users.users || users).find((u) => u.email === INVESTOR1.email);
