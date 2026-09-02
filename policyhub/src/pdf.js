@@ -95,7 +95,7 @@ const SUBSTITUTIONS = {
   '\u2013': '-', '\u2014': '--', '\u2026': '...', '\u00a0': ' ',
   '\u2022': '\u2022', '\u00b7': '\u00b7',
 };
-function pdfString(text) {
+export function pdfString(text) {
   let out = '';
   for (const ch of String(text)) {
     const sub = SUBSTITUTIONS[ch] ?? ch;

@@ -6180,13 +6180,21 @@ async function opportunitySheetView() {
           <div class="sub">${esc(oppName(o))}${share < 100 ? ` · ${share}% participation` : ''}</div></div>
         <div class="spacer"></div>
         ${interestToggle()}
-        <button class="primary" id="sheetPrint">Save as PDF</button>
+        ${''/* A plain link, so the browser saves the file the server drew.
+               No print dialog, no margins argument, no "tick background
+               graphics" -- the reasons that hint below used to be three
+               sentences long. */}
+        <a class="btn btn-primary" id="sheetDownload"
+           href="/api/opportunities/${o.id}/sheet.pdf?share=${share}&interest=${
+  encodeURIComponent(interestShown())}">Download PDF</a>
       </div>
       <div class="rpt-hint no-print">
-        In the print dialog choose <strong>Save as PDF</strong>. It is set to print
-        <strong>landscape</strong> — leave Layout on whatever the dialog offers. Set Margins to
-        <strong>Default</strong>, turn <strong>off</strong> "Headers and footers", and tick
-        <strong>Background graphics</strong> so the rules and shading come through.
+        <strong>Download PDF</strong> saves the finished document — landscape, initials only,
+        nothing to set. The page below is the same sheet on screen; if you would rather have
+        the browser's own rendering, <button type="button" class="btn-link"
+        id="sheetPrint">print it instead</button> and choose Save as PDF, with Margins on
+        <strong>Default</strong>, "Headers and footers" <strong>off</strong> and
+        <strong>Background graphics</strong> ticked.
       </div>
       <div class="rpt-output">${buildOpportunitySheet(o, {
     share, interest: interestShown() })}</div>`,

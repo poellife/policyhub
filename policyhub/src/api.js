@@ -9,6 +9,7 @@ import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
+import { opportunityPdf } from './opportunity-pdf.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
   mailFromProblem } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
@@ -2696,6 +2697,48 @@ router.get('/opportunities/:id', wrap(async (req, res) => {
   const o = await loadOpportunity(req, req.params.id);
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
   res.json(o);
+}));
+
+/**
+ * The one-pager, as a file.
+ *
+ * A GET so the button can be a plain link and the browser saves it
+ * without a print dialog, the margins argument, or the "tick background
+ * graphics" instruction that went with it.
+ *
+ * Drawn from `loadOpportunity` rather than from anything the client
+ * posts: the figures on the paper are then the same figures the screen
+ * asked the server for, and there is no second implementation of the
+ * arithmetic to drift. Scope is the ordinary opportunity scope, so an
+ * investor can download a deal they were shown and nothing else.
+ *
+ * Recorded, because a document carrying an insured's medical picture
+ * leaving the building is worth a line in the log even when the person
+ * taking it is entitled to it.
+ */
+router.get('/opportunities/:id/sheet.pdf', wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const o = await loadOpportunity(req, req.params.id);
+  if (!o) return res.status(404).json({ error: 'Opportunity not found' });
+
+  const asked = Number(req.query.share);
+  const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
+  const interest = ['simple', 'compound', 'both'].includes(str(req.query.interest))
+    ? str(req.query.interest) : 'simple';
+
+  const pdf = opportunityPdf(o, { share, interest });
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'read',
+    `downloaded the one-pager${share < 100 ? ` at ${share}%` : ''} · ${describeOrigin(req)}`);
+
+  /* Named for the deal rather than "sheet.pdf", because it lands in a
+     downloads folder beside forty other files. No insured name in it,
+     for the same reason there is none on the page. */
+  const slug = String(o.policy_number || `opportunity-${o.id}`)
+    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${slug}-one-pager.pdf"`);
+  res.send(pdf);
 }));
 
 router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => {

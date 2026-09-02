@@ -116,6 +116,29 @@ check('and the carrier and policy number, which are the deal’s identity',
  * the browser would produce from the Save-as-PDF button, measured. A
  * MediaBox of 792x612 points is Letter on its side; 612x792 is not.
  * ------------------------------------------------------------------ */
+console.log('\nTHERE IS A BUTTON THAT JUST DOWNLOADS IT');
+const dl = p.locator('#sheetDownload');
+check('the one-pager offers a download', await dl.count() === 1);
+check('as a plain link, so no print dialog stands in the way',
+  await dl.evaluate((e) => e.tagName) === 'A');
+check('pointed at the deal, carrying the participation and the interest setting',
+  /\/api\/opportunities\/\d+\/sheet\.pdf\?share=100&interest=/.test(
+    await dl.getAttribute('href')),
+  await dl.getAttribute('href'));
+/* Fetched with the page's own session rather than clicked, because a
+   download does not navigate and there is nothing to assert on after. */
+const got = await p.evaluate(async (href) => {
+  const r = await fetch(href, { credentials: 'same-origin' });
+  const b = await r.arrayBuffer();
+  return { status: r.status, type: r.headers.get('content-type'),
+    disp: r.headers.get('content-disposition'),
+    head: new TextDecoder('latin1').decode(b.slice(0, 8)), bytes: b.byteLength };
+}, await dl.getAttribute('href'));
+check('and the link really returns a PDF',
+  got.status === 200 && got.head.startsWith('%PDF-') && got.bytes > 2000,
+  JSON.stringify(got).slice(0, 120));
+check('served as an attachment', /^attachment;/.test(got.disp || ''), got.disp);
+
 console.log('\nAND IT PRINTS LANDSCAPE');
 await p.emulateMedia({ media: 'print' });
 const pdf = await p.pdf({ preferCSSPageSize: true, printBackground: true });
