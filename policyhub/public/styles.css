@@ -1710,3 +1710,43 @@ table.data td.risk-note-cell {
 }
 .opp-sheet-schedule-frame > tbody > tr > td:first-child { padding-right: 22px; }
 .opp-sheet-schedule-frame > tbody > tr > td:last-child { padding-left: 22px; }
+
+/* --------------------------- LE report cases ---------------------------
+   A case is a small record in its own right — a stage while it runs, a
+   headline when it is done — so it is drawn as a block rather than a
+   table row. There are rarely many of them and each one carries a
+   sentence worth reading. */
+.le-case {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 13px 15px; margin-bottom: 12px; background: var(--surface-1);
+}
+.le-case:last-child { margin-bottom: 0; }
+.le-case-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.le-case-head .muted { font-size: 12.5px; }
+.le-case-foot {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.le-case-foot .muted { font-size: 12px; }
+.le-one-liner { margin-top: 9px; font-size: 13.5px; line-height: 1.5; }
+.le-error {
+  margin-top: 9px; padding: 9px 11px; font-size: 12.5px; line-height: 1.5;
+  border-radius: var(--radius); border: 1px solid var(--critical);
+  color: var(--critical); background: var(--sunken);
+}
+
+.le-badge {
+  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: var(--pill);
+  border: 1px solid var(--border-strong); white-space: nowrap;
+}
+.le-badge.done { color: var(--good); border-color: currentColor; }
+.le-badge.bad { color: var(--critical); border-color: currentColor; }
+.le-badge.run { color: var(--text-secondary); display: inline-flex; align-items: center; gap: 7px; }
+/* A case in flight, at the pace it actually moves — slow, because the
+   work behind it is minutes and a fast pulse promises otherwise. */
+.le-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  animation: le-pulse 2.4s ease-in-out infinite;
+}
+@keyframes le-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .le-dot { animation: none; opacity: .6; } }

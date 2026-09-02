@@ -49,7 +49,12 @@ const run = async (type, label, opts={}) => {
   await p.waitForTimeout(900);
   const txt = await p.locator('.rpt-output').textContent();
   check(`${label} generated`, txt.includes('Poel Capital'), `${txt.length} chars`);
-  await p.screenshot({path:`${SHOTS}/r-${type}.png`,fullPage:true});
+  /* The investor statement runs to a third of a million characters and a
+     full-page capture of it can outrun the default timeout when the
+     machine is busy with the rest of the suite. The screenshot is a
+     record for a person to look at, not an assertion, so it gets room
+     rather than failing a run that proved everything it set out to. */
+  await p.screenshot({path:`${SHOTS}/r-${type}.png`,fullPage:true,timeout:90000});
   // real PDF through the print stylesheet
   await p.emulateMedia({media:'print'});
   await p.pdf({path:`/home/claude/shots/pdf-${type}.pdf`, printBackground:true,

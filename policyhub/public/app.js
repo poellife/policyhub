@@ -959,6 +959,10 @@ const STAFF_NAV = [
      writes nothing anywhere -- the judgements in it are new, and until they
      have earned their place they should not be able to mark the record.
      Administrators only, filtered out below the way carried interest is. */
+  /* Records in, an estimate out. Administrators only, on both counts
+     that matter: the input is somebody else's medical file and every run
+     costs real money on the far side. */
+  ['le-reports', 'LE reports'],
   ['longevity', 'Longevity'],
   // Importing is a setup job rather than a daily one, so it sits under
   // Settings with the other things you do occasionally. The route is
@@ -967,7 +971,7 @@ const STAFF_NAV = [
 ];
 
 /** Menu entries an administrator has and nobody else does. */
-const ADMIN_ONLY_NAV = ['carry', 'longevity'];
+const ADMIN_ONLY_NAV = ['carry', 'longevity', 'le-reports'];
 
 /* Policy Valuation is not a rank, it is a grant: an administrator has it,
    and anybody else has it only if one gave it to them by name. So the menu
@@ -2517,7 +2521,8 @@ function overviewTab(p) {
   ${''/* Absent entirely for an investor: the server does not send them, and
          what the desk's model thinks this policy is worth is not a figure
          they are shown. */}
-  ${p.valuations === undefined ? '' : valuationPanel(p.valuations, 'policy', p.id)}`;
+  ${p.valuations === undefined ? '' : valuationPanel(p.valuations, 'policy', p.id)}
+  ${p.le_reports === undefined ? '' : leReportPanel(p.le_reports, 'policy', p.id)}`;
 }
 
 function openOwnerDialog(p, existing) {
@@ -3181,6 +3186,7 @@ function wireReturnTab(p, d) {
 function wireDetailTab(p, values, irrData) {
   if (detailTab === 'overview') {
     if (p.valuations !== undefined) wireValuationPanel('policy', p.id);
+    if (p.le_reports !== undefined) wireLeReportPanel('policy', p.id);
     $('#addOwnerBtn')?.addEventListener('click', async () => {
       if (!state.investors.length) state.investors = await api('/investors');
       if (!state.investors.length) {
@@ -5490,12 +5496,24 @@ async function opportunityView() {
 
     ${''/* Staff only, and the server decides that rather than this line:
            an investor's copy of the deal arrives without the field at all. */}
-    ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}`;
+    ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}
+    ${o.le_reports === undefined ? '' : leReportPanel(o.le_reports, 'opportunity', o.id, o)}`;
 
   return {
     html,
     after: () => {
       wireInterestToggle();
+      if (o.le_reports !== undefined) {
+        wireLeReportPanel('opportunity', o.id);
+        $('#leAdoptBtn')?.addEventListener('click', async (e) => {
+          const months = Number(e.currentTarget.dataset.months);
+          if (!confirm(`Set this deal's life expectancy to ${months} months?`)) return;
+          await api(`/opportunities/${o.id}`, { method: 'PUT', body: {
+            le_months: months, le_provider: 'Poel Life (records-based)',
+            le_date: today() } });
+          toast('Life expectancy updated'); render();
+        });
+      }
       if (o.valuations !== undefined) wireValuationPanel('opportunity', o.id);
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
@@ -9785,6 +9803,358 @@ async function longevityView() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Life-expectancy reports
+ *
+ * Records in, a Medical Summary & Estimated Life-Expectancy Analysis
+ * out. The work happens on a third service and takes minutes -- half an
+ * hour on a scanned thousand-page package -- so a case is started and
+ * then watched, and the screen says which stage it is at rather than
+ * spinning at nothing.
+ *
+ * What this application keeps is the headline. The report itself is
+ * fetched through the server while the service still holds its copy,
+ * which is a day; after that the figures remain and the PDF does not,
+ * and the screen says so plainly rather than offering a button that
+ * fails.
+ * ------------------------------------------------------------------ */
+
+const LE_STAGE = {
+  queued: 'Queued', extracting: 'Reading the records', analyzing: 'Analysing',
+  rendering: 'Writing the report', done: 'Done', error: 'Failed',
+  expired: 'Expired',
+};
+const leRunningNow = (s) => !['done', 'error', 'expired'].includes(String(s || ''));
+
+/** Years, as the report states them: a central figure and a range. */
+const leCentral = (r) => (r.central_years == null ? '—'
+  : `${fmtNum(r.central_years)} yr`);
+const leRange = (r) => (r.range_low_years == null || r.range_high_years == null ? ''
+  : `${fmtNum(r.range_low_years)}–${fmtNum(r.range_high_years)}`);
+
+/* The book stores a life expectancy in months; the report states years.
+   Rounded rather than truncated, and shown before it is written, because
+   a figure that arrives silently converted is a figure nobody checks. */
+const leMonths = (r) => (r.central_years == null ? null
+  : Math.round(Number(r.central_years) * 12));
+
+const leWhen = (r) => (r.status === 'done' && r.confidence
+  ? `<span class="muted">· ${esc(r.confidence)} confidence</span>` : '');
+
+/** What a case is attached to, as a link or as an invitation. */
+const leAttachment = (r) => {
+  if (r.policy_id)
+    return `<a href="#/policy/${r.policy_id}">${esc(r.policy_number || 'policy')}</a>
+      <span class="muted">· policy${r.carried_from ? ', carried on funding' : ''}</span>`;
+  if (r.opportunity_id)
+    return `<a href="#/opportunity/${r.opportunity_id}">${
+      esc(r.opp_insured || r.opp_policy_number || 'opportunity')}</a>
+      <span class="muted">· opportunity</span>`;
+  return '<span class="muted">not attached</span>';
+};
+
+const leBadge = (r) => (r.status === 'done'
+  ? `<span class="le-badge done">${esc(leCentral(r))}</span>`
+  : r.status === 'error' || r.status === 'expired'
+    ? `<span class="le-badge bad">${esc(LE_STAGE[r.status] || r.status)}</span>`
+    : `<span class="le-badge run"><span class="le-dot"></span>${
+      esc(LE_STAGE[r.status] || r.status)}</span>`);
+
+/**
+ * The upload.
+ *
+ * A drop zone rather than only a file input, because an APS arrives as a
+ * folder of PDFs somebody drags out of an email. `kind`/`id` attach the
+ * case to whatever it was started from, in the same request.
+ */
+function leDropZone(kind, id) {
+  return `
+    <div class="read-drop" id="leDrop" tabindex="0" role="button"
+         aria-label="Drop the medical records here">
+      <div class="read-drop-main">Drop the records here, or <button type="button"
+        class="btn-link" id="leBrowse">choose files</button></div>
+      <div class="read-drop-sub">Attending physician's statement, medical records,
+        laboratory reports — PDF, DOCX or TXT, up to 200 MB together. They are handed
+        straight to the report service and are not stored here.</div>
+      <input type="file" id="leFiles" accept=".pdf,.docx,.txt,.md" multiple hidden>
+      <input type="hidden" id="leKind" value="${esc(kind || '')}">
+      <input type="hidden" id="leId" value="${esc(String(id || ''))}">
+    </div>
+    <div class="field-row" style="margin-top:12px">
+      <div class="field"><label>Depth</label>
+        <select id="leMode">
+          <option value="full">Full — every section and the LE analysis</option>
+          <option value="summary">Summary — the LE analysis and a short overview</option>
+        </select></div>
+      <div class="field"><label>Initials, if the records do not say</label>
+        <input id="leInitials" maxlength="12" placeholder="A.B." autocomplete="off"></div>
+    </div>`;
+}
+
+/**
+ * Send the records and watch the case.
+ *
+ * The poll is deliberately unhurried: these take minutes, and asking
+ * every second costs the far side a file read for nothing. `after` is
+ * called when it reaches a terminal state so the caller can redraw.
+ */
+function wireLeUpload({ onDone } = {}) {
+  const zone = $('#leDrop');
+  if (!zone) return;
+  const input = $('#leFiles');
+  let busy = false;
+
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.add('over');
+  }));
+  ['dragleave', 'drop'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.remove('over');
+  }));
+  zone.addEventListener('drop', (e) => send([...(e.dataTransfer?.files || [])]));
+  $('#leBrowse')?.addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+  zone.addEventListener('click', (e) => { if (e.target === zone) input.click(); });
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input?.addEventListener('change', () => send([...input.files]));
+
+  async function send(files) {
+    if (busy || !files.length) return;
+    busy = true;
+    zone.classList.add('busy');
+    const say = (msg) => {
+      const el = $('#leDrop .read-drop-main');
+      if (el) el.innerHTML = `<span class="read-spin"></span> ${esc(msg)}`;
+    };
+    say(`Sending ${files.length} file${files.length === 1 ? '' : 's'}…`);
+    try {
+      const form = new FormData();
+      for (const f of files) form.append('files', f, f.name);
+      form.append('mode', $('#leMode')?.value || 'full');
+      if ($('#leInitials')?.value) form.append('initials', $('#leInitials').value);
+      const kind = $('#leKind')?.value;
+      const id = $('#leId')?.value;
+      if (kind === 'opportunity' && id) form.append('opportunity_id', id);
+      if (kind === 'policy' && id) form.append('policy_id', id);
+
+      const started = await api('/le-reports', { method: 'POST', body: form });
+      say('Sent. The report is running — this takes a few minutes.');
+      toast('Records sent');
+      await watch(started.id, say);
+    } catch (err) {
+      const el = $('#leDrop .read-drop-main');
+      if (el) el.innerHTML = `<span class="read-fail">${esc(err.message)}</span>`;
+      busy = false;
+      zone.classList.remove('busy');
+      return;
+    }
+    busy = false;
+    zone.classList.remove('busy');
+    if (onDone) onDone(); else render();
+  }
+
+  /* Every eight seconds. A report takes minutes; a tighter poll buys
+     nothing and asks the far side for a file read each time. */
+  async function watch(id, say) {
+    for (let i = 0; i < 450; i++) {
+      await new Promise((r) => setTimeout(r, 8000));
+      let r;
+      try { r = await api(`/le-reports/${id}`); } catch { continue; }
+      say(`${LE_STAGE[r.status] || r.status}…`);
+      if (!leRunningNow(r.status)) return r;
+    }
+    return null;
+  }
+}
+
+/** One case, read out. Used on the list and on a record's panel. */
+function leCard(r, { compact = false } = {}) {
+  const months = leMonths(r);
+  return `
+    <div class="le-case">
+      <div class="le-case-head">
+        ${leBadge(r)}
+        <strong>${esc(r.initials || '—')}</strong>
+        <span class="muted">${r.age == null ? '' : `${r.age}`}${
+  r.sex ? ` · ${esc(r.sex)}` : ''}</span>
+        ${leRange(r) ? `<span class="muted">range ${esc(leRange(r))} yr</span>` : ''}
+        ${months ? `<span class="muted">≈ ${months} months</span>` : ''}
+        <div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${fmtDate(r.ran_at)}${
+  r.ran_by_name ? ` · ${esc(r.ran_by_name)}` : ''}</span>
+      </div>
+      ${r.one_liner ? `<div class="le-one-liner">${esc(r.one_liner)}</div>` : ''}
+      ${r.status === 'error' ? `<div class="le-error">${
+    esc(r.error || 'The report did not finish.')}</div>` : ''}
+      ${r.status === 'expired' ? `<div class="le-error">The report service purged this case
+        before it finished. Nothing was kept.</div>` : ''}
+      <div class="le-case-foot">
+        ${r.le_path ? `<span class="muted">${esc(r.le_path)}</span>` : ''}
+        ${r.pages ? `<span class="muted">${r.pages} pages read${
+    r.ocr_used ? ', some by OCR' : ''}</span>` : ''}
+        <div class="spacer"></div>
+        ${r.status === 'done'
+    ? `<a class="btn btn-sm" href="/api/le-reports/${r.id}/report.pdf">Report</a>` : ''}
+        ${compact ? '' : `<button class="btn-sm" data-le-attach="${r.id}">${
+      r.policy_id || r.opportunity_id ? 'Change' : 'Attach…'}</button>`}
+        ${(r.policy_id || r.opportunity_id)
+    ? `<button class="btn-sm" data-le-detach="${r.id}">Detach</button>` : ''}
+        <button class="btn-sm btn-danger" data-le-delete="${r.id}">Delete</button>
+      </div>
+    </div>`;
+}
+
+async function leReportsView() {
+  const out = await api('/le-reports');
+  const list = out.reports || [];
+  const running = list.filter((r) => leRunningNow(r.status));
+
+  const html = `
+    <div class="page-head">
+      <div><h1>LE reports</h1>
+        <div class="sub">${list.length} case${list.length === 1 ? '' : 's'}${
+  running.length ? ` · ${running.length} still running` : ''}</div></div>
+    </div>
+
+    ${!out.configured ? `<div class="error-box" style="margin-bottom:16px">
+      The report service is not configured on this server. Set <code>LE_SERVICE_URL</code> and
+      <code>LE_SERVICE_KEY</code> to the address and access key of the report service.</div>` : `
+    <div class="card">
+      <div class="card-head"><h2>Run a case</h2></div>
+      <div class="card-body">${leDropZone('', '')}</div>
+    </div>`}
+
+    <div class="notice-box" style="margin:18px 0">
+      <strong>What is kept.</strong> The records are handed to the report service and are not
+      stored here. The service deletes them once it has read them and purges the finished
+      report after a day. What stays on this side is the headline — initials, age, the central
+      estimate, the range and the confidence — so the figures survive and the medical summary
+      does not. An estimate is an actuarial approximation, not a prediction, and was not
+      prepared by a licensed actuary, physician or underwriter.
+    </div>
+
+    ${!list.length ? `<div class="card"><div class="card-body"><div class="empty">
+      No cases yet. Drop an attending physician's statement above and it will appear here.
+    </div></div></div>` : list.map((r) => leCard(r)).join('')}`;
+
+  return {
+    html,
+    after: () => {
+      wireLeUpload();
+      wireLeActions();
+      /* A case still running redraws itself, so the list does not sit
+         claiming "Analysing" for ten minutes after it finished. */
+      if (running.length) leTick();
+    },
+  };
+}
+
+let leTimer = null;
+function leTick() {
+  clearTimeout(leTimer);
+  leTimer = setTimeout(() => { if (state.route === 'le-reports') render(); }, 10000);
+}
+
+/** The buttons a case carries, wherever it is drawn. */
+function wireLeActions() {
+  document.querySelectorAll('[data-le-attach]').forEach((b) =>
+    b.addEventListener('click', () => openLeAttachDialog(Number(b.dataset.leAttach))));
+  document.querySelectorAll('[data-le-detach]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      await api(`/le-reports/${b.dataset.leDetach}`, { method: 'PUT', body: {} });
+      toast('Detached'); render();
+    }));
+  document.querySelectorAll('[data-le-delete]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!confirm('Delete this case? The report service is told to forget it too, '
+        + 'and nothing about it is recoverable.')) return;
+      await api(`/le-reports/${b.dataset.leDelete}`, { method: 'DELETE' });
+      toast('Deleted'); render();
+    }));
+}
+
+async function openLeAttachDialog(id) {
+  const [policies, opps] = await Promise.all([
+    api('/policies').catch(() => []),
+    api('/opportunities').catch(() => []),
+  ]);
+  const open = opps.filter((o) => o.status !== 'Funded');
+  openDialog('Attach this report', `
+    <p style="margin:0 0 14px;font-size:14px">Filing it against a record does not change
+      that record — it puts the estimate where somebody looking at the deal or the policy
+      will find it. Using the figure as the life expectancy is a separate step, offered on
+      the record itself.</p>
+    <div class="field"><label>An opportunity</label>
+      <select name="opportunity_id"><option value="">—</option>
+        ${open.map((o) => `<option value="${o.id}">${
+  esc(o.insured_last_name || o.policy_number || `#${o.id}`)}${
+  o.carrier_name ? ` · ${esc(o.carrier_name)}` : ''}</option>`).join('')}
+      </select></div>
+    <div class="field"><label>…or a policy</label>
+      <select name="policy_id"><option value="">—</option>
+        ${policies.map((p) => `<option value="${p.id}">${esc(p.policy_number || `#${p.id}`)}${
+  p.insured_last ? ` · ${esc(p.insured_last)}` : ''}</option>`).join('')}
+      </select></div>
+  `, async (v) => {
+    if (v.policy_id && v.opportunity_id)
+      throw new Error('Choose the opportunity or the policy, not both.');
+    await api(`/le-reports/${id}`, { method: 'PUT', body: {
+      policy_id: v.policy_id || null, opportunity_id: v.opportunity_id || null } });
+    toast('Attached');
+  }, 'Attach it');
+}
+
+/**
+ * The panel on a deal or a policy.
+ *
+ * Administrators only -- the server withholds the field from everybody
+ * else, so its absence is the test.
+ */
+function leReportPanel(list, kind, id, record = null) {
+  const rows = list || [];
+  return `
+    <div class="card" style="margin-top:22px">
+      <div class="card-head"><h2>Life-expectancy reports</h2><div class="spacer"></div>
+        <button class="btn-sm" id="leRunBtn">Run one from records…</button></div>
+      <div class="card-body">
+        ${rows.length ? rows.map((r) => leCard(r, { compact: true })).join('')
+    : `<p class="muted" style="margin:0">Nothing run yet. An attending physician's statement
+         dropped here comes back as a medical summary and an estimate, usually in a few
+         minutes.</p>`}
+        ${kind === 'opportunity' ? leAdoptRow(record) : ''}
+      </div>
+    </div>`;
+}
+
+function wireLeReportPanel(kind, id) {
+  wireLeActions();
+  $('#leRunBtn')?.addEventListener('click', () => {
+    const dlg = openDialog('Run a life-expectancy report', `
+      ${leDropZone(kind, id)}
+      <p class="muted" style="font-size:12px;margin:14px 0 0">The records are handed to the
+        report service and are not stored here. It reads them, deletes them, and purges the
+        finished report after a day — what stays on this side is the headline. Leave this
+        open while it runs.</p>`);
+    wireLeUpload({ onDone: () => { dlg.close(); dlg.remove(); render(); } });
+  });
+}
+
+/** Offer to take the estimate as the deal's life expectancy. */
+function leAdoptRow(o) {
+  const done = (o.le_reports || []).filter((r) => r.status === 'done' && r.central_years != null);
+  if (!done.length) return '';
+  const best = done[0];
+  const months = leMonths(best);
+  if (!months || Number(o.le_months) === months) return '';
+  return `<div class="risk-effect" style="margin-top:14px">
+    Our own report puts the central estimate at <strong>${months} months</strong>${
+  o.le_months ? `, against the ${o.le_months} on this deal` : ''}.
+    <button class="btn-sm" id="leAdoptBtn" data-months="${months}"
+      style="margin-left:10px">Use ${months} months</button>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ *
  * Valuations
  *
  * The desk's runs, and what each one was run against. The pricing itself
@@ -10030,6 +10400,7 @@ const VIEWS = {
   documents: documentsView,
   valuations: valuationsView,
   longevity: longevityView,
+  'le-reports': leReportsView,
   reports: () => reportsView(api, state),
   import: importView,
   // An investor has an Agreements tab of their own; for staff the list

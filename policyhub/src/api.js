@@ -10,6 +10,8 @@ import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
+import { createCase, caseStatus, casePdf, purgeCase, headline,
+         leConfigured, leRunning } from './le-service.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
   mailFromProblem } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
@@ -1592,6 +1594,12 @@ router.get('/policies/:id', wrap(async (req, res) => {
        paid is the investor's business; what the desk's model thinks the
        policy is worth is the desk's. */
     valuations: scope === null ? await valuationsFor('policy', req.params.id) : undefined,
+    /* Administrators only, one level tighter than the valuations beside
+       them: a life-expectancy report is a reading of somebody's medical
+       file, and the headline still says how long they are expected to
+       live. */
+    le_reports: scope === null && req.user?.role === 'admin'
+      ? await leReportsFor('policy', req.params.id) : undefined,
     reminders: reminders.rows,
   });
 }));
@@ -2550,6 +2558,8 @@ async function loadOpportunity(req, id) {
   /* Staff only: an investor is shown the deal, not the desk's pricing of
      it. `loadOpportunity` is what an investor reads too. */
   o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
+  o.le_reports = scopeId(req) === null && req.user?.role === 'admin'
+    ? await leReportsFor('opportunity', id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
   o.remaining_pct = Math.max(0, 100 - o.taken_pct);
@@ -4135,6 +4145,8 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
       // deal, so unwinding the deal must never delete it.
       await q(`UPDATE valuations SET policy_id = $1, opportunity_id = NULL, carried_from = $2
                 WHERE opportunity_id = $2`, [policyId, req.params.id]);
+      await q(`UPDATE le_reports SET policy_id = $1, opportunity_id = NULL, carried_from = $2
+                WHERE opportunity_id = $2`, [policyId, req.params.id]);
       await q(`UPDATE opportunities
                   SET status = 'Funded', policy_id = $1, policy_created = FALSE,
                       updated_at = now()
@@ -4195,6 +4207,12 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
          bought is readable afterwards rather than inferred. */
       await client.query(
         `UPDATE valuations SET policy_id = $1, opportunity_id = NULL,
+                               carried_from = $2
+          WHERE opportunity_id = $2`, [policyId, req.params.id]);
+      /* The life expectancy the deal was underwritten on is part of the
+         policy's story for the same reason the price is. */
+      await client.query(
+        `UPDATE le_reports SET policy_id = $1, opportunity_id = NULL,
                                carried_from = $2
           WHERE opportunity_id = $2`, [policyId, req.params.id]);
       await client.query(
@@ -4454,6 +4472,10 @@ router.post('/opportunities/:id/reopen', blockInvestors, adminOrManager,
          by hand is untouched: it was never this deal's. */
       await client.query(
         `UPDATE valuations
+            SET opportunity_id = carried_from, policy_id = NULL, carried_from = NULL
+          WHERE carried_from = $1`, [req.params.id]);
+      await client.query(
+        `UPDATE le_reports
             SET opportunity_id = carried_from, policy_id = NULL, carried_from = NULL
           WHERE carried_from = $1`, [req.params.id]);
       await client.query(
@@ -4889,6 +4911,211 @@ export async function valuationsFor(kind, id) {
   const col = kind === 'policy' ? 'v.policy_id' : 'v.opportunity_id';
   const { rows } = await q(
     `${VALUATION_SELECT} WHERE ${col} = $1 ORDER BY v.ran_at DESC NULLS LAST, v.id DESC`, [id]);
+  return rows;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Life-expectancy reports
+ *
+ * Medical records go to the report service; a Medical Summary &
+ * Estimated Life-Expectancy Analysis comes back. What is kept here is
+ * the headline -- initials, age, the central estimate, the range, the
+ * confidence -- and never the report itself. The service purges its own
+ * copy after a day; the PDF is fetched through this application while
+ * that copy exists.
+ *
+ * Administrators only, on both counts that matter: the input is somebody
+ * else's medical file and each run costs real money on the far side.
+ * ------------------------------------------------------------------ */
+
+const LE_SELECT = `
+  SELECT r.*, p.policy_number, p.carrier_name,
+         o.policy_number AS opp_policy_number, o.insured_last_name AS opp_insured,
+         u.full_name AS ran_by_name, a.full_name AS attached_by_name
+    FROM le_reports r
+    LEFT JOIN policies p      ON p.id = r.policy_id
+    LEFT JOIN opportunities o ON o.id = r.opportunity_id
+    LEFT JOIN users u         ON u.id = r.ran_by
+    LEFT JOIN users a         ON a.id = r.attached_by`;
+
+/**
+ * Bring one row up to date with the service.
+ *
+ * Called whenever a row is read and is not finished. A poll that cannot
+ * reach the service returns null and the row keeps what it last knew --
+ * a screen that blanks a running case because the network hiccuped is
+ * worse than one showing a slightly stale stage.
+ */
+async function refreshLeReport(row) {
+  if (!leRunning(row.status)) return row;
+  const state = await caseStatus(row.case_id);
+  if (!state) return row;
+
+  const status = String(state.status || row.status);
+  if (status === 'expired') {
+    /* The service has forgotten it. If it finished, the headline here is
+       still the answer and only the PDF is gone; if it never finished,
+       the case died with it and says so. */
+    const { rows } = await q(
+      `UPDATE le_reports SET status = CASE WHEN central_years IS NOT NULL THEN 'done'
+                                           ELSE 'expired' END,
+              error = CASE WHEN central_years IS NOT NULL THEN ''
+                           ELSE 'The report service purged this case before it finished.' END
+        WHERE id = $1 RETURNING *`, [row.id]);
+    return { ...row, ...rows[0] };
+  }
+
+  if (status !== 'done') {
+    const { rows } = await q(
+      'UPDATE le_reports SET status = $1, error = $2 WHERE id = $3 RETURNING *',
+      [status, str(state.error).slice(0, 600), row.id]);
+    return { ...row, ...rows[0] };
+  }
+
+  const h = headline(state);
+  const { rows } = await q(
+    `UPDATE le_reports
+        SET status = 'done', error = '', finished_at = COALESCE(finished_at, now()),
+            initials = $1, sex = $2, age = $3, one_liner = $4,
+            central_years = $5, range_low_years = $6, range_high_years = $7,
+            le_path = $8, confidence = $9, pages = $10, ocr_used = $11
+      WHERE id = $12 RETURNING *`,
+    [h.initials, h.sex, h.age, h.one_liner, h.central_years, h.range_low_years,
+     h.range_high_years, h.path, h.confidence, h.pages, h.ocr_used, row.id]);
+  return { ...row, ...rows[0] };
+}
+
+/** Refresh whatever is still running, then hand the list back. */
+async function withFreshStatus(rows) {
+  const out = [];
+  for (const r of rows) out.push(await refreshLeReport(r));
+  return out;
+}
+
+/**
+ * Hand the records over and open a case.
+ *
+ * Exported because the multipart route lives in server.js with the other
+ * uploads; everything it does afterwards is here with the rest of the
+ * table.
+ */
+export async function startLeReport(req, res) {
+  const list = req.files?.files || [];
+  if (!list.length) return res.status(400).json({ error: 'No records uploaded' });
+
+  const { caseId, status } = await createCase(list, {
+    mode: str(req.body?.mode) === 'summary' ? 'summary' : 'full',
+    initials: str(req.body?.initials).slice(0, 12),
+  });
+
+  const { rows } = await q(
+    `INSERT INTO le_reports (case_id, status, mode, ran_by, initials)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [caseId, status, str(req.body?.mode) === 'summary' ? 'summary' : 'full',
+     req.user.uid, str(req.body?.initials).slice(0, 12)]);
+
+  /* The filenames go on the record and the contents emphatically do not --
+     the same rule the document reader follows. */
+  await audit(req.user.uid, 'le_report', rows[0].id, 'create',
+    `sent ${list.length} record file(s) for a life-expectancy report: `
+    + `${list.map((f) => f.originalname).join(', ')} · ${describeOrigin(req)}`);
+
+  /* Attach it to whatever it was run from, if anything, in the same
+     breath -- so a report started from a deal is that deal's from the
+     first poll rather than after somebody remembers. */
+  const oppId = int(req.body?.opportunity_id);
+  const polId = int(req.body?.policy_id);
+  if (oppId && await oppVisible(req, oppId))
+    await q('UPDATE le_reports SET opportunity_id = $1, attached_by = $2, attached_at = now() '
+      + 'WHERE id = $3', [oppId, req.user.uid, rows[0].id]);
+  else if (polId && await assertPolicyInScope(req, polId))
+    await q('UPDATE le_reports SET policy_id = $1, attached_by = $2, attached_at = now() '
+      + 'WHERE id = $3', [polId, req.user.uid, rows[0].id]);
+
+  const { rows: back } = await q(`${LE_SELECT} WHERE r.id = $1`, [rows[0].id]);
+  res.status(201).json(back[0]);
+}
+
+router.get('/le-reports', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q(`${LE_SELECT} ORDER BY r.ran_at DESC, r.id DESC LIMIT 200`);
+  res.json({ configured: leConfigured(), reports: await withFreshStatus(rows) });
+}));
+
+/** One case, always with a fresh reading of where it has got to. */
+router.get('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q(`${LE_SELECT} WHERE r.id = $1`, [int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+  res.json(await refreshLeReport(rows[0]));
+}));
+
+/**
+ * The report itself, while the service still holds it.
+ *
+ * Streamed through rather than stored: this application never writes a
+ * medical summary down, and the access key never leaves the server.
+ */
+router.get('/le-reports/:id/report.pdf', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { rows } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+    const pdf = await casePdf(rows[0].case_id);
+    await audit(req.user.uid, 'le_report', rows[0].id, 'read',
+      `downloaded the life-expectancy report · ${describeOrigin(req)}`);
+    const who = String(rows[0].initials || 'XX').replace(/[^A-Za-z0-9]/g, '') || 'XX';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${who}_Medical_Summary_and_LE_Analysis.pdf"`);
+    res.send(pdf);
+  }));
+
+/** Attach to a policy or an opportunity, or take it off one. */
+router.put('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows: cur } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
+  if (!cur[0]) return res.status(404).json({ error: 'That report is not on file' });
+
+  const policyId = int(req.body?.policy_id);
+  const oppId = int(req.body?.opportunity_id);
+  if (policyId && oppId)
+    return res.status(400).json({
+      error: 'A report belongs to one thing or the other, not both.' });
+  if (policyId && !(await assertPolicyInScope(req, policyId)))
+    return res.status(404).json({ error: 'Policy not found' });
+  if (oppId && !(await oppVisible(req, oppId)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+
+  const { rows } = await q(
+    `UPDATE le_reports
+        SET policy_id = $1::int, opportunity_id = $2::int,
+            attached_by = CASE WHEN $1::int IS NULL AND $2::int IS NULL
+                               THEN NULL ELSE $3::int END,
+            attached_at = CASE WHEN $1::int IS NULL AND $2::int IS NULL
+                               THEN NULL ELSE now() END
+      WHERE id = $4 RETURNING *`,
+    [policyId || null, oppId || null, req.user.uid, int(req.params.id)]);
+
+  await audit(req.user.uid, 'le_report', rows[0].id, 'update',
+    policyId ? `attached to policy ${policyId}`
+      : oppId ? `attached to opportunity ${oppId}` : 'detached');
+  res.json(rows[0]);
+}));
+
+/** Forget it here, and ask the service to forget it too. */
+router.delete('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+  const { rows } = await q('DELETE FROM le_reports WHERE id = $1 RETURNING *',
+    [int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
+  await purgeCase(rows[0].case_id);
+  await audit(req.user.uid, 'le_report', rows[0].id, 'delete',
+    `deleted the life-expectancy report for ${rows[0].initials || 'an unnamed case'}`);
+  res.json({ ok: true });
+}));
+
+/** The reports attached to one record, for its own page. */
+export async function leReportsFor(kind, id) {
+  const col = kind === 'policy' ? 'r.policy_id' : 'r.opportunity_id';
+  const { rows } = await q(
+    `${LE_SELECT} WHERE ${col} = $1 ORDER BY r.ran_at DESC, r.id DESC`, [id]);
   return rows;
 }
 

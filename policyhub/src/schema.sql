@@ -1185,6 +1185,60 @@ CREATE TABLE IF NOT EXISTS valuations (
   seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (policy_id IS NULL OR opportunity_id IS NULL)
 );
+
+/* ====================================================================
+   Life-expectancy reports
+   ====================================================================
+
+   A third program again: medical records go to the report service, and a
+   Medical Summary & Estimated Life-Expectancy Analysis comes back. What
+   is kept here is the HEADLINE and nothing else.
+
+   That is the whole design of this table. The service purges its own
+   copy after a day; the PDF is fetched through this application while it
+   still exists and is never written down. A medical summary at rest in
+   the portfolio database is a different kind of object from a figure
+   about one, and the figure is what the book needs: an estimate, a
+   range, how confident it was, and which record it belongs to.
+
+   Attached the same way a valuation is -- one end or the other, never
+   both, and it follows a deal onto the policy when the deal is funded.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS le_reports (
+  id              SERIAL PRIMARY KEY,
+  case_id         TEXT NOT NULL UNIQUE,          -- the report service's own id
+  status          TEXT NOT NULL DEFAULT 'queued',-- queued|extracting|analyzing|rendering|done|error|expired
+  error           TEXT NOT NULL DEFAULT '',
+  mode            TEXT NOT NULL DEFAULT 'full',  -- full | summary
+  ran_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ran_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  finished_at     TIMESTAMPTZ,
+
+  -- the headline, and only the headline
+  initials        TEXT NOT NULL DEFAULT '',
+  sex             TEXT NOT NULL DEFAULT '',
+  age             INTEGER,
+  one_liner       TEXT NOT NULL DEFAULT '',
+  central_years   NUMERIC(6,2),
+  range_low_years NUMERIC(6,2),
+  range_high_years NUMERIC(6,2),
+  le_path         TEXT NOT NULL DEFAULT '',      -- which route through the rubric
+  confidence      TEXT NOT NULL DEFAULT '',
+  pages           INTEGER,
+  ocr_used        BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- what it is a report about
+  policy_id       INTEGER REFERENCES policies(id)      ON DELETE SET NULL,
+  opportunity_id  INTEGER REFERENCES opportunities(id) ON DELETE SET NULL,
+  attached_by     INTEGER REFERENCES users(id)         ON DELETE SET NULL,
+  attached_at     TIMESTAMPTZ,
+  carried_from    INTEGER,
+
+  CHECK (policy_id IS NULL OR opportunity_id IS NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_le_reports_policy ON le_reports (policy_id);
+CREATE INDEX IF NOT EXISTS idx_le_reports_opportunity ON le_reports (opportunity_id);
+
 CREATE INDEX IF NOT EXISTS idx_valuations_policy ON valuations (policy_id);
 CREATE INDEX IF NOT EXISTS idx_valuations_opp    ON valuations (opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_valuations_ran    ON valuations (ran_at DESC);

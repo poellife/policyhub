@@ -12,6 +12,7 @@ import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } fr
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { readDocuments } from './extract.js';
+import { startLeReport } from './api.js';
 import { startMailWorker } from './mail.js';
 // The valuation model is a separate program; this is the door to it.
 import { mountValuation } from './valuation.js';
@@ -159,6 +160,39 @@ app.post('/api/opportunities/extract', authenticate,
       + list.map((f) => f.originalname).join(', '));
     res.json(out);
   }));
+
+/* ------------------------------------------------------------------ *
+ * Medical records, on their way to the life-expectancy service
+ *
+ * The largest upload this application accepts, because an attending
+ * physician's statement is routinely hundreds of pages and sometimes a
+ * scanned thousand. It is buffered in memory, handed straight to the
+ * report service, and goes out of scope: nothing about the records is
+ * written to disk or to the database here, which is the whole reason
+ * this route exists rather than the browser talking to that service.
+ *
+ * One case at a time per account. A second click while the first upload
+ * is still going is a double-submit, and each of these costs real money
+ * on the far side.
+ * ------------------------------------------------------------------ */
+const recordsUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024, files: 12, fields: 8 },
+});
+const sendingRecords = new Set();
+app.post('/api/le-reports', authenticate, requireRole('admin'),
+  (req, res, next) => {
+    if (sendingRecords.has(req.user.uid))
+      return res.status(429).json({
+        error: 'Records are already being sent on this account. Give it a moment — '
+          + 'a large package takes a while to upload.' });
+    sendingRecords.add(req.user.uid);
+    res.on('finish', () => sendingRecords.delete(req.user.uid));
+    res.on('close', () => sendingRecords.delete(req.user.uid));
+    next();
+  },
+  recordsUpload.fields([{ name: 'files', maxCount: 12 }]),
+  wrap(startLeReport));
 
 const docUpload = multer({
   storage: multer.memoryStorage(),
