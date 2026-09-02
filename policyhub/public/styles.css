@@ -1750,3 +1750,101 @@ table.data td.risk-note-cell {
 }
 @keyframes le-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .le-dot { animation: none; opacity: .6; } }
+
+/* ------------------------- LE case, in flight -------------------------
+   A case can run for half an hour, so "it is working" has to be visible
+   from across the room and specific enough to tell a slow job from a
+   dead one. Four things say it: the steps say how far, the clock says it
+   has not hung, the log says why it is taking as long as it is, and the
+   estimate says what to expect. */
+.le-progress {
+  margin-top: 12px; padding: 14px 15px;
+  background: var(--sunken); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* The steps, with the rule between them doubling as the progress bar. */
+.le-steps { display: flex; align-items: flex-start; gap: 0; }
+.le-step {
+  flex: 1; position: relative; text-align: center;
+  padding-top: 20px; min-width: 0;
+}
+.le-step::before {          /* the connector, drawn behind the dot */
+  content: ''; position: absolute; top: 6px; left: -50%; width: 100%; height: 2px;
+  background: var(--border-strong);
+}
+.le-step:first-child::before { display: none; }
+.le-step.done::before, .le-step.now::before { background: var(--text-primary); }
+.le-step-dot {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--surface-1); border: 2px solid var(--border-strong);
+  font-size: 8px; line-height: 10px; color: var(--accent-ink);
+  display: flex; align-items: center; justify-content: center;
+}
+.le-step.done .le-step-dot {
+  background: var(--text-primary); border-color: var(--text-primary);
+}
+.le-step.now .le-step-dot {
+  border-color: var(--text-primary); background: var(--surface-1);
+  box-shadow: 0 0 0 3px var(--hover);
+  animation: le-step-pulse 1.8s ease-in-out infinite;
+}
+.le-step-label {
+  display: block; font-size: 11.5px; line-height: 1.35; color: var(--text-muted);
+  padding: 0 4px;
+}
+.le-step.done .le-step-label { color: var(--text-secondary); }
+.le-step.now .le-step-label { color: var(--text-primary); font-weight: 600; }
+@keyframes le-step-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--hover); }
+  50%      { box-shadow: 0 0 0 6px var(--hover); }
+}
+
+.le-progress-meta {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 16px 0 10px; font-size: 13px;
+}
+.le-progress-meta .spacer { flex: 1; }
+.le-now { font-weight: 600; }
+/* Three dots that actually move, so a stage nobody has left for four
+   minutes still looks alive. */
+.le-ell::after {
+  content: '…'; display: inline-block; width: 1.1em; text-align: left;
+  animation: le-ell 1.6s steps(4, end) infinite;
+}
+@keyframes le-ell { 0% { content: ''; } 25% { content: '.'; }
+                    50% { content: '..'; } 75%, 100% { content: '…'; } }
+.le-clock {
+  font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The service's own commentary. Monospace because it is a log, and
+   fixed-height so a long OCR run does not push the page around. */
+.le-log {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.75;
+  color: var(--text-secondary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 9px 11px; max-height: 118px; overflow: auto;
+}
+.le-log-t { color: var(--text-muted); margin-right: 10px; }
+
+.le-wait { margin-top: 11px; font-size: 12.5px; line-height: 1.6; color: var(--text-secondary); }
+.le-keep { display: block; margin-top: 7px; color: var(--text-primary); font-weight: 500; }
+/* A real proportion, once OCR starts counting pages out loud. */
+.le-bar {
+  display: block; height: 5px; margin-bottom: 9px; border-radius: 3px;
+  background: var(--surface-1); border: 1px solid var(--border); overflow: hidden;
+}
+.le-bar > span {
+  display: block; height: 100%; background: var(--text-primary);
+  transition: width .4s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .le-step.now .le-step-dot, .le-ell::after { animation: none; }
+}
+@media (max-width: 640px) {
+  .le-step-label { font-size: 10.5px; }
+}

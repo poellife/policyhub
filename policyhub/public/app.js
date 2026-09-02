@@ -959,9 +959,11 @@ const STAFF_NAV = [
      writes nothing anywhere -- the judgements in it are new, and until they
      have earned their place they should not be able to mark the record.
      Administrators only, filtered out below the way carried interest is. */
-  /* Records in, an estimate out. Administrators only, on both counts
-     that matter: the input is somebody else's medical file and every run
-     costs real money on the far side. */
+  /* Records in, an estimate out. Not a rank but a grant, like Policy
+     Valuation: an administrator has it, and anybody else only if one has
+     handed it over by name. Held tightly on both counts that matter --
+     the input is somebody else's medical file, and every run costs real
+     money on the far side. Filtered by the grant below. */
   ['le-reports', 'LE reports'],
   ['longevity', 'Longevity'],
   // Importing is a setup job rather than a daily one, so it sits under
@@ -971,12 +973,17 @@ const STAFF_NAV = [
 ];
 
 /** Menu entries an administrator has and nobody else does. */
-const ADMIN_ONLY_NAV = ['carry', 'longevity', 'le-reports'];
+const ADMIN_ONLY_NAV = ['carry', 'longevity'];
 
 /* Policy Valuation is not a rank, it is a grant: an administrator has it,
    and anybody else has it only if one gave it to them by name. So the menu
    asks the account rather than the role. */
 const mayValue = () => !!state.user?.can_value;
+
+/* And the same for LE reports, granted separately. Pricing a policy and
+   reading somebody's oncology file are two different permissions, so the
+   menu asks two different questions. */
+const mayLe = () => !!state.user?.can_le;
 
 // An investor sees only their own holdings; the staff-only sections are absent
 // from the menu and refused by the server regardless.
@@ -1099,7 +1106,8 @@ const navItems = () => {
      to. A viewer reads the book and changes nothing in it, so the runs
      list is not theirs even though the prices in it are. */
   const shown = mayValue() ? list : list.filter(([r]) => r !== 'valuation');
-  return canEditData() ? shown : shown.filter(([r]) => r !== 'valuations');
+  const withLe = mayLe() ? shown : shown.filter(([r]) => r !== 'le-reports');
+  return canEditData() ? withLe : withLe.filter(([r]) => r !== 'valuations');
 };
 
 /* Display multiplier.
@@ -8667,6 +8675,19 @@ async function openUserDialog(u, funds, onSaved) {
           reached from the menu; nothing in this portfolio changes when somebody
           runs one. Every run is recorded against their name.</span>
       </label>
+      ${''/* A second grant rather than a wider first one. Somebody who
+             prices policies is not automatically somebody who should be
+             reading an attending physician's statement, and the warning
+             below is the reason to make an administrator tick it
+             separately. */}
+      <label class="dlg-check" style="margin:10px 0 0">
+        <input type="checkbox" name="can_le" ${u.can_le ? 'checked' : ''}>
+        <span>May use <strong>LE reports</strong> — sending medical records to the
+          report service and reading the estimate that comes back. This is access to
+          protected health information: whoever holds it can open an insured's
+          attending physician's statement and the medical summary written from it.
+          Every case is recorded against their name.</span>
+      </label>
     </div>
 
     <div class="field" id="fundPick" style="display:none">
@@ -8719,6 +8740,7 @@ async function openUserDialog(u, funds, onSaved) {
       fund_ids: v.fund_ids || [],
       investor_ids: v.granted_investor_ids || [],
       can_value: !!v.can_value,
+      can_le: !!v.can_le,
     } });
     if (v.password) await api(`/users/${u.id}/password`, { method: 'POST', body: { password: v.password } });
     toast(v.password ? 'Account updated and password reset' : 'Account updated');
@@ -9818,12 +9840,224 @@ async function longevityView() {
  * fails.
  * ------------------------------------------------------------------ */
 
-const LE_STAGE = {
-  queued: 'Queued', extracting: 'Reading the records', analyzing: 'Analysing',
-  rendering: 'Writing the report', done: 'Done', error: 'Failed',
-  expired: 'Expired',
+/* The stages, in the order the service walks them.
+ *
+ * Named as work rather than as machine states -- "Reading the records"
+ * is what is happening; "extracting" is what the far side calls it. The
+ * order matters as much as the names: it is what lets the screen show
+ * how far along a case is rather than only where it is. */
+const LE_STAGES = [
+  ['queued', 'Queued', 'Waiting to start'],
+  ['extracting', 'Reading the records', 'Lifting the text out, and running OCR over anything scanned'],
+  ['analyzing', 'Analysing', 'Reading the picture and scoring it under Rubric v2.0'],
+  ['rendering', 'Writing the report', 'Laying out the summary and the estimate'],
+];
+const LE_STAGE = Object.fromEntries([
+  ...LE_STAGES.map(([k, label]) => [k, label]),
+  ['done', 'Done'], ['error', 'Failed'], ['expired', 'Expired'],
+]);
+const leStageIndex = (s) => {
+  const i = LE_STAGES.findIndex(([k]) => k === s);
+  return i === -1 ? (s === 'done' ? LE_STAGES.length : 0) : i;
 };
 const leRunningNow = (s) => !['done', 'error', 'expired'].includes(String(s || ''));
+
+/** How long it has been going, said the way a person would say it. */
+function leElapsed(since) {
+  const ms = Date.now() - new Date(since).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return min < 60 ? `${min}m ${String(sec % 60).padStart(2, '0')}s`
+    : `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * What the system is doing, said obviously.
+ *
+ * Four things at once, because a case can run for half an hour and each
+ * answers a different worry:
+ *
+ *   the STEPS say how far through it is, not just where -- a bar that
+ *     fills is the difference between "it is working" and "it is stuck";
+ *   the CLOCK says it has not hung. Twenty minutes of OCR looks
+ *     identical to a dead process without one;
+ *   the LOG is the service's own commentary -- "scanned document
+ *     detected, running OCR", "OCR pages 41-60 of 240" -- which is the
+ *     only thing that explains WHY a case is taking as long as it is;
+ *   the NOTE sets the expectation before anybody starts worrying.
+ *
+ * Drawn as one block so it can sit on the list, in the dialog, or on a
+ * record's panel and read the same in all three.
+ */
+function leProgress(r) {
+  const now = leStageIndex(r.status);
+  const log = (r.log || []).slice(-6);
+  return `
+    <div class="le-progress" data-le-watch="${r.id}" data-since="${esc(String(r.ran_at || ''))}">
+      <div class="le-steps">
+        ${LE_STAGES.map(([key, label, what], i) => {
+    const cls = i < now ? 'done' : i === now ? 'now' : 'todo';
+    return `<div class="le-step ${cls}" title="${esc(what)}">
+            <span class="le-step-dot">${i < now ? '&#10003;' : ''}</span>
+            <span class="le-step-label">${esc(label)}</span>
+          </div>`;
+  }).join('')}
+      </div>
+      <div class="le-progress-meta">
+        <span class="le-now">${esc(LE_STAGE[r.status] || r.status)}<span class="le-ell"></span></span>
+        <span class="spacer"></span>
+        <span class="le-clock" data-le-clock>${esc(leElapsed(r.ran_at))}</span>
+      </div>
+      <div class="le-log" data-le-log>${log.length
+    ? log.map((l) => `<div><span class="le-log-t">${esc(l.t)}</span>${esc(l.msg)}</div>`).join('')
+    : '<div class="muted">Waiting for the service to say what it is doing…</div>'}</div>
+      <div class="le-wait" data-le-wait>${leEstimate(r)}</div>
+    </div>`;
+}
+
+/**
+ * How long this is going to take, said as honestly as it can be.
+ *
+ * Before the records are read there is nothing to go on but the shape of
+ * the job, so it gives the range. Once OCR starts the service counts
+ * pages out loud -- "OCR pages 41-60 of 240" -- and that is a real
+ * proportion, so the estimate stops being a guess and starts being
+ * arithmetic. Roughly a second a page at the settings it ships with.
+ */
+const OCR_LINE = /OCR pages\s+(\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)/i;
+
+function leEstimate(r) {
+  const lines = (r.log || []).map((l) => l.msg || '');
+  const ocr = lines.map((m) => OCR_LINE.exec(m)).filter(Boolean).pop();
+
+  if (ocr) {
+    const doneP = Number(ocr[2]);
+    const total = Number(ocr[3]);
+    const pct = Math.min(99, Math.round((doneP / total) * 100));
+    /* Measured against this case rather than assumed: elapsed so far,
+       divided by the fraction done, is the only projection worth
+       printing. */
+    const ms = Date.now() - new Date(r.ran_at).getTime();
+    const left = doneP > 0 && Number.isFinite(ms)
+      ? Math.round((ms / doneP) * (total - doneP) / 60000) : null;
+    return `<span class="le-bar"><span style="width:${pct}%"></span></span>
+      <strong>Reading page ${doneP} of ${total}</strong> by OCR — ${pct}% of the way through${
+  left !== null ? `, about ${left < 1 ? 'a minute' : `${left} more minute${left === 1 ? '' : 's'}`}
+      of reading left` : ''}. ${LE_WINDOW}`;
+  }
+
+  if (lines.some((m) => /scanned document detected/i.test(m)))
+    return `These pages are scanned, so they have to be read by OCR before anything can be
+      analysed. That is the slow part — reckon on about a minute for every sixty pages, so a
+      long package can take half an hour. ${LE_WINDOW}`;
+
+  if (r.status === 'analyzing' || r.status === 'rendering')
+    return `The reading is done and the analysis is running. This part is usually one to three
+      minutes. ${LE_WINDOW}`;
+
+  return `A digital file is usually <strong>two to five minutes</strong> end to end. Anything
+    scanned has to be read by OCR first, and a thousand-page package can take
+    <strong>half an hour</strong>. ${LE_WINDOW}`;
+}
+
+/* The one thing about this that people get wrong, so it is said in the
+   one place they will be looking when they wonder.
+   
+   By the time this block is on screen the records are already across --
+   the drop zone is what asks for the window to be kept open, and it only
+   asks for as long as the upload takes. From here the case belongs to the
+   report service, and this server checks on it every couple of minutes
+   whether anybody has the page open or not (see startLeSweeper), so
+   closing the tab genuinely costs nothing. Said plainly, because the
+   alternative is somebody sitting in front of a progress bar for half an
+   hour believing they have to. */
+const LE_WINDOW = '<span class="le-keep">The records are across, so you can close this window '
+  + 'if you want to — the case keeps running on the report service and the result will be '
+  + 'waiting on the LE reports screen. Leaving it open just lets you watch.</span>';
+
+/**
+ * Keep every running case on screen up to date, in place.
+ *
+ * In place rather than by redrawing the view: a case runs for minutes,
+ * and a screen that rebuilds itself every few seconds throws away the
+ * scroll position and anything half-typed. The clock ticks locally every
+ * second so the page never looks frozen between polls.
+ */
+let leClockTimer = null;
+function wireLeWatchers({ onDone } = {}) {
+  clearInterval(leClockTimer);
+  const blocks = [...document.querySelectorAll('[data-le-watch]')];
+  if (!blocks.length) return;
+
+  leClockTimer = setInterval(() => {
+    for (const b of document.querySelectorAll('[data-le-watch]')) {
+      const el = b.querySelector('[data-le-clock]');
+      if (el) el.textContent = leElapsed(b.dataset.since);
+    }
+  }, 1000);
+
+  /* A block is watched once. The panel wires itself and the screen
+     wires itself, and on a record that carries both, the same block
+     would otherwise be polled twice a beat. */
+  for (const block of blocks) {
+    if (block.dataset.leWired) continue;
+    block.dataset.leWired = '1';
+    watch(block);
+  }
+
+  async function watch(block) {
+    const id = block.dataset.leWatch;
+    for (let i = 0; i < 600; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      if (!document.body.contains(block)) return;      // the view moved on
+      let r;
+      try { r = await api(`/le-reports/${id}`); } catch { continue; }
+      if (!document.body.contains(block)) return;
+
+      if (!leRunningNow(r.status)) {
+        clearInterval(leClockTimer);
+        if (onDone) onDone(r); else render();
+        return;
+      }
+      patch(block, r);
+    }
+  }
+
+  /* Only the three things that move. Rewriting the block's HTML would
+     restart the pulse animation on every poll, which reads as a stutter
+     rather than as progress. */
+  function patch(block, r) {
+    const now = leStageIndex(r.status);
+    [...block.querySelectorAll('.le-step')].forEach((el, i) => {
+      const cls = i < now ? 'done' : i === now ? 'now' : 'todo';
+      if (!el.classList.contains(cls)) {
+        el.className = `le-step ${cls}`;
+        el.querySelector('.le-step-dot').innerHTML = i < now ? '&#10003;' : '';
+      }
+    });
+    const label = block.querySelector('.le-now');
+    const said = LE_STAGE[r.status] || r.status;
+    if (label && !label.textContent.startsWith(said))
+      label.innerHTML = `${esc(said)}<span class="le-ell"></span>`;
+    const log = block.querySelector('[data-le-log]');
+    const lines = (r.log || []).slice(-6);
+    if (log && lines.length)
+      log.innerHTML = lines
+        .map((l) => `<div><span class="le-log-t">${esc(l.t)}</span>${esc(l.msg)}</div>`).join('');
+    /* The estimate moves with the log: once OCR starts counting pages it
+       stops being a range and becomes a proportion. */
+    const wait = block.querySelector('[data-le-wait]');
+    if (wait) wait.innerHTML = leEstimate(r);
+    /* The badge sits above the block rather than inside it, and a card
+       whose badge still said "Queued" while the stepper had moved on to
+       reading was the first thing anybody noticed. */
+    const badge = block.closest('.le-case')?.querySelector('.le-badge');
+    if (badge && !badge.textContent.includes(said))
+      badge.innerHTML = `<span class="le-dot"></span>${esc(said)}`;
+  }
+}
 
 /** Years, as the report states them: a central figure and a range. */
 const leCentral = (r) => (r.central_years == null ? '—'
@@ -9918,6 +10152,17 @@ function wireLeUpload({ onDone } = {}) {
   });
   input?.addEventListener('change', () => send([...input.files]));
 
+  /**
+   * The upload is the only part that needs this code.
+   *
+   * Once the records are across, the case belongs to the list: the row
+   * draws the stepper, the clock, the service's own log and the
+   * estimate, and watches itself. Redrawing here rather than narrating
+   * into the drop zone is what fixes the complaint the old version
+   * earned -- a zone that said "Reading the records" for twenty minutes
+   * beside a header that still said "0 cases", with no way to tell a
+   * long OCR from a dead one.
+   */
   async function send(files) {
     if (busy || !files.length) return;
     busy = true;
@@ -9926,7 +10171,12 @@ function wireLeUpload({ onDone } = {}) {
       const el = $('#leDrop .read-drop-main');
       if (el) el.innerHTML = `<span class="read-spin"></span> ${esc(msg)}`;
     };
-    say(`Sending ${files.length} file${files.length === 1 ? '' : 's'}…`);
+    /* Said in megabytes because that is what makes the wait make sense:
+       a 180 MB package is a slow upload on any office connection, and
+       this is the one stretch that really does need the window. */
+    const mb = files.reduce((t, f) => t + (f.size || 0), 0) / (1024 * 1024);
+    say(`Sending ${files.length} file${files.length === 1 ? '' : 's'}${
+      mb >= 1 ? `, ${Math.round(mb)} MB` : ''} — keep this window open until it is across…`);
     try {
       const form = new FormData();
       for (const f of files) form.append('files', f, f.name);
@@ -9937,10 +10187,8 @@ function wireLeUpload({ onDone } = {}) {
       if (kind === 'opportunity' && id) form.append('opportunity_id', id);
       if (kind === 'policy' && id) form.append('policy_id', id);
 
-      const started = await api('/le-reports', { method: 'POST', body: form });
-      say('Sent. The report is running — this takes a few minutes.');
-      toast('Records sent');
-      await watch(started.id, say);
+      await api('/le-reports', { method: 'POST', body: form });
+      toast('Records sent — the case is running');
     } catch (err) {
       const el = $('#leDrop .read-drop-main');
       if (el) el.innerHTML = `<span class="read-fail">${esc(err.message)}</span>`;
@@ -9951,19 +10199,6 @@ function wireLeUpload({ onDone } = {}) {
     busy = false;
     zone.classList.remove('busy');
     if (onDone) onDone(); else render();
-  }
-
-  /* Every eight seconds. A report takes minutes; a tighter poll buys
-     nothing and asks the far side for a file read each time. */
-  async function watch(id, say) {
-    for (let i = 0; i < 450; i++) {
-      await new Promise((r) => setTimeout(r, 8000));
-      let r;
-      try { r = await api(`/le-reports/${id}`); } catch { continue; }
-      say(`${LE_STAGE[r.status] || r.status}…`);
-      if (!leRunningNow(r.status)) return r;
-    }
-    return null;
   }
 }
 
@@ -9983,6 +10218,7 @@ function leCard(r, { compact = false } = {}) {
         <span class="muted" style="font-size:12px">${fmtDate(r.ran_at)}${
   r.ran_by_name ? ` · ${esc(r.ran_by_name)}` : ''}</span>
       </div>
+      ${leRunningNow(r.status) ? leProgress(r) : ''}
       ${r.one_liner ? `<div class="le-one-liner">${esc(r.one_liner)}</div>` : ''}
       ${r.status === 'error' ? `<div class="le-error">${
     esc(r.error || 'The report did not finish.')}</div>` : ''}
@@ -10005,6 +10241,19 @@ function leCard(r, { compact = false } = {}) {
 }
 
 async function leReportsView() {
+  /* Refused here as well as absent from the menu. The server refuses it
+     too -- that is the lock -- but a person who followed a stale link
+     should get a sentence rather than a failed request. */
+  if (!mayLe())
+    return { html: `
+      <div class="page-head"><div><h1>LE reports</h1></div></div>
+      <div class="empty">
+        <p>This one has to be granted to an account. The records that go into it are
+          somebody's medical file, so an administrator hands it over by name rather
+          than it coming with a role.</p>
+        <p class="muted">Ask an administrator to grant it in Settings → Users.</p>
+      </div>` };
+
   const out = await api('/le-reports');
   const list = out.reports || [];
   const running = list.filter((r) => leRunningNow(r.status));
@@ -10042,17 +10291,12 @@ async function leReportsView() {
     after: () => {
       wireLeUpload();
       wireLeActions();
-      /* A case still running redraws itself, so the list does not sit
-         claiming "Analysing" for ten minutes after it finished. */
-      if (running.length) leTick();
+      /* Each running case updates itself in place. A blunt re-render of
+         the whole screen every few seconds would throw away the scroll
+         position and anything half-typed in the form above. */
+      wireLeWatchers();
     },
   };
-}
-
-let leTimer = null;
-function leTick() {
-  clearTimeout(leTimer);
-  leTimer = setTimeout(() => { if (state.route === 'le-reports') render(); }, 10000);
 }
 
 /** The buttons a case carries, wherever it is drawn. */
@@ -10128,13 +10372,15 @@ function leReportPanel(list, kind, id, record = null) {
 
 function wireLeReportPanel(kind, id) {
   wireLeActions();
+  wireLeWatchers();
   $('#leRunBtn')?.addEventListener('click', () => {
     const dlg = openDialog('Run a life-expectancy report', `
       ${leDropZone(kind, id)}
       <p class="muted" style="font-size:12px;margin:14px 0 0">The records are handed to the
         report service and are not stored here. It reads them, deletes them, and purges the
-        finished report after a day — what stays on this side is the headline. Leave this
-        open while it runs.</p>`);
+        finished report after a day — what stays on this side is the headline. Keep this
+        window open until the upload is across; after that the case runs on the service and
+        you can close it.</p>`);
     wireLeUpload({ onDone: () => { dlg.close(); dlg.remove(); render(); } });
   });
 }
