@@ -1,0 +1,38 @@
+{
+ "meta": {"initials": "A.B.", "sex": "Male", "dob": "03/14/1945", "age": 81, "state": "Texas",
+          "source_records": "Regional oncology + nephrology APS (~240 pp, 2022–2026); PCP records 2026",
+          "most_recent_data": "Labs 06/2026; oncology visit 05/2026",
+          "summary_of_summary": "81M with hormone-sensitive nodal-metastatic prostate cancer in deep PSA response, progressive CKD 3b and compensated vascular disease."},
+ "overview": {"narrative": "An 81-year-old man under active oncology and nephrology care. The clinical picture is dominated by recurrent prostate cancer with PSMA-PET nodal metastases, now hormone-sensitive on relugolix plus darolutamide with PSA 0.24. Renal function has drifted from creatinine 1.4 to 2.1 over four years (stage 3b, progressive). Cardiovascular disease is diffuse but compensated with a preserved ejection fraction. He is independent, never smoked, and drinks moderately.",
+              "key_facts": [["Tobacco / alcohol", "Never-smoker; ~7 drinks/week"], ["Weight / BMI", "BMI ~31 (class I obesity), stable"], ["Key labs (2026)", "PSA 0.24 • Cr 2.1 / eGFR ~33 • A1c 6.4 • LDL 67"], ["Functional status", "Independent in ADLs; ECOG ~1"]]},
+ "allergies": "No known drug allergies.",
+ "problem_list": ["Metastatic prostate adenocarcinoma (nodal, hormone-sensitive) — active", "Stage 3b chronic kidney disease, progressive", "Coronary artery disease, asymptomatic; PAD; mild carotid disease", "Borderline type 2 diabetes (A1c 6.2–6.5)", "Hypertension, controlled", "Class I obesity"],
+ "systems": [
+  {"title": "Oncology (lead issue)", "narrative": "Gleason 6 prostate cancer treated with prostatectomy in 2002, biochemical recurrence, and PSMA-PET nodal metastases in 2024.",
+   "bullets": ["Relugolix + darolutamide started 11/2024; PSA fell to 0.24 by 05/2026 (p. 41).", "ECOG ~1 documented at the 05/2026 visit (p. 39).", "No visceral or bone metastases on the latest imaging (p. 52)."],
+   "timeline": [["2002", "Radical prostatectomy, Gleason 6"], ["2023", "Biochemical recurrence"], ["2024", "PSMA-PET: pelvic/retroperitoneal nodal metastases"], ["11/2024", "Relugolix + darolutamide"], ["05/2026", "PSA 0.24, excellent response"]]},
+  {"title": "Renal", "narrative": "Progressive stage 3b CKD.", "bullets": ["Creatinine 1.4 (2022) → 2.1 (06/2026); eGFR ~32–35 (p. 88).", "No albuminuria documented — unassessed."], "timeline": []},
+  {"title": "Cardiovascular", "narrative": "Diffuse but compensated vascular disease.", "bullets": ["CAD without angina; echo EF 55% (p. 120).", "PAD and mild carotid stenosis; BP controlled; LDL 67."], "timeline": []},
+  {"title": "Metabolic / Endocrine", "narrative": "", "bullets": ["Borderline T2DM, A1c 6.2–6.5, diet-controlled.", "Class I obesity, BMI ~31."], "timeline": []}
+ ],
+ "medications": [["Relugolix", "120 mg daily", "Androgen deprivation"], ["Darolutamide", "600 mg BID", "Androgen receptor inhibitor"], ["Atorvastatin", "40 mg daily", "Lipids"], ["Amlodipine", "5 mg daily", "Blood pressure"], ["Aspirin", "81 mg daily", "Vascular protection"]],
+ "social_family": ["Never-smoker.", "Alcohol ~7 drinks/week.", "Married; independent; walks daily.", "Family history: father died at 88; no premature cardiac disease."],
+ "le": {
+  "method": "Rubric v2.0: SSA 2023 baseline + 2.6-yr uplift, dominant-condition routing with the type-aware cancer anchor. Epidemiological approximation, not a prediction.",
+  "baseline": "81M SSA 2023 ~7.97 yr + 2.6 uplift → baseline ≈ 10.6 yr.",
+  "baseline_years": 10.6,
+  "dominant": "Rule R6 — active metastatic prostate cancer → individualized review. Prostate is a treatable-tier tumour (nodal/distant anchor ~5.5 × ECOG 1 ×1.1 × responding ×1.5 ≈ 9 yr ceiling), but at 81 the multiplicative factor with competing comorbidity governs below that ceiling.",
+  "path": "dominant",
+  "factors": [["Metastatic prostate cancer (active)", "Lowers", "Major", "Node-only, hormone-sensitive, deep PSA response, ECOG 1 (pp. 39–41)"], ["Progressive stage 3b CKD", "Lowers", "Major", "Cr 1.4→2.1 (p. 88)"], ["Diffuse vascular disease", "Lowers", "Moderate", "CAD + PAD + carotid; compensated (p. 120)"], ["Preserved EF 55%", "Supports", "Moderate", "No heart failure"], ["Excellent risk-factor control", "Supports", "Moderate", "BP, LDL 67, A1c 6.2"], ["Never-smoker; engaged care", "Supports", "Modest", "Independent"]],
+  "computation": "Baseline 10.6 yr. Metastatic factor 0.42 + 0.08 (responding) = 0.50 → 5.3 yr; competing comorbidity (progressive CKD 3b, vascular disease) × ~0.85 → factor ≈ 0.42 → 4.4 yr. Absolute ceiling 9.1 yr does not bind. Credits cannot offset a dominant condition.",
+  "modules": ["SEER/ECOG cross-check: metastatic prostate, ECOG 1, hormone-sensitive — 5-yr survival ~30–35%; consistent with central ~4 yr.", "Seattle HF, MELD 3.0, BODE: not applicable."],
+  "central_years": 4.2, "range_low_years": 3.0, "range_high_years": 6.0,
+  "estimate": "Estimated remaining life expectancy: roughly 3–6 years (to about age 84–87), central ~4 years.",
+  "swing_downside": "(≤2 yr) castration resistance with rapid PSA doubling, visceral spread, or CKD progression toward dialysis.",
+  "swing_upside": "(6+ yr) sustained hormone sensitivity with undetectable PSA and stable renal function.",
+  "accuracy_note": "Active metastatic cancer is a lower-confidence category under Rubric §7; treatable-tier tumours in deep response can outlive the anchor.",
+  "caveat": "Individualized estimate; treat as indicative and weight the records review.",
+  "confidence": "lower"
+ },
+ "verification_notes": ["Creatinine trend partly read from a scanned nephrology flowsheet (pp. 85–90) — verify."]
+}
