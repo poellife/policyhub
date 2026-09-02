@@ -241,9 +241,9 @@ check('and comes back with the deal if it is sent back',
 /* ------------------------------------------------------------------ *
  * Who may
  * ------------------------------------------------------------------ */
-console.log('\nADMINISTRATORS AND NOBODY ELSE');
+console.log('\nGRANTED BY NAME, NOT BY RANK');
 for (const [who, cookie] of [['a manager', pm1], ['an investor', inv1]]) {
-  check(`${who} cannot read the list`,
+  check(`${who} who has not been given it cannot read the list`,
     (await api(cookie, '/le-reports')).status === 403,
     String((await api(cookie, '/le-reports')).status));
   check(`${who} cannot fetch a report`,
@@ -255,8 +255,51 @@ for (const [who, cookie] of [['a manager', pm1], ['an investor', inv1]]) {
 const invDeal = await json(await api(inv1, `/opportunities/${o1.id}`));
 check('and an investor shown the deal is not sent the reports on it',
   invDeal.le_reports === undefined, JSON.stringify(invDeal.le_reports));
-const pmDeal = await json(await api(pm1, `/opportunities/${o1.id}`));
-check('nor is a manager', pmDeal.le_reports === undefined, JSON.stringify(pmDeal.le_reports));
+let pmDeal = await json(await api(pm1, `/opportunities/${o1.id}`));
+check('nor is a manager without the grant',
+  pmDeal.le_reports === undefined, JSON.stringify(pmDeal.le_reports));
+
+/* Handed over, used, taken back. The account is re-read on every request,
+   so both edges should bite on the next click rather than at the next
+   sign-in -- which is the whole reason this is a column and not a claim
+   in the cookie. */
+const users = await json(await api(admin, '/users'));
+const mgr = (users.users || users).find((u) => u.email === MANAGER1.email);
+const setLe = async (on) => api(admin, `/users/${mgr.id}`, { method: 'PUT', body: {
+  full_name: mgr.full_name, role: mgr.role, is_active: mgr.is_active,
+  investor_id: mgr.investor_id, fund_ids: mgr.fund_ids || [],
+  investor_ids: mgr.granted_investor_ids || mgr.investor_ids || [],
+  can_value: !!mgr.can_value, can_le: on } });
+
+const held = !!mgr?.can_le;
+check('a manager starts without it', mgr && held === false, `can_le=${held}`);
+await setLe(true);
+check('once an administrator grants it the manager can read the list',
+  (await api(pm1, '/le-reports')).status === 200);
+check('and their own account says so, so the menu can offer the tab',
+  (await json(await api(pm1, '/auth/me'))).can_le === true);
+pmDeal = await json(await api(pm1, `/opportunities/${o1.id}`));
+check('and the deal now carries the reports on it',
+  Array.isArray(pmDeal.le_reports), JSON.stringify(pmDeal.le_reports)?.slice(0, 40));
+check('the grant is on the record',
+  /granted LE reports for/i.test(JSON.stringify(await json(await api(admin, '/audit?limit=20')))));
+
+await setLe(false);
+check('withdrawing it shuts the door again on the next click',
+  (await api(pm1, '/le-reports')).status === 403);
+check('and the withdrawal is on the record too',
+  /withdrew LE reports for/i.test(JSON.stringify(await json(await api(admin, '/audit?limit=20')))));
+
+/* An investor is refused whatever the column says -- the guard asks the
+   role again rather than trusting the grant alone. */
+const invUser = (users.users || users).find((u) => u.email === INVESTOR1.email);
+await api(admin, `/users/${invUser.id}`, { method: 'PUT', body: {
+  full_name: invUser.full_name, role: 'investor', is_active: true,
+  investor_id: invUser.investor_id, fund_ids: [], investor_ids: [], can_le: true } });
+check('and an investor cannot be given it at all',
+  (await api(inv1, '/le-reports')).status === 403
+  && (await json(await api(admin, '/users'))).users
+    ?.find((u) => u.email === INVESTOR1.email)?.can_le !== true);
 
 /* ------------------------------------------------------------------ *
  * Deleting

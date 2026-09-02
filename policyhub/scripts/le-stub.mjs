@@ -76,7 +76,7 @@ export function startLeStub(port = 5077) {
     /* Advance a step per poll, unless the test has parked it. */
     if (stage !== 'done' && stage !== 'error' && stallAt !== stage) c.step += 1;
 
-    const out = { id: c.id, status: stage, mode: c.mode, log: [] };
+    const out = { id: c.id, status: stage, mode: c.mode, log: leLog(c, stage) };
     if (stage === 'error') out.error = 'No readable text was found in the uploaded records.';
     if (stage === 'done') {
       out.filename = 'AB_Medical_Summary_and_LE_Analysis.pdf';
@@ -89,6 +89,32 @@ export function startLeStub(port = 5077) {
     }
     return send(200, out);
   });
+
+  /* The service talks while it works, and PolicyHub shows what it says,
+     so the stub has to talk too -- in the same words, because the screen
+     reads the OCR line to turn "it is running" into "page 120 of 240".
+     Worded from a real run's output. */
+  function leLog(c, stage) {
+    const t = (n) => new Date(Date.UTC(2026, 8, 2, 14, 26, 53 + n)).toISOString();
+    const at = leStageRank(stage);
+    const out = [];
+    if (at >= 1) {
+      out.push({ t: t(0), msg: 'Extracting text from records…' });
+      out.push({ t: t(0), msg: 'Scanned document detected (0/240 pages with text). Running OCR…' });
+      /* Counted out loud, sixty at a time, the way the real one does. */
+      const through = Math.min(240, c.ocr = (c.ocr || 0) + 60);
+      out.push({ t: t(1), msg: `OCR pages ${through - 59}–${through} of 240` });
+    }
+    if (at >= 2) {
+      out.push({ t: t(36), msg: 'Extracted 240 pages, 512,400 characters (240 pages via OCR)' });
+      out.push({ t: t(36), msg: 'Analyzing records and scoring under Rubric v2.0…' });
+    }
+    if (at >= 3) out.push({ t: t(94), msg: 'Rendering report…' });
+    if (stage === 'done') out.push({ t: t(101), msg: 'Report ready.' });
+    if (stage === 'error') out.push({ t: t(40), msg: 'Error: no readable text was found.' });
+    return out;
+  }
+  const leStageRank = (s) => (s === 'error' ? 2 : Math.max(0, STAGES.indexOf(s)));
 
   return new Promise((done) => server.listen(port, '127.0.0.1', () => done({
     server,
