@@ -611,6 +611,10 @@ router.get('/auth/me', authenticate, wrap(async (req, res) => {
                    menu can draw the entry. The door checks for itself; this
                    only decides whether the tab is offered. */
                 can_value: !!req.user.canValue,
+                /* And whether LE reports have been granted, for the same
+                   reason and with the same caveat: this draws the tab,
+                   the routes decide. */
+                can_le: !!req.user.canLe,
                 /* Which build is actually answering. The page compares it
                    with its own and says so if they differ. */
                 build: BUILD };
@@ -1111,7 +1115,7 @@ router.delete('/me/prefs/:name', authenticate, wrap(async (req, res) => {
 router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
-            u.investor_id, i.name AS investor_name, u.can_value,
+            u.investor_id, i.name AS investor_name, u.can_value, u.can_le,
             COALESCE((SELECT string_agg(f.code, ', ' ORDER BY f.code)
                         FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
                        WHERE uf.user_id = u.id), '') AS fund_codes,
@@ -1594,11 +1598,12 @@ router.get('/policies/:id', wrap(async (req, res) => {
        paid is the investor's business; what the desk's model thinks the
        policy is worth is the desk's. */
     valuations: scope === null ? await valuationsFor('policy', req.params.id) : undefined,
-    /* Administrators only, one level tighter than the valuations beside
-       them: a life-expectancy report is a reading of somebody's medical
-       file, and the headline still says how long they are expected to
-       live. */
-    le_reports: scope === null && req.user?.role === 'admin'
+    /* One level tighter than the valuations beside them: a
+       life-expectancy report is a reading of somebody's medical file, and
+       the headline still says how long they are expected to live. An
+       administrator holds it inherently; anybody else only if one has
+       granted it by name. */
+    le_reports: scope === null && req.user?.canLe
       ? await leReportsFor('policy', req.params.id) : undefined,
     reminders: reminders.rows,
   });
@@ -2558,7 +2563,7 @@ async function loadOpportunity(req, id) {
   /* Staff only: an investor is shown the deal, not the desk's pricing of
      it. `loadOpportunity` is what an investor reads too. */
   o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
-  o.le_reports = scopeId(req) === null && req.user?.role === 'admin'
+  o.le_reports = scopeId(req) === null && req.user?.canLe
     ? await leReportsFor('opportunity', id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
@@ -4952,6 +4957,16 @@ async function refreshLeReport(row) {
   const state = await caseStatus(row.case_id);
   if (!state) return row;
 
+  /* The service's own progress messages, passed through live and never
+     written down. They are the most useful thing it says while it works
+     -- "scanned document detected, running OCR", "OCR pages 41-60 of
+     240" -- and without them a case that is busy for twenty minutes is
+     indistinguishable from one that has died. They carry page counts and
+     character counts, no filenames and nothing about the person. */
+  const live = Array.isArray(state.log)
+    ? state.log.slice(-40).map((l) => ({ t: str(l?.t).slice(11, 19), msg: str(l?.msg).slice(0, 300) }))
+    : [];
+
   const status = String(state.status || row.status);
   if (status === 'expired') {
     /* The service has forgotten it. If it finished, the headline here is
@@ -4963,14 +4978,14 @@ async function refreshLeReport(row) {
               error = CASE WHEN central_years IS NOT NULL THEN ''
                            ELSE 'The report service purged this case before it finished.' END
         WHERE id = $1 RETURNING *`, [row.id]);
-    return { ...row, ...rows[0] };
+    return { ...row, ...rows[0], log: live };
   }
 
   if (status !== 'done') {
     const { rows } = await q(
       'UPDATE le_reports SET status = $1, error = $2 WHERE id = $3 RETURNING *',
       [status, str(state.error).slice(0, 600), row.id]);
-    return { ...row, ...rows[0] };
+    return { ...row, ...rows[0], log: live };
   }
 
   const h = headline(state);
@@ -4983,7 +4998,7 @@ async function refreshLeReport(row) {
       WHERE id = $12 RETURNING *`,
     [h.initials, h.sex, h.age, h.one_liner, h.central_years, h.range_low_years,
      h.range_high_years, h.path, h.confidence, h.pages, h.ocr_used, row.id]);
-  return { ...row, ...rows[0] };
+  return { ...row, ...rows[0], log: live };
 }
 
 /** Refresh whatever is still running, then hand the list back. */
@@ -5037,13 +5052,37 @@ export async function startLeReport(req, res) {
   res.status(201).json(back[0]);
 }
 
-router.get('/le-reports', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+/**
+ * Who may work with life-expectancy reports.
+ *
+ * Administrators inherently; anybody else only if an administrator has
+ * granted it by name in Settings. A role check would be the wrong shape,
+ * the same way it is for Policy Valuation: one manager runs the medical
+ * files and another has no business in them, and that is a decision about
+ * people rather than about ranks.
+ *
+ * `canLe` is recomputed from the account on every request, so withdrawing
+ * a grant applies on the next click rather than at the end of a session.
+ * Investors never hold it whatever the column says -- the door says so
+ * again here rather than trusting the column, because this is the screen
+ * that carries somebody's oncology summary.
+ *
+ * Exported because the upload route lives in server.js with the other
+ * multipart handlers.
+ */
+export const mayLe = (req, res, next) => {
+  if (req.user?.canLe && req.user.role !== 'investor') return next();
+  res.status(403).json({ error: 'LE reports have to be granted to an account. '
+    + 'An administrator can do that from Settings.' });
+};
+
+router.get('/le-reports', blockInvestors, mayLe, wrap(async (req, res) => {
   const { rows } = await q(`${LE_SELECT} ORDER BY r.ran_at DESC, r.id DESC LIMIT 200`);
   res.json({ configured: leConfigured(), reports: await withFreshStatus(rows) });
 }));
 
 /** One case, always with a fresh reading of where it has got to. */
-router.get('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.get('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
   const { rows } = await q(`${LE_SELECT} WHERE r.id = $1`, [int(req.params.id)]);
   if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
   res.json(await refreshLeReport(rows[0]));
@@ -5055,7 +5094,7 @@ router.get('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (
  * Streamed through rather than stored: this application never writes a
  * medical summary down, and the access key never leaves the server.
  */
-router.get('/le-reports/:id/report.pdf', blockInvestors, requireRole('admin'),
+router.get('/le-reports/:id/report.pdf', blockInvestors, mayLe,
   wrap(async (req, res) => {
     const { rows } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
     if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
@@ -5070,7 +5109,7 @@ router.get('/le-reports/:id/report.pdf', blockInvestors, requireRole('admin'),
   }));
 
 /** Attach to a policy or an opportunity, or take it off one. */
-router.put('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.put('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
   const { rows: cur } = await q('SELECT * FROM le_reports WHERE id = $1', [int(req.params.id)]);
   if (!cur[0]) return res.status(404).json({ error: 'That report is not on file' });
 
@@ -5101,7 +5140,7 @@ router.put('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (
 }));
 
 /** Forget it here, and ask the service to forget it too. */
-router.delete('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+router.delete('/le-reports/:id', blockInvestors, mayLe, wrap(async (req, res) => {
   const { rows } = await q('DELETE FROM le_reports WHERE id = $1 RETURNING *',
     [int(req.params.id)]);
   if (!rows[0]) return res.status(404).json({ error: 'That report is not on file' });
@@ -5110,6 +5149,47 @@ router.delete('/le-reports/:id', blockInvestors, requireRole('admin'), wrap(asyn
     `deleted the life-expectancy report for ${rows[0].initials || 'an unnamed case'}`);
   res.json({ ok: true });
 }));
+
+/* ------------------------------------------------------------------ *
+ * Keeping up with cases nobody is watching
+ *
+ * The report service runs a case as a background task of its own, so
+ * closing the browser does not stop it. What DOES stop is this
+ * application noticing -- a row is only brought up to date when somebody
+ * reads it. Left alone that is a real way to lose a report: the service
+ * finishes, purges its copy after a day, and the headline was never
+ * collected because nobody happened to look in between.
+ *
+ * So the server keeps its own eye on anything still running. It is a
+ * status read per case every couple of minutes, which is nothing, and it
+ * is what makes "you can close the window" true rather than hopeful.
+ * ------------------------------------------------------------------ */
+
+const SWEEP_MS = 2 * 60 * 1000;
+
+/** Refresh every case still in flight. Quiet: a sweep is not an event. */
+async function sweepLeReports() {
+  try {
+    const { rows } = await q(
+      `SELECT * FROM le_reports
+        WHERE status NOT IN ('done', 'error', 'expired')
+        ORDER BY ran_at DESC LIMIT 25`);
+    for (const row of rows) await refreshLeReport(row);
+  } catch (e) {
+    /* A sweep that fails is not worth waking anybody for -- the next one
+       is two minutes away, and every screen refreshes on its own read. */
+    console.error('[le] sweep failed:', e.message);
+  }
+}
+
+/** Started once, from server.js, and only when there is a service to ask. */
+export function startLeSweeper() {
+  if (!leConfigured()) return null;
+  const t = setInterval(sweepLeReports, SWEEP_MS);
+  /* Not a reason to hold the process open. */
+  if (typeof t.unref === 'function') t.unref();
+  return t;
+}
 
 /** The reports attached to one record, for its own page. */
 export async function leReportsFor(kind, id) {

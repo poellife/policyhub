@@ -171,6 +171,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAUL
  * this column says, because the door checks the role as well. */
 ALTER TABLE users ADD COLUMN IF NOT EXISTS can_value BOOLEAN NOT NULL DEFAULT FALSE;
 
+/* Life-expectancy reports, granted the same way and for the same reason:
+   one manager runs the medical files and another has no business in them.
+   Kept apart from can_value deliberately -- pricing a policy and reading
+   somebody's oncology records are not the same permission, and an
+   administrator should have to say each of them out loud. */
+ALTER TABLE users ADD COLUMN IF NOT EXISTS can_le BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Failed sign-in attempts, kept in the database rather than in process memory
 -- so that the throttle survives a restart or redeploy and is shared by every
 -- instance. Rows older than the window are pruned as they are counted.

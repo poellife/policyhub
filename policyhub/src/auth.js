@@ -121,7 +121,7 @@ export async function loadScope(req, res, next) {
   // account cannot keep using a still-valid cookie.
   const { rows } = await q(
     `SELECT is_active, role, investor_id, token_version, must_change_password,
-            can_value
+            can_value, can_le
        FROM users WHERE id = $1`, [req.user.uid]
   );
   const u = rows[0];
@@ -166,6 +166,9 @@ export async function loadScope(req, res, next) {
      taken away applies at once rather than at the end of a session. An
      investor never holds it whatever the column says. */
   req.user.canValue = u.role !== 'investor' && (u.role === 'admin' || !!u.can_value);
+  /* The same rule for the LE report service. Separately granted, because
+     a medical file is not a price. */
+  req.user.canLe = u.role !== 'investor' && (u.role === 'admin' || !!u.can_le);
   req.user.fundIds = null;
   req.user.investorIds = null;
   if (u.role === 'manager') {
@@ -237,14 +240,26 @@ export async function updateUser(req, res) {
     ? !!req.body.can_value && role !== 'investor' && role !== 'admin'
     : !!target.can_value && role !== 'investor' && role !== 'admin';
 
+  /* LE reports, granted the same way and held to the same rule. A second
+     column rather than a wider one: whoever prices policies is not
+     automatically whoever reads the medical file, and the audit line has
+     to be able to say which of the two was handed over. */
+  const canLe = 'can_le' in req.body
+    ? !!req.body.can_le && role !== 'investor' && role !== 'admin'
+    : !!target.can_le && role !== 'investor' && role !== 'admin';
+
   await q(
     `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4,
-            can_value = $6 WHERE id = $5`,
-    [String(req.body.full_name ?? target.full_name), role, isActive, investorId, id, canValue]
+            can_value = $6, can_le = $7 WHERE id = $5`,
+    [String(req.body.full_name ?? target.full_name), role, isActive, investorId, id,
+     canValue, canLe]
   );
   if (!!target.can_value !== canValue)
     await audit(req.user.uid, 'user', id, 'update',
       `${canValue ? 'granted' : 'withdrew'} Policy Valuation for ${target.email}`);
+  if (!!target.can_le !== canLe)
+    await audit(req.user.uid, 'user', id, 'update',
+      `${canLe ? 'granted' : 'withdrew'} LE reports for ${target.email}`);
 
   // Entity access is replaced wholesale, so removing one is just leaving it out.
   if (role === 'manager') {

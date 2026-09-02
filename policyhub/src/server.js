@@ -12,7 +12,7 @@ import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } fr
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { readDocuments } from './extract.js';
-import { startLeReport } from './api.js';
+import { startLeReport, startLeSweeper, mayLe } from './api.js';
 import { startMailWorker } from './mail.js';
 // The valuation model is a separate program; this is the door to it.
 import { mountValuation } from './valuation.js';
@@ -180,7 +180,7 @@ const recordsUpload = multer({
   limits: { fileSize: 200 * 1024 * 1024, files: 12, fields: 8 },
 });
 const sendingRecords = new Set();
-app.post('/api/le-reports', authenticate, requireRole('admin'),
+app.post('/api/le-reports', authenticate, mayLe,
   (req, res, next) => {
     if (sendingRecords.has(req.user.uid))
       return res.status(429).json({
@@ -335,6 +335,11 @@ initDb()
        set the worker does not start and messages simply queue, which is the
        right behaviour for a deployment that has not been given one yet. */
     startMailWorker();
+    /* Keep up with life-expectancy cases nobody is watching. The report
+       service purges a finished report after a day, so a case started and
+       then left alone would lose its headline if this application only
+       ever looked when somebody opened the screen. */
+    startLeSweeper();
     app.listen(PORT, () => console.log(`PolicyHub running on http://localhost:${PORT}`));
   })
   .catch((e) => {
