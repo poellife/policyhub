@@ -242,6 +242,17 @@ const int = (v) => {
   const n = num(v);
   return n === null ? null : Math.round(n);
 };
+/* A tick box, on its way to a boolean column.
+ *
+ * Written out rather than `!!v` because the values that arrive here are
+ * not JavaScript booleans: an HTML form sends the string "yes" or sends
+ * nothing at all, and JSON from a script may send "false" or 0, both of
+ * which are truthy as strings. Absent is handled upstream -- `buildSet`
+ * skips a key that is not in the body -- so this only has to decide what
+ * a present value means. */
+const bool = (v) => (v === true || v === 1 ? true
+  : v === false || v === 0 || v === null || v === undefined ? false
+    : !['', 'no', 'off', 'false', '0', 'null'].includes(String(v).trim().toLowerCase()));
 /* Text on its way to a text column.
  *
  * Trimmed, and stripped of the control characters a keyboard cannot
@@ -361,6 +372,7 @@ const FIELD_LABEL = {
   insured_dob: 'Date of birth', dob: 'Date of birth',
   issue_age: 'Issue age', grace_period_days: 'Grace period (days)',
   amount: 'Amount', face: 'Death benefit',
+  changing_death_benefit: 'Changing death benefit',
 };
 const fieldLabel = (col) => FIELD_LABEL[col] || col.replace(/_/g, ' ');
 
@@ -2530,6 +2542,9 @@ const OPP_FIELDS = {
   underwriter_note: str, thesis: str, records_through: date,
   // The carrier's current statement of what the policy holds.
   account_value: num, cash_surrender_value: num, values_as_of: date,
+  /* Whether the benefit steps year by year. The figures themselves are
+     on the premium schedule; this says whether to read them. */
+  changing_death_benefit: bool,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -2621,6 +2636,13 @@ router.get('/opportunities', wrap(async (req, res) => {
             o.insured_last_name, o.insured_first_name, o.insured_dob, o.insured_gender,
             o.insured_state, o.le_months, o.le_date, o.asking_price, o.annual_premium,
             o.expected_close, o.offer_closes_on, o.status, o.fund_id, o.notes,
+            /* The list solves the same analysis the detail does, so it has
+               to be told the same things. Without this the flag is absent
+               here, the benefit schedule goes unread, and the list quotes
+               a rate off the face amount while the detail quotes one off
+               the figure actually collected -- two numbers for one deal,
+               which is worse than none. */
+            o.changing_death_benefit,
             o.created_at, f.code AS fund_code,
             COALESCE(f.carry_pct, 0)      AS carry_pct,
             COALESCE(t.taken_pct, 0)      AS taken_pct,
@@ -2648,7 +2670,7 @@ router.get('/opportunities', wrap(async (req, res) => {
   // annual premium would not match the one on the detail page, and two
   // different numbers for the same deal is worse than none.
   const { rows: prem } = rows.length
-    ? await q(`SELECT opportunity_id, due_date, amount FROM opportunity_premiums
+    ? await q(`SELECT opportunity_id, due_date, amount, death_benefit FROM opportunity_premiums
                 WHERE opportunity_id = ANY($1) ORDER BY due_date`, [rows.map((r) => r.id)])
     : { rows: [] };
   const schedules = new Map();
@@ -3801,7 +3823,16 @@ router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap
       if (seen.has(due))
         return res.status(400).json({ error: `Two payments are both dated ${due}` });
       seen.set(due, true);
-      rows.push({ due, amount, notes: str(r.notes) });
+      /* The benefit in force from this date. Optional on every row: a
+         level policy sends none, and a changing one may still leave a
+         year blank to mean "same as last year". Refused rather than
+         quietly zeroed if it is negative, because a zero benefit is a
+         real and catastrophic figure and nobody types it by accident. */
+      const benefit = num(r.death_benefit);
+      if (benefit !== null && benefit < 0)
+        return res.status(400).json({ error: `Row ${i + 1} cannot have a negative death benefit` });
+      rows.push({ due, amount, notes: str(r.notes),
+        death_benefit: fits('death_benefit', num, benefit) });
     }
     const client = await pool.connect();
     try {
@@ -3809,8 +3840,9 @@ router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap
       await client.query('DELETE FROM opportunity_premiums WHERE opportunity_id = $1', [req.params.id]);
       for (const r of rows)
         await client.query(
-          `INSERT INTO opportunity_premiums (opportunity_id, due_date, amount, notes)
-           VALUES ($1,$2,$3,$4)`, [req.params.id, r.due, r.amount, r.notes]);
+          `INSERT INTO opportunity_premiums (opportunity_id, due_date, amount, notes, death_benefit)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [req.params.id, r.due, r.amount, r.notes, r.death_benefit]);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');

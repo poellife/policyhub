@@ -99,6 +99,56 @@ function annualRate(scheduled) {
 }
 
 /**
+ * The benefit schedule, in date order, as figures somebody typed.
+ *
+ * Only read when the deal is flagged as carrying a changing benefit. A
+ * blank column on a level policy and a policy nobody has filled in yet
+ * look identical from here, and the difference between them is the whole
+ * answer, so it is the flag that decides rather than the data.
+ */
+export function benefitSchedule(opp) {
+  if (!opp.changing_death_benefit) return [];
+  return (opp.premiums || [])
+    .map((p) => ({ date: iso(p.due_date), amount: Number(p.death_benefit) }))
+    .filter((p) => p.date && Number.isFinite(p.amount) && p.amount > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/**
+ * What the policy would pay if the insured died on this date.
+ *
+ * A step function, which is what an increasing-benefit policy actually
+ * is: the benefit set on an anniversary stands until the next one. So the
+ * figure in force is the last one dated on or before the day, and
+ * `face_amount` covers the stretch before the first row -- the benefit
+ * today, which is what somebody entering the deal typed first.
+ *
+ * Past the end of the schedule the last figure carries forward level.
+ * That is the conservative reading and the only defensible one: a policy
+ * that has been increasing for ten years may well carry on, but assuming
+ * it does is inventing revenue, and the scenario two years past life
+ * expectancy is the one that decision rests on. The screen says so rather
+ * than leaving it to be discovered.
+ */
+export function benefitAt(opp, on) {
+  const face = Number(opp.face_amount) || 0;
+  const sched = benefitSchedule(opp);
+  if (!sched.length) return face;
+  let held = face;
+  for (const row of sched) {
+    if (row.date > on) break;
+    held = row.amount;
+  }
+  return held;
+}
+
+/** Whether the schedule runs out before this date, so the last figure is being held level. */
+const benefitRunsOut = (opp, on) => {
+  const sched = benefitSchedule(opp);
+  return sched.length > 0 && sched[sched.length - 1].date < on;
+};
+
+/**
  * One scenario: buy at the close, pay the premiums, collect at maturity.
  *
  * `carryPct` is the owning entity's carried interest. When it is non-zero
@@ -109,9 +159,14 @@ function annualRate(scheduled) {
  */
 export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
   const price = Number(opp.asking_price) || 0;
-  const benefit = Number(opp.face_amount) || 0;
   const close = iso(opp.expected_close) || today();
   const matures = maturityDate(opp, offsetMonths);
+  /* The benefit in force on the day this scenario collects, which is the
+     point of the whole exercise on an increasing policy: the three
+     scenarios stop being the same trade at three dates and become three
+     different trades. On a level policy this is `face_amount` and nothing
+     below behaves any differently. */
+  const benefit = benefitAt(opp, matures);
   if (!matures || !price || !benefit) return null;
 
   const { premiums, extended, annual } = projectPremiums(opp, close, matures);
@@ -132,6 +187,12 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     premium_count: premiums.length,
     projected_beyond_schedule: extended,
     annual_premium_assumed: annual,
+    /* Stated rather than inferred from `returned`, which is net of carry
+       for an investor and would read as a smaller policy rather than as a
+       smaller share of one. */
+    death_benefit: benefit * share,
+    benefit_changes: benefitSchedule(opp).length > 0,
+    benefit_held_level: benefitRunsOut(opp, matures),
     rate: a.rate,
     /* Both readings of the same flows, always. Simple interest is what the
        provider workbooks quote and what this desk has always priced on;
@@ -165,5 +226,8 @@ export function analyseOpportunity(opp, share = 1, carryPct = 0) {
     le_months: opp.le_months == null ? null : Number(opp.le_months),
     le_from: iso(opp.le_date) || iso(opp.expected_close) || today(),
     priced: !!(Number(opp.asking_price) && Number(opp.face_amount)),
+    /* So a screen can label the figures without re-deriving the rule. */
+    benefit_changes: benefitSchedule(opp).length > 0,
+    benefit_schedule: benefitSchedule(opp),
   };
 }

@@ -208,6 +208,18 @@ export function opportunityPdf(o, opts = {}) {
   const scen = a.scenarios || [];
   const benefit = Number(o.face_amount) || 0;
   const price = Number(o.asking_price) || 0;
+  /* A benefit that steps year by year. The same reading as the HTML
+     sheet, deliberately -- these two documents say the same thing to the
+     same reader and must not disagree about the size of the policy. */
+  const changing = !!a.benefit_changes;
+  const benefitRows = a.benefit_schedule || [];
+  const atLeBenefit = base?.death_benefit ?? benefit;
+  const benefitOn = (on) => {
+    if (!changing) return benefit;
+    let held = benefit;
+    for (const b of benefitRows) { if (b.date > on) break; held = b.amount; }
+    return held;
+  };
 
   /* The posted schedule plus whatever the analysis projected past its end.
      A sheet that stops at the last typed row understates the cost of a
@@ -223,7 +235,7 @@ export function opportunityPdf(o, opts = {}) {
   const rows = [...posted, ...proj].sort((x, y) => (x.date < y.date ? -1 : 1));
   let cum = 0;
   const running = rows.map((r, i) => { cum += r.amount; return { ...r, n: i + 1, cum,
-    age: ageOn(o.insured_dob, r.date) }; });
+    age: ageOn(o.insured_dob, r.date), benefit: benefitOn(r.date) }; });
   const totalPrem = rows.reduce((s, r) => s + r.amount, 0);
 
   const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
@@ -258,7 +270,7 @@ export function opportunityPdf(o, opts = {}) {
   at(doc, name, 0, { style: 'sansBold', size: 19 });
   doc.y -= 23;
   doc.reserve(1);
-  const headBits = [`${money(benefit, 2)} death benefit`];
+  const headBits = [`${money(benefit, 2)} death benefit${changing ? ', rising' : ''}`];
   if (partial) headBits.push(`${share}% participation offered`);
   if (o.le_months) headBits.push(`life expectancy ${o.le_months} months`);
   if (base) {
@@ -276,7 +288,9 @@ export function opportunityPdf(o, opts = {}) {
   const tiles = [
     ['Purchase price', money(price * f, 2),
       benefit ? `${(price / benefit * 100).toFixed(1)}% of face` : ''],
-    ['Death benefit', money(benefit * f, 2), partial ? `${share}% of the policy` : 'Net death benefit'],
+    ['Death benefit', money((changing ? atLeBenefit : benefit) * f, 2),
+      changing ? `at life expectancy · ${money(benefit * f, 2)} today`
+        : partial ? `${share}% of the policy` : 'Net death benefit'],
     ['Life expectancy', o.le_months ? `${o.le_months} mo` : '--',
       [o.le_provider, o.le_date ? `report ${shortDate(o.le_date)}` : ''].filter(Boolean).join(' · ')],
     ['Average annual premium', money(running.length ? totalPrem * f / running.length : 0, 2),
@@ -316,7 +330,12 @@ export function opportunityPdf(o, opts = {}) {
     table(doc, cols, scen.map((s) => [
       `${SCENARIO_LABEL[String(s.offset_months)] || `${s.offset_months} mo`}   ${
         shortDate(s.matures_on)}`,
-      money(s.premiums_paid * f, 2), money(s.invested * f, 2), money(benefit * f, 2),
+      money(s.premiums_paid * f, 2), money(s.invested * f, 2),
+      /* The benefit collected on THAT maturity date. This column used to
+         print the constant face amount in all three rows, which was
+         already wrong for a policy whose benefit moves and merely
+         invisible for one whose benefit does not. */
+      money((s.death_benefit ?? benefit) * f, 2),
       money(s.profit * f, 2), `${Number(s.multiple).toFixed(2)}x`,
       Number(s.years).toFixed(1),
       interest === 'compound' ? rate(s.compound_rate)
@@ -381,14 +400,18 @@ export function opportunityPdf(o, opts = {}) {
        page is landscape and a single column of sixteen years leaves most
        of it white and then spills. Not split when a participation column
        is present -- six columns do not halve. */
-    const split = running.length > 12 && !partial;
-    /* Five columns and four gaps have to fit the space they are given:
-       half the page when split, all of it when not. Written as a sum
-       rather than as guessed numbers, because the first set of guesses
-       ran the last column off the right edge. */
-    const gaps = 8 * 4;
+    /* A changing benefit adds a sixth column, and six do not halve any
+       better than the participation sheet's six do. */
+    const split = running.length > 12 && !partial && !changing;
+    /* The columns and the gaps between them have to fit the space they
+       are given: half the page when split, all of it when not. Written as
+       a sum rather than as guessed numbers, because the first set of
+       guesses ran the last column off the right edge. */
+    const gaps = 8 * (changing ? 5 : 4);
     const span = split ? (WIDTH - 24) / 2 : WIDTH;
-    const parts = split ? [0.095, 0.083, 0.253, 0.285, 0.284] : [0.07, 0.06, 0.20, 0.235, 0.235];
+    const parts = split ? [0.095, 0.083, 0.253, 0.285, 0.284]
+      : changing ? [0.06, 0.055, 0.175, 0.2, 0.2, 0.21]
+        : [0.07, 0.06, 0.20, 0.235, 0.235];
     const cellW = parts.map((r) => (span - gaps) * r / parts.reduce((x, y) => x + y, 0));
 
     /* The heading and the table travel together. Checked before the
@@ -397,7 +420,8 @@ export function opportunityPdf(o, opts = {}) {
     const need = 26 + (split ? half : running.length) * 14 + 34;
     if (doc.y - Math.min(need, 300) < MARGIN) doc.newPage();
     label(doc, `Premiums, year by year${partial ? ` -- ${share}% participation` : ''}`);
-    const heads = ['Year', 'Age', 'Due', partial ? `${share}% share` : 'Full premium', 'Cumulative'];
+    const heads = ['Year', 'Age', 'Due', partial ? `${share}% share` : 'Full premium', 'Cumulative',
+      ...(changing ? ['Death benefit'] : [])];
     const mk = (originX) => {
       let x = originX;
       return heads.map((head, i) => {
@@ -408,9 +432,10 @@ export function opportunityPdf(o, opts = {}) {
     };
     const line = (r) => [String(r.n), r.age == null ? '--' : String(r.age),
       `${shortDate(r.date)}${r.projected ? '  proj.' : ''}`,
-      money(r.amount * f, 2), money(r.cum * f, 2)];
+      money(r.amount * f, 2), money(r.cum * f, 2),
+      ...(changing ? [money(r.benefit * f, 2)] : [])];
     const footRow = ['', '', `Total over ${running.length} year${running.length === 1 ? '' : 's'}`,
-      money(totalPrem * f, 2), money(totalPrem * f, 2)];
+      money(totalPrem * f, 2), money(totalPrem * f, 2), ...(changing ? [''] : [])];
 
     if (!split) {
       table(doc, mk(0), running.map(line), { size: 8, foot: footRow });
@@ -435,6 +460,14 @@ export function opportunityPdf(o, opts = {}) {
       doc.reserve(1);
       at(doc, 'Rows marked proj. fall past the end of the posted schedule and continue at its '
         + 'last annual rate, to life expectancy.', 0, { size: 7.2 });
+      doc.y -= 12;
+    }
+    if (changing) {
+      doc.space(3);
+      doc.reserve(1);
+      at(doc, 'The death benefit steps year by year. Each figure stands from its own date until '
+        + 'the next one; past the end of the entered schedule the last figure is held level '
+        + 'rather than assumed to keep rising.', 0, { size: 7.2 });
       doc.y -= 12;
     }
   }

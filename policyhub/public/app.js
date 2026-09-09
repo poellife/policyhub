@@ -5213,6 +5213,13 @@ async function opportunityView() {
           <tr><td class="strong">Premiums paid</td>
             ${a.scenarios.map((s) => shareCell(s.premiums_paid,
               s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
+          ${''/* Only when it moves. On a level policy this would be the
+                 same figure three times, which is noise; on a changing one
+                 it is the reason the three columns differ at all. */}
+          ${a.benefit_changes ? `<tr><td class="strong">Death benefit
+              <span class="muted" style="font-weight:400">· in force that year</span></td>
+            ${a.scenarios.map((s) => shareCell(s.death_benefit,
+    s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>` : ''}
           <tr><td class="strong">Total invested</td>
             ${a.scenarios.map((s) => shareCell(s.invested,
               s.offset_months === 0 ? 'at-le' : '')).join('')}</tr>
@@ -5227,7 +5234,13 @@ async function opportunityView() {
               style="font-size:16px">${
   rateText(s.rate, s.compound_rate, { size: '13px' })}</td>`).join('')}</tr>
         </tbody>
-      </table></div>`;
+      </table></div>
+      ${a.benefit_changes && a.scenarios.some((s) => s.benefit_held_level)
+    ? `<p class="muted" style="font-size:12px;margin:8px 0 0">The benefit schedule ends before
+        ${a.scenarios.filter((s) => s.benefit_held_level).length === a.scenarios.length
+    ? 'these maturity dates' : 'the later maturity dates'}, so the last figure entered is
+        carried level rather than assumed to keep rising. Add the later years on the
+        premium schedule if the policy states them.</p>` : ''}`;
   };
 
 
@@ -5263,7 +5276,11 @@ async function opportunityView() {
 
     <div class="opp-card ${o.status === 'Open' ? 'live' : ''}" style="margin-bottom:22px">
       <div class="opp-figures">
-        <div><div class="label">Death benefit</div><div class="value">${fmtExact(o.face_amount)}</div></div>
+        <div><div class="label">Death benefit</div><div class="value">${fmtExact(o.face_amount)}</div>
+          ${o.changing_death_benefit
+    ? `<div class="note">today · rises to ${fmtExact(
+      Math.max(...(a.benefit_schedule || []).map((b) => b.amount), Number(o.face_amount) || 0)
+    )}</div>` : ''}</div>
         <div><div class="label">Asking price</div><div class="value">${fmtExact(o.asking_price)}</div>
           <div class="note">${o.face_amount && o.asking_price
             ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
@@ -5383,7 +5400,8 @@ async function opportunityView() {
           o.premiums.length === 1 ? '' : 's'}</span></div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>Due</th><th class="num">Amount</th>${
-          isInvestorUser() ? '<th class="num">Your share</th>' : ''}<th>Notes</th>
+          isInvestorUser() ? '<th class="num">Your share</th>' : ''}${
+  o.changing_death_benefit ? '<th class="num">Death benefit</th>' : ''}<th>Notes</th>
           ${staff && canEditData() ? '<th></th>' : ''}</tr></thead>
         <tbody>${o.premiums.length === 0
           ? `<tr><td colspan="5"><div class="empty">No schedule posted.${
@@ -5393,6 +5411,9 @@ async function opportunityView() {
               <td class="num">${fmtExact(p.amount)}</td>
               ${isInvestorUser()
                 ? shareCell(p.amount).replace('<td class="num "', '<td class="num strong"') : ''}
+              ${o.changing_death_benefit ? `<td class="num">${
+    p.death_benefit == null ? '<span class="muted">unchanged</span>'
+      : fmtExact(p.death_benefit)}</td>` : ''}
               <td class="secondary">${esc(p.notes || '')}</td>
               ${staff && canEditData()
                 ? `<td style="white-space:nowrap">
@@ -5403,6 +5424,7 @@ async function opportunityView() {
           <td class="num">${fmtExact(o.premiums.reduce((s, p) => s + Number(p.amount), 0))}</td>
           ${isInvestorUser()
             ? shareCell(o.premiums.reduce((s, p) => s + Number(p.amount), 0)) : ''}
+          ${o.changing_death_benefit ? '<td></td>' : ''}
           <td></td>${staff && canEditData() ? '<td></td>' : ''}
         </tr></tfoot>` : ''}
       </table></div>
@@ -5695,6 +5717,27 @@ async function openOpportunityDialog(o) {
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
       Life expectancy is counted from the report date, not from today — an estimate written
       two years ago has already used two years of itself.</span></div>
+
+    ${''/* A benefit that steps year by year is a different trade at every
+           maturity date, not the same one priced three times, so it gets
+           a tick box rather than being inferred from a column somebody
+           may simply not have filled in yet. */}
+    <label class="dlg-check">
+      <input type="checkbox" id="changingDb" name="changing_death_benefit" value="yes"
+             ${o?.changing_death_benefit ? 'checked' : ''}>
+      <span><strong>Changing death benefit</strong> — the policy pays a different amount
+        depending on the year it matures. Enter the figures year by year on the premium
+        schedule; the one above is what it pays today.</span>
+    </label>
+    <div id="changingDbNote" style="display:none">
+      <span class="muted" style="font-size:12px">
+        ${o?.id ? `Open <strong>Premium schedule</strong> after saving — it gains a
+          <strong>Death benefit</strong> column, one row per year.`
+    : 'Create the deal first, then enter the year-by-year figures on its premium schedule.'}
+        Each figure stands from its own date until the next one, and the last figure is
+        carried level beyond the end of the schedule rather than assumed to keep rising.
+      </span>
+    </div>
     <div class="field-row">
       ${moneyField('Asking price', 'asking_price', o?.asking_price)}
       ${moneyField('Annual premium', 'annual_premium', o?.annual_premium)}
@@ -5743,6 +5786,10 @@ async function openOpportunityDialog(o) {
         from the record itself.</span></div>
   `, async (v) => {
     if (v.fund_id === '') delete v.fund_id;
+    /* An unticked box sends nothing at all, and `buildSet` skips a key it
+       does not see -- so without this, turning the flag off would leave it
+       on. Said explicitly either way. */
+    v.changing_death_benefit = v.changing_death_benefit === 'yes';
     if (isNew) {
       const made = await api('/opportunities', { method: 'POST', body: v });
       /* The illustration's ledger, as the schedule the one-pager prints.
@@ -5766,6 +5813,14 @@ async function openOpportunityDialog(o) {
       toast('Opportunity updated');
     }
   }, isNew ? 'Create' : 'Save');
+
+  /* The note only earns its space once somebody has said the benefit
+     moves; before that it is an answer to a question nobody asked. */
+  const dbBox = $('#changingDb', dlg);
+  const dbNote = $('#changingDbNote', dlg);
+  const syncDb = () => { dbNote.style.display = dbBox.checked ? '' : 'none'; };
+  dbBox?.addEventListener('change', syncDb);
+  syncDb();
 
   if (isNew) wireDocumentReader(dlg, (rows) => { readPremiums = rows; });
 }
@@ -5903,21 +5958,31 @@ function oppBullets(text) {
 
 function openScheduleDialog(o) {
   const start = dateInput(o.premiums?.[0]?.due_date) || dateInput(o.expected_close) || today();
+  /* The benefit column appears only for a deal that has been marked as
+     carrying a changing one. On a level policy it would be a column of
+     the same number typed twenty times, and one of them typed wrong. */
+  const dbOn = !!o.changing_death_benefit;
   const seed = (o.premiums || []).length
-    ? o.premiums.map((p) => ({ due: dateInput(p.due_date), amount: Number(p.amount), notes: p.notes || '' }))
+    ? o.premiums.map((p) => ({ due: dateInput(p.due_date), amount: Number(p.amount),
+      notes: p.notes || '',
+      benefit: p.death_benefit == null ? '' : Number(p.death_benefit) }))
     : Array.from({ length: 10 }, (_, n) => ({
         due: addMonthsIso(start, 12 * n),
         amount: Number(o.annual_premium) || '',
         notes: '',
+        benefit: n === 0 ? Number(o.face_amount) || '' : '',
       }));
+
+  const moneyCell = (cls, value) => `<input type="text" inputmode="decimal" data-money
+    class="${cls} num" value="${value === '' || value == null ? ''
+  : esc(groupDigits(String(value)))}" placeholder="0.00" autocomplete="off">`;
 
   const rowHtml = (r) => `
     <tr class="prem-row">
       <td class="prem-year"></td>
       <td><input type="date" class="prem-due" value="${esc(r.due || '')}" required></td>
-      <td><input type="text" inputmode="decimal" data-money class="prem-amt num"
-                 value="${r.amount === '' || r.amount == null ? '' : esc(groupDigits(String(r.amount)))}"
-                 placeholder="0.00" autocomplete="off"></td>
+      <td>${moneyCell('prem-amt', r.amount)}</td>
+      ${dbOn ? `<td>${moneyCell('prem-db', r.benefit)}</td>` : ''}
       <td><input type="text" class="prem-note" value="${esc(r.notes || '')}" placeholder="optional"></td>
       <td><button type="button" class="btn-sm btn-danger prem-del" title="Remove this year">✕</button></td>
     </tr>`;
@@ -5926,10 +5991,14 @@ function openScheduleDialog(o) {
     <div class="prem-grid">
       <table class="data">
         <thead><tr><th style="width:56px">Year</th><th style="width:150px">Due</th>
-          <th class="num" style="width:130px">Amount</th><th>Notes</th><th style="width:44px"></th></tr></thead>
+          <th class="num" style="width:130px">Amount</th>
+          ${dbOn ? '<th class="num" style="width:140px">Death benefit</th>' : ''}
+          <th>Notes</th><th style="width:44px"></th></tr></thead>
         <tbody id="premRows">${seed.map(rowHtml).join('')}</tbody>
         <tfoot><tr><td colspan="2" class="strong">Total</td>
-          <td class="num strong" id="premTotal">—</td><td colspan="2"></td></tr></tfoot>
+          <td class="num strong" id="premTotal">—</td>
+          ${dbOn ? '<td class="num muted" id="premDbLast">—</td>' : ''}
+          <td colspan="2"></td></tr></tfoot>
       </table>
     </div>
     <div class="prem-tools">
@@ -5944,17 +6013,32 @@ function openScheduleDialog(o) {
       Every payment is written exactly as entered — nothing is rounded or interpolated on
       save. Saving replaces the posted schedule with what is in this table, so removing a
       row here removes the payment. Years beyond the last one are carried into the return
-      analysis at the same annual rate.
+      analysis at the same annual rate.${dbOn ? `
+      <br><br><strong>Death benefit.</strong> Each figure stands from its own date until the
+      next one, so a year left blank pays whatever the year before it pays. Past the last
+      row the final figure is held level rather than assumed to keep rising — the scenario
+      two years after life expectancy is the one a decision rests on, and inventing growth
+      into it is the one thing this must not do.` : ''}
     </span>
   `, async () => {
     const rows = [...dlg.querySelectorAll('.prem-row')].map((tr) => ({
       due_date: tr.querySelector('.prem-due').value,
       amount: tr.querySelector('.prem-amt').value.replace(/,/g, ''),
       notes: tr.querySelector('.prem-note').value,
+      /* Blank means "unchanged from the year before", which is a real
+         answer on a policy that steps every few years rather than every
+         one. Sent as null so the server stores the absence. */
+      death_benefit: dbOn
+        ? (tr.querySelector('.prem-db')?.value.replace(/,/g, '') || null) : undefined,
     })).filter((r) => r.due_date || r.amount !== '');
     if (!rows.length) throw new Error('Enter at least one payment, or remove the schedule instead.');
     const blank = rows.findIndex((r) => r.amount === '');
     if (blank >= 0) throw new Error(`Year ${blank + 1} has no amount. Enter 0 if nothing is due.`);
+    /* One figure at least, or the flag is on and nothing reads it — the
+       deal would price off the face amount and look level. */
+    if (dbOn && !rows.some((r) => Number(r.death_benefit) > 0))
+      throw new Error('This deal is marked as having a changing death benefit, so at least '
+        + 'one year needs a figure. Untick it on the deal if the benefit is level.');
     const res = await api(`/opportunities/${o.id}/premium-schedule`, { method: 'POST', body: { rows } });
     toast(`${res.written} payment${res.written === 1 ? '' : 's'} saved`);
   }, 'Save schedule');
@@ -5968,10 +6052,20 @@ function openScheduleDialog(o) {
     const total = [...body.querySelectorAll('.prem-amt')]
       .reduce((s, el) => s + (Number(el.value.replace(/,/g, '')) || 0), 0);
     $('#premTotal', dlg).textContent = total ? fmtExact(total) : '—';
+    /* The last figure entered, because that is the one carried level past
+       the end of the schedule and therefore the one the late scenario
+       collects. Benefits do not total. */
+    const last = $('#premDbLast', dlg);
+    if (last) {
+      const figures = [...body.querySelectorAll('.prem-db')]
+        .map((el) => Number(el.value.replace(/,/g, ''))).filter((n) => n > 0);
+      last.textContent = figures.length ? `last ${fmtExact(figures[figures.length - 1])}` : '—';
+    }
   };
   const wire = (tr) => {
     tr.querySelector('.prem-del').addEventListener('click', () => { tr.remove(); renumber(); });
     tr.querySelector('.prem-amt').addEventListener('input', renumber);
+    tr.querySelector('.prem-db')?.addEventListener('input', renumber);
   };
   [...body.querySelectorAll('.prem-row')].forEach(wire);
 
@@ -5979,8 +6073,11 @@ function openScheduleDialog(o) {
     const rows = [...body.querySelectorAll('.prem-row')];
     const lastDue = rows.length ? rows[rows.length - 1].querySelector('.prem-due').value : '';
     const lastAmt = rows.length ? rows[rows.length - 1].querySelector('.prem-amt').value : '';
+    const lastDb = rows.length
+      ? rows[rows.length - 1].querySelector('.prem-db')?.value || '' : '';
     body.insertAdjacentHTML('beforeend', rowHtml({
-      due: lastDue ? addMonthsIso(lastDue, 12) : start, amount: lastAmt, notes: '' }));
+      due: lastDue ? addMonthsIso(lastDue, 12) : start, amount: lastAmt, notes: '',
+      benefit: lastDb.replace(/,/g, '') }));
     const added = body.lastElementChild;
     wire(added);
     renumber();
@@ -10086,7 +10183,16 @@ const leAttachment = (r) => {
   return '<span class="muted">not attached</span>';
 };
 
-const leBadge = (r) => (r.status === 'done'
+/* A case that finished without an estimate is not a finished case.
+   `done` with no central figure used to draw a green badge reading "—",
+   which reads as success at a glance and is the single most misleading
+   thing this screen could say: the report is eleven pages long and has
+   no answer in it. */
+const leNoFigure = (r) => r.status === 'done' && r.central_years == null;
+
+const leBadge = (r) => (leNoFigure(r)
+  ? '<span class="le-badge bad">No estimate</span>'
+  : r.status === 'done'
   ? `<span class="le-badge done">${esc(leCentral(r))}</span>`
   : r.status === 'error' || r.status === 'expired'
     ? `<span class="le-badge bad">${esc(LE_STAGE[r.status] || r.status)}</span>`
@@ -10116,12 +10222,20 @@ function leDropZone(kind, id) {
     <div class="field-row" style="margin-top:12px">
       <div class="field"><label>Depth</label>
         <select id="leMode">
-          <option value="full">Full — every section and the LE analysis</option>
-          <option value="summary">Summary — the LE analysis and a short overview</option>
+          <option value="full">Full — the medical summary and the LE estimate</option>
+          <option value="summary">Summary only — the medical summary, no LE estimate</option>
         </select></div>
       <div class="field"><label>Initials, if the records do not say</label>
         <input id="leInitials" maxlength="12" placeholder="A.B." autocomplete="off"></div>
-    </div>`;
+    </div>
+    ${''/* Said under the control rather than only in the option text. The
+           labels used to read the other way round -- "Summary" claimed to
+           be the LE analysis and a short overview, when it is the one
+           setting that produces no estimate at all -- and a case run on
+           the wrong one comes back looking complete. */}
+    <p class="muted" style="font-size:12px;margin:10px 0 0">Leave it on <strong>Full</strong>
+      unless you only want the medical summary. <strong>Summary only</strong> produces no
+      life-expectancy estimate.</p>`;
 }
 
 /**
@@ -10224,6 +10338,10 @@ function leCard(r, { compact = false } = {}) {
     esc(r.error || 'The report did not finish.')}</div>` : ''}
       ${r.status === 'expired' ? `<div class="le-error">The report service purged this case
         before it finished. Nothing was kept.</div>` : ''}
+      ${leNoFigure(r) ? `<div class="le-error">The medical summary came back but no
+        life-expectancy estimate did. The report itself says why. If this was run on
+        <strong>Summary only</strong>, that setting produces no estimate by design — run it
+        again on <strong>Full</strong>.</div>` : ''}
       <div class="le-case-foot">
         ${r.le_path ? `<span class="muted">${esc(r.le_path)}</span>` : ''}
         ${r.pages ? `<span class="muted">${r.pages} pages read${

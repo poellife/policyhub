@@ -1,49 +1,59 @@
-PolicyHub — build 2026-09-02c
-Minimal update, on top of what you already have deployed (2026-09-02a).
+PolicyHub — build 2026-09-09a
+Minimal update. Paths are relative to the `policyhub` folder of your repo.
 
-HOW TO USE THIS
-  Unzip it and copy these files into the `policyhub` folder of your
-  poellife repo, keeping the folder structure exactly as it is here.
-  Every path below is relative to `policyhub/`. Overwrite what is there.
-  Commit, push, let Render rebuild, hard-refresh the portal.
+WHAT CHANGED
 
-  No database step. The one new column applies itself on boot.
-  No new environment variables. LE_SERVICE_URL and LE_SERVICE_KEY are
-  already set from the last deploy.
+  Changing death benefit    A tick box on an opportunity. When it is on,
+                            the premium schedule gains a Death benefit
+                            column — one figure per policy year — and the
+                            return is solved on the benefit in force on
+                            each maturity date rather than on one face
+                            amount for all three scenarios.
 
-  The footer should read 2026-09-02c when it is live.
+                            Each figure stands from its own date until the
+                            next one, so a blank year pays what the year
+                            before pays. Past the end of the schedule the
+                            last figure is HELD LEVEL, not extrapolated.
 
-WHAT IS IN HERE
+  The one-pager             Per-scenario death benefit in the HTML sheet
+                            and the PDF, a Death benefit column in the
+                            year-by-year table, and the assumption stated
+                            on the document.
 
-  src/schema.sql      Adds the `can_le` column to users. Applied on boot.
-  src/auth.js         Reads and writes the grant; audits both directions.
-  src/api.js          The mayLe guard, the per-user scoping on every LE
-                      route and on the deal panel, the live progress log
-                      passed through from the report service, and the
-                      two-minute sweeper that keeps a case moving whether
-                      or not anybody has the page open.
-  src/server.js       The upload route now asks for the grant rather than
-                      the admin role; starts the sweeper.
-  src/le-service.js   Unchanged in substance; included so the folder is
-                      internally consistent.
+  Two bugs found on the way
+                            - The PDF one-pager printed the constant face
+                              amount in all three scenario rows while the
+                              HTML sheet printed a per-scenario figure.
+                              They had already disagreed for an investor
+                              viewing net of carried interest.
+                            - The opportunities list builds its own SQL
+                              rather than SELECT *, so a new column has to
+                              be added there by hand or the list and the
+                              detail quote different rates for one deal.
 
-  public/app.js       The progress block (steps, clock, log, estimate),
-                      the LE reports screen, the grant tick box in
-                      Settings, and the "yours only" wording.
-  public/styles.css   The progress block's styling. Light and dark both
-                      come from existing tokens.
-  public/build.js     The build stamp. This is what the footer reads.
+FILES
 
-  scripts/le-report-test.mjs      \
-  scripts/le-report-ui-test.mjs    >  The suites covering all of the above.
-  scripts/le-stub.mjs             /   Not needed to run the app; included
-  scripts/reports-test.mjs            so the test run stays green.
+  src/schema.sql               opportunities.changing_death_benefit and
+                               opportunity_premiums.death_benefit, both
+                               applied on boot
+  src/api.js                   the bool coercer, OPP_FIELDS, the schedule
+                               write path, the list SELECT
+  src/opportunity-analysis.js  benefitAt() — the benefit in force on a
+                               date — and scenario() using it
+  src/opportunity-pdf.js       the per-scenario benefit and the new column
+  public/app.js                the tick box, the schedule column, the
+                               Death benefit row on the detail table
+  public/reports.js            the HTML one-pager
+  public/build.js              the build stamp the footer reads
+  scripts/changing-benefit-test.mjs      new
+  scripts/changing-benefit-ui-test.mjs   new
 
-AFTER IT IS LIVE
-  To give a manager the LE report service:
-    Settings -> Users -> Edit on that person -> tick "May use LE reports"
-    -> Save. It takes effect on their next click. Untick to take it back,
-    same immediacy. Both actions are written to the activity log.
+DEPLOY
+  Copy over, commit, push. Render rebuilds. Hard-refresh; the footer
+  should read 2026-09-09a. No database step, no new environment
+  variables. Nothing changes for a policy whose benefit is level.
 
-  A manager sees only the cases they ran themselves. An administrator
-  sees them all, and can delete one that should not have been run.
+HOW TO USE IT
+  Opportunity -> Edit -> tick "Changing death benefit" -> Save.
+  Then Premium schedule: the Death benefit column is there, one row per
+  year. Type only the years that step; leave the rest blank.

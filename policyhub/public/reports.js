@@ -1536,6 +1536,12 @@ export function buildOpportunitySheet(o, opts = {}) {
   const base = a.base || null;
   const price = Number(o.asking_price) || 0;
   const benefit = Number(o.face_amount) || 0;
+  /* A policy whose benefit steps year by year is a different trade at
+     every maturity date, and a sheet that prints one figure for all three
+     scenarios is the version of this document that loses money. */
+  const changing = !!a.benefit_changes;
+  const benefitRows = a.benefit_schedule || [];
+  const atLeBenefit = base?.death_benefit ?? benefit;
 
   // The posted schedule, plus whatever the analysis projected past its end —
   // a sheet that stops at the last typed row understates the cost of a long
@@ -1579,11 +1585,24 @@ export function buildOpportunitySheet(o, opts = {}) {
   const scen = (a.scenarios || []);
   const irrHead = base ? rateCell(base.rate, base.compound_rate) : '—';
 
+  /* The benefit in force on a date, read off the schedule the same way
+     the analysis reads it: the last figure dated on or before the day,
+     falling back to today's face amount before the first row. Repeated
+     here rather than imported because this file is also the printed
+     document and must not depend on the server module. */
+  const benefitOn = (on) => {
+    if (!changing) return benefit;
+    let held = benefit;
+    for (const b of benefitRows) { if (b.date > on) break; held = b.amount; }
+    return held;
+  };
+
   const runningRows = (() => {
     let cum = 0;
     return rows.map((r, i) => {
       cum += r.amount;
-      return { ...r, n: i + 1, age: ageOn(o.insured_dob, r.date), cum };
+      return { ...r, n: i + 1, age: ageOn(o.insured_dob, r.date), cum,
+        benefit: benefitOn(r.date) };
     });
   })();
 
@@ -1598,7 +1617,8 @@ export function buildOpportunitySheet(o, opts = {}) {
 
     <h2 class="rpt-h2">${esc(name)}</h2>
     <div class="opp-sheet-sub">
-      ${fmtExact(benefit)} death benefit${partial ? ` · ${share}% participation offered` : ''}
+      ${fmtExact(benefit)} death benefit${changing ? ', rising' : ''}${
+  partial ? ` · ${share}% participation offered` : ''}
       ${leYears ? ` · life expectancy ${o.le_months} months (~${leYears} years)` : ''}
       ${base ? ` · ${irrHead} at life expectancy` : ''}
     </div>
@@ -1609,8 +1629,10 @@ export function buildOpportunitySheet(o, opts = {}) {
         <div class="rpt-tile-note">${partial ? `${fmtExact(price)} for the whole policy` : ''}${
           benefit ? `${partial ? ' · ' : ''}${pct(price, benefit)} of face` : ''}</div></div>
       <div class="rpt-tile"><div class="rpt-tile-label">${partial ? 'Your death benefit' : 'Death benefit'}</div>
-        <div class="rpt-tile-value">${fmtExact(benefit * f)}</div>
-        <div class="rpt-tile-note">${partial ? `${share}% of ${fmtExact(benefit)}` : 'Net death benefit'}</div></div>
+        <div class="rpt-tile-value">${fmtExact((changing ? atLeBenefit : benefit) * f)}</div>
+        <div class="rpt-tile-note">${changing
+    ? `at life expectancy · ${fmtExact(benefit * f)} today`
+    : partial ? `${share}% of ${fmtExact(benefit)}` : 'Net death benefit'}</div></div>
       <div class="rpt-tile"><div class="rpt-tile-label">Life expectancy</div>
         <div class="rpt-tile-value">${o.le_months ? `${o.le_months} mo` : '—'}</div>
         <div class="rpt-tile-note">${esc(o.le_provider || '—')}${
@@ -1634,7 +1656,11 @@ export function buildOpportunitySheet(o, opts = {}) {
             <span class="rpt-dim">${fmtDate(s.matures_on)}</span></td>
           <td class="num">${fmtExact(s.premiums_paid * f)}</td>
           <td class="num">${fmtExact(s.invested * f)}</td>
-          <td class="num">${fmtExact(s.returned * f)}</td>
+          ${''/* The benefit in force on that maturity date, stated. Was
+                 `s.returned`, which is the claim net of carried interest
+                 for an investor and therefore reads as a smaller policy
+                 rather than as a smaller share of one. */}
+          <td class="num">${fmtExact((s.death_benefit ?? benefit) * f)}</td>
           <td class="num">${fmtExact(s.profit * f)}</td>
           <td class="num">${s.multiple ? `${s.multiple.toFixed(2)}×` : '—'}</td>
           <td class="num">${Number(s.years).toFixed(1)}</td>
@@ -1708,24 +1734,26 @@ export function buildOpportunitySheet(o, opts = {}) {
      * read top-to-bottom-then-across the way a schedule is read. */
     const head = `<thead><tr><th class="num">Year</th><th class="num">Age</th><th>Due</th>
         <th class="num">Full premium</th>${partial ? `<th class="num">${share}% share</th>` : ''}
-        <th class="num">Cumulative${partial ? ` (${share}%)` : ''}</th></tr></thead>`;
+        <th class="num">Cumulative${partial ? ` (${share}%)` : ''}</th>${
+  changing ? `<th class="num">Death benefit${partial ? ` (${share}%)` : ''}</th>` : ''}</tr></thead>`;
     const body = (list) => list.map((r) => `<tr class="${r.amount === 0 ? 'rpt-zero' : ''}">
         <td class="num">${r.n}</td><td class="num">${r.age ?? '—'}</td>
         <td>${fmtDate(r.date)}${r.projected ? ' <span class="rpt-dim">projected</span>' : ''}</td>
         <td class="num">${fmtExact(r.amount)}</td>
         ${partial ? `<td class="num strong">${fmtExact(r.amount * f)}</td>` : ''}
-        <td class="num">${fmtExact(r.cum * f)}</td></tr>`).join('');
+        <td class="num">${fmtExact(r.cum * f)}</td>${
+  changing ? `<td class="num">${fmtExact(r.benefit * f)}</td>` : ''}</tr>`).join('');
     const foot = !runningRows.length ? ''
       : `<tfoot><tr><td colspan="3">Total over ${years} year${years === 1 ? '' : 's'}</td>
           <td class="num">${fmtExact(total)}</td>
           ${partial ? `<td class="num">${fmtExact(total * f)}</td>` : ''}
-          <td class="num">${fmtExact(total * f)}</td></tr></tfoot>`;
+          <td class="num">${fmtExact(total * f)}</td>${changing ? '<td></td>' : ''}</tr></tfoot>`;
 
     /* Split only when the table is narrow enough to halve. A participation
        sheet carries an extra share column, and six columns squeezed into
        half a landscape page wrap and cost more height than the split
        saves. */
-    const split = runningRows.length > 12 && !partial;
+    const split = runningRows.length > 12 && !partial && !changing;
     const half = Math.ceil(runningRows.length / 2);
     const tables = !runningRows.length
       ? `<table class="rpt-table rpt-table-tight">${head}
@@ -1750,6 +1778,9 @@ export function buildOpportunitySheet(o, opts = {}) {
       <div class="opp-sheet-schedule-cols">${tables}</div>
       ${projected.length ? `<p class="rpt-note">Rows marked projected fall past the end of the posted
         schedule and continue at its last annual rate, to life expectancy.</p>` : ''}
+      ${changing ? `<p class="rpt-note">The death benefit steps year by year. Each figure stands
+        from its own date until the next one; past the end of the entered schedule the last
+        figure is held level rather than assumed to keep rising.</p>` : ''}
     </div>`;
   })()}
 

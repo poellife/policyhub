@@ -528,6 +528,27 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS values_as_of DATE;
 -- before this column existed are classified correctly. It only ever sets
 -- the flag true, so it is safe to re-run on every boot.
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS policy_created BOOLEAN NOT NULL DEFAULT FALSE;
+
+/* A death benefit that does not sit still.
+ *
+ * Most policies carry one face amount for life and `face_amount` is the
+ * whole truth. Some do not: an increasing-benefit universal life policy
+ * steps up every year, and on a life settlement that changes the answer
+ * rather than decorating it -- the benefit collected two years late is a
+ * different number from the one collected at life expectancy, so the
+ * three scenarios stop being the same trade at three dates.
+ *
+ * The flag is what says which kind of policy this is. Without it a blank
+ * schedule column and a level policy are indistinguishable, and a deal
+ * would silently price off whatever happened to be typed.
+ *
+ * The figures live on the premium schedule rather than in a table of
+ * their own, because they are the same fact: what the policy costs and
+ * what it pays, in a given policy year, on a date that is already
+ * recorded. NULL means "unchanged from the last row that said", so a
+ * schedule entered before this existed keeps behaving exactly as it did. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS changing_death_benefit BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE opportunity_premiums ADD COLUMN IF NOT EXISTS death_benefit NUMERIC(16,2);
 UPDATE opportunities o SET policy_created = TRUE
  WHERE o.policy_id IS NOT NULL AND NOT o.policy_created
    AND EXISTS (SELECT 1 FROM transactions t
