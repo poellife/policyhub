@@ -150,7 +150,53 @@ export async function readDocuments(files) {
   const p = out.policy || {};
   const med = out.medical || {};
   const les = [...(out.le_reports || [])].filter((x) => x && x.mean_le50_months).sort(byDate);
-  const [le1, le2] = les;
+
+  /* ---------------------------------------------------------------- *
+   * Two reports, two questions
+   *
+   * A pair of life-expectancy reports means one of two things, and they
+   * are opposite: two providers' opinions on ONE person, or one opinion
+   * each on TWO people. Reading a survivorship pair as two opinions
+   * prices the deal off one life and ignores the other; reading two
+   * opinions as two people invents an insured who does not exist.
+   *
+   * The reports themselves say which. An underwriter writes the name of
+   * the person they examined at the top of the certificate, so reports
+   * carrying the same surname and forename are about the same person and
+   * reports carrying different names are not. Compared on the name
+   * rather than on anything cleverer because that is the fact the
+   * document actually states.
+   *
+   * When the names cannot be told apart -- one report with no name on
+   * it, or a reading that lost them -- the pair is treated as two
+   * opinions, which is what the application has always assumed and the
+   * safer of the two mistakes: an extra opinion sits unused on the form,
+   * where a phantom second insured would silently push every maturity
+   * date out.
+   * ---------------------------------------------------------------- */
+  const whose = (le) => `${lastOf(le?.insured_name || '')} ${firstOf(le?.insured_name || '')}`
+    .trim().toLowerCase().replace(/[^a-z ]/g, '');
+
+  /* Coerced, not merely truthy. `a && b` where b is an empty string
+     yields an empty string, and an empty string travelling out of here as
+     `two_lives` is a value the screen has to guess about. */
+  const namedPair = !!(les.length >= 2 && whose(les[0]) && whose(les[1]));
+  const twoPeople = namedPair && whose(les[0]) !== whose(les[1]);
+
+  /* On a survivorship pair, the first life is the one the ILLUSTRATION
+     names first where it says so, and otherwise the older report. Which
+     of the two is "first" changes nothing about the arithmetic -- the
+     analysis takes the later date whichever order they sit in -- but a
+     form that lists them the way the contract does is one less thing for
+     somebody to reconcile. */
+  const primaryName = `${String(p.insured_last || '')} ${String(p.insured_first || '')}`
+    .trim().toLowerCase().replace(/[^a-z ]/g, '');
+  const ordered = twoPeople && primaryName && whose(les[1]) === primaryName
+    ? [les[1], les[0]] : les;
+
+  const [le1, le2] = ordered;
+  const second = twoPeople ? le2 : null;      // a person
+  const opinion = twoPeople ? null : le2;     // a second opinion on le1
 
   /* The LE report wins on identity. Underwriters verify who they are
      writing about; an illustration prints whatever was keyed into it. */
@@ -174,8 +220,21 @@ export async function readDocuments(files) {
     le_months: le1?.mean_le50_months ? Math.round(Number(le1.mean_le50_months)) : null,
     le_provider: String(le1?.provider || '').trim(),
     le_date: iso(le1?.report_date),
-    le_months_2: le2?.mean_le50_months ? Math.round(Number(le2.mean_le50_months)) : null,
-    le_provider_2: String(le2?.provider || '').trim(),
+    le_months_2: opinion?.mean_le50_months ? Math.round(Number(opinion.mean_le50_months)) : null,
+    le_provider_2: String(opinion?.provider || '').trim(),
+
+    /* The second life on a survivorship contract, filled only when the
+       reports name two different people. Everything about them comes off
+       their own certificate -- their estimate is counted from their own
+       report date, not from the first life's. */
+    insured2_last_name: second?.insured_name ? lastOf(second.insured_name) : '',
+    insured2_first_name: second?.insured_name ? firstOf(second.insured_name) : '',
+    insured2_dob: iso(second?.dob),
+    insured2_gender: letter(second?.gender),
+    insured2_le_months: second?.mean_le50_months
+      ? Math.round(Number(second.mean_le50_months)) : null,
+    insured2_le_provider: String(second?.provider || '').trim(),
+    insured2_le_date: iso(second?.report_date),
 
     annual_premium: num(p.annual_premium),
     account_value: num(p.account_value),
@@ -195,6 +254,9 @@ export async function readDocuments(files) {
 
   return {
     fields,
+    /* So the summary can say "two insureds" rather than leaving somebody
+       to notice that six extra boxes filled themselves in. */
+    two_lives: twoPeople,
     premiums: Array.isArray(out.premium_schedule) ? out.premium_schedule : [],
     read: out.read || [],
     roles: out.source_roles || {},
@@ -205,7 +267,13 @@ export async function readDocuments(files) {
 }
 
 /* "Cleves Delp" -> last "Delp", first "Cleves". "Delp, Cleves" reads the
-   other way round; both turn up on LE reports. */
+   other way round; both turn up on LE reports.
+ *
+ * A middle name goes nowhere. Certificates are written out in full --
+ * "Gerald James Sommers", "Judith Mary Sommers" -- and a first-name box
+ * holding "Gerald James" reads as a mistake on every screen it appears
+ * on, and in the deal's own title. The full name is on the certificate,
+ * which is where it belongs; this form wants the name people use. */
 function lastOf(name) {
   const s = String(name).trim();
   if (s.includes(',')) return s.split(',')[0].trim();
@@ -214,7 +282,8 @@ function lastOf(name) {
 }
 function firstOf(name) {
   const s = String(name).trim();
-  if (s.includes(',')) return s.split(',').slice(1).join(' ').trim();
-  const parts = s.split(/\s+/);
-  return parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+  const given = s.includes(',')
+    ? s.split(',').slice(1).join(' ').trim()
+    : (s.split(/\s+/).length > 1 ? s.split(/\s+/).slice(0, -1).join(' ') : '');
+  return given.split(/\s+/)[0] || '';
 }

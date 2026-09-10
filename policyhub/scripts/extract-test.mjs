@@ -127,6 +127,64 @@ check('the most recent report is the first LE',
 check('with its own report date', f.le_date === '2026-05-01', f.le_date);
 check('and the older one is the second', f.le_months_2 === 195 && f.le_provider_2 === 'Polaris',
   `${f.le_provider_2} ${f.le_months_2}`);
+/* Two reports about the same man are two OPINIONS, and must not become a
+   second insured -- a phantom life would push every maturity date out and
+   quietly reprice the deal. */
+check('two reports on one person do not invent a second insured',
+  !('insured2_last_name' in f) && !('insured2_le_months' in f),
+  Object.keys(f).filter((k) => k.startsWith('insured2')).join(', ') || 'none');
+
+/* ------------------------------------------------------------------ *
+ * Two reports about two people
+ *
+ * The Sommers file: a survivorship contract, one certificate each. The
+ * names on the certificates are the only thing that distinguishes this
+ * from the case above, and they are what the documents actually state.
+ * ------------------------------------------------------------------ */
+console.log('\nTWO REPORTS ABOUT TWO PEOPLE ARE TWO INSUREDS');
+reply = { status: 200, body: { ...ANSWER,
+  policy: { ...ANSWER.policy, insured_last: 'Sommers', insured_first: 'Gerald',
+    product_type: 'SUL', face_amount: 10000000 },
+  le_reports: [
+    { provider: '21st', mean_le50_months: 36, report_date: '2026-08-26',
+      insured_name: 'Gerald James Sommers', dob: '1941-08-08', gender: 'Male' },
+    { provider: '21st', mean_le50_months: 71, report_date: '2026-08-26',
+      insured_name: 'Judith Mary Sommers', dob: '1943-01-24', gender: 'Female' },
+  ] } };
+const sur = await readDocuments([pdf('illustration.pdf'), pdf('gerald.pdf'), pdf('judith.pdf')]);
+const g = sur.fields;
+check('it says so, so the form can open the second block', sur.two_lives === true);
+check('the first insured is the one the illustration names',
+  g.insured_last_name === 'Sommers' && g.insured_first_name === 'Gerald',
+  `${g.insured_first_name} ${g.insured_last_name}`);
+check('with his own estimate', g.le_months === 36 && g.le_date === '2026-08-26',
+  `${g.le_months} mo`);
+check('the second insured is the other person',
+  g.insured2_last_name === 'Sommers' && g.insured2_first_name === 'Judith',
+  `${g.insured2_first_name} ${g.insured2_last_name}`);
+check('with her own estimate, provider and report date',
+  g.insured2_le_months === 71 && g.insured2_le_provider === '21st'
+  && g.insured2_le_date === '2026-08-26', `${g.insured2_le_months} mo`);
+check('her own date of birth and sex', g.insured2_dob === '1943-01-24'
+  && g.insured2_gender === 'F', `${g.insured2_dob} ${g.insured2_gender}`);
+check('and nothing is filed as a second opinion, because there is not one',
+  !('le_months_2' in g) && !('le_provider_2' in g),
+  `${g.le_provider_2 || ''} ${g.le_months_2 || ''}`.trim() || 'none');
+
+/* The safer mistake: an unnamed report is an opinion, not a person. */
+console.log('\nAND WHEN THE REPORTS CANNOT BE TOLD APART, NOBODY IS INVENTED');
+reply = { status: 200, body: { ...ANSWER, le_reports: [
+  { provider: 'Polaris', mean_le50_months: 195, report_date: '2025-11-02' },
+  { provider: 'Predictive', mean_le50_months: 193, report_date: '2026-05-01' },
+] } };
+const nameless = await readDocuments([pdf('a.pdf'), pdf('b.pdf')]);
+check('an unnamed pair is read as two opinions, which is the safe way to be wrong',
+  nameless.two_lives === false && !('insured2_le_months' in nameless.fields)
+  && nameless.fields.le_months_2 === 195,
+  `two_lives=${nameless.two_lives} le_months_2=${nameless.fields.le_months_2} `
+  + `insured2=${Object.keys(nameless.fields).filter((k) => k.startsWith('insured2')).join(',') || 'none'}`);
+
+reply = { status: 200, body: ANSWER };
 
 console.log('\nTHE MEDICAL PICTURE ARRIVES AS BULLETS');
 check('one impairment per line', f.impairments.split('\n').length === 2, JSON.stringify(f.impairments));

@@ -548,7 +548,33 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS policy_created BOOLEAN NOT NU
  * recorded. NULL means "unchanged from the last row that said", so a
  * schedule entered before this existed keeps behaving exactly as it did. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS changing_death_benefit BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE opportunity_premiums ADD COLUMN IF NOT EXISTS death_benefit NUMERIC(16,2);
+
+/* The second life on a survivorship contract.
+ *
+ * A survivorship policy pays on the SECOND death, so a deal with two
+ * insureds is not one life with a note attached -- the wait, and
+ * therefore the price, depends on both. Held on the opportunity beside
+ * the first for the same reason the first is held here rather than in
+ * `insureds`: these are people whose policies the firm does not own, and
+ * they belong in the directory only if the deal closes.
+ *
+ * The second life carries its own estimate, from its own provider, on
+ * its own report date -- not a share of the first one's. Two reports on
+ * two people are two documents, and the report date is what each is
+ * counted from.
+ *
+ * Note what these are NOT. `le_months_2` and `le_provider_2` above are a
+ * second OPINION on the first insured; these are a second PERSON. The
+ * names are close and the meanings are not, which is why the second life
+ * is prefixed `insured2_` throughout rather than suffixed `_2`. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_last_name  TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_first_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_dob        DATE;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_gender     TEXT;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_state      TEXT;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_months  INTEGER;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_date    DATE;
 UPDATE opportunities o SET policy_created = TRUE
  WHERE o.policy_id IS NOT NULL AND NOT o.policy_created
    AND EXISTS (SELECT 1 FROM transactions t
@@ -568,6 +594,20 @@ CREATE TABLE IF NOT EXISTS opportunity_premiums (
   UNIQUE (opportunity_id, due_date)
 );
 CREATE INDEX IF NOT EXISTS idx_opp_premiums ON opportunity_premiums (opportunity_id, due_date);
+
+/* The benefit in force from this date, on a policy whose benefit steps
+   year by year. NULL means "unchanged from the last row that said one",
+   so a schedule entered before this column existed behaves exactly as it
+   did. See `changing_death_benefit` above for why it is only read when
+   the deal says the benefit moves.
+
+   Placed HERE rather than beside that flag, which is the mistake it was
+   written as: this file runs top to bottom on every boot, and an ALTER
+   above the CREATE it depends on works on every database that already
+   has the table and fails on every one that does not. It cost nothing on
+   the live server, which had the table, and refused to start on the
+   first genuinely empty one. */
+ALTER TABLE opportunity_premiums ADD COLUMN IF NOT EXISTS death_benefit NUMERIC(16,2);
 
 -- Who has been shown it. An investor sees nothing that is not listed here.
 CREATE TABLE IF NOT EXISTS opportunity_shares (

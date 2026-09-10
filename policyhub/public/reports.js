@@ -1578,6 +1578,14 @@ export function buildOpportunitySheet(o, opts = {}) {
   };
   const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
     || o.policy_number || '—';
+  /* Both lives, initials only, on a survivorship deal. The second name is
+     as much of a person as the first and comes off the paper the same
+     way. */
+  const lives = a.lives || [];
+  const survivorship = !!a.survivorship;
+  const name2 = survivorship
+    ? `${initial(o.insured2_first_name)}${initial(o.insured2_last_name)}` : '';
+  const bothNames = survivorship && name2 ? `${name} & ${name2}` : name;
   const leYears = o.le_months ? (Number(o.le_months) / 12).toFixed(1) : null;
   const leSecond = o.le_months_2
     ? `${o.le_provider_2 || 'second report'} ${o.le_months_2} mo` : null;
@@ -1615,7 +1623,7 @@ export function buildOpportunitySheet(o, opts = {}) {
       The insured is identified by initials: this sheet carries the medical picture behind the
       life expectancy, and a name is not needed to weigh the deal.</div>
 
-    <h2 class="rpt-h2">${esc(name)}</h2>
+    <h2 class="rpt-h2">${esc(bothNames)}</h2>
     <div class="opp-sheet-sub">
       ${fmtExact(benefit)} death benefit${changing ? ', rising' : ''}${
   partial ? ` · ${share}% participation offered` : ''}
@@ -1634,16 +1642,21 @@ export function buildOpportunitySheet(o, opts = {}) {
     ? `at life expectancy · ${fmtExact(benefit * f)} today`
     : partial ? `${share}% of ${fmtExact(benefit)}` : 'Net death benefit'}</div></div>
       <div class="rpt-tile"><div class="rpt-tile-label">Life expectancy</div>
-        <div class="rpt-tile-value">${o.le_months ? `${o.le_months} mo` : '—'}</div>
-        <div class="rpt-tile-note">${esc(o.le_provider || '—')}${
-          o.le_date ? ` · report ${fmtDate(o.le_date)}` : ''}${leSecond ? ` · ${esc(leSecond)}` : ''}</div></div>
+        <div class="rpt-tile-value">${o.le_months ? `${o.le_months} mo` : '—'}${
+  survivorship && o.insured2_le_months ? ` / ${o.insured2_le_months} mo` : ''}</div>
+        <div class="rpt-tile-note">${survivorship
+    ? `two lives · modelled on the later${a.driving_life
+      ? `, the ${a.driving_life.n === 1 ? 'first' : 'second'}` : ''}`
+    : `${esc(o.le_provider || '—')}${o.le_date ? ` · report ${fmtDate(o.le_date)}` : ''}${
+      leSecond ? ` · ${esc(leSecond)}` : ''}`}</div></div>
       <div class="rpt-tile"><div class="rpt-tile-label">${partial ? `Your premiums (avg)` : 'Average annual premium'}</div>
         <div class="rpt-tile-value">${fmtExact(avg * f)}</div>
         <div class="rpt-tile-note">${fmtExact(total * f)} over ${years} year${years === 1 ? '' : 's'}</div></div>
     </div>
 
     <div class="rpt-block avoid-break">
-      <h3 class="rpt-h3">Return if the insured lives to…</h3>
+      <h3 class="rpt-h3">${survivorship
+    ? 'Return if the second death falls…' : 'Return if the insured lives to…'}</h3>
       <table class="rpt-table rpt-scen">
         <thead><tr><th>Maturity</th><th class="num">Premiums paid</th>
           <th class="num">Total invested</th><th class="num">Death benefit</th>
@@ -1668,6 +1681,30 @@ export function buildOpportunitySheet(o, opts = {}) {
           || '<tr><td colspan="8">Not priced — an asking price and a death benefit are needed.</td></tr>'}</tbody>
       </table>
     </div>
+
+    ${survivorship ? `
+    <div class="rpt-block avoid-break">
+      <h3 class="rpt-h3">The two lives — the benefit is paid on the second death</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Insured</th><th class="num">Age</th><th>Sex</th>
+          <th class="num">Life expectancy</th><th>Provider</th><th>Report date</th>
+          <th>Estimate runs out</th></tr></thead>
+        <tbody>${lives.map((l) => `<tr class="${
+    a.driving_life && l.n === a.driving_life.n ? 'at-le' : ''}">
+          <td>${esc(l.initials ? l.initials.split('').join('.') + '.' : `Life ${l.n}`)}</td>
+          <td class="num">${ageOn(l.dob, new Date().toISOString().slice(0, 10)) ?? '—'}</td>
+          <td>${esc(l.gender || '—')}</td>
+          <td class="num">${l.le_months ? `${l.le_months} mo` : '—'}</td>
+          <td>${esc(l.le_provider || '—')}</td>
+          <td>${l.le_date ? fmtDate(l.le_date) : '—'}</td>
+          <td>${l.matures_on ? fmtDate(l.matures_on) : '—'}</td></tr>`).join('')}</tbody>
+      </table>
+      <p class="rpt-note">The return is modelled on whichever estimate runs out later${
+  a.driving_life ? ` — the ${a.driving_life.n === 1 ? 'first' : 'second'} life` : ''}, compared
+        as dates rather than as months because each is counted from its own report. This is
+        the later of two medians and not a joint life expectancy: a floor on the wait rather
+        than the expectation of it.</p>
+    </div>` : ''}
 
     <div class="rpt-cols">
       <div>

@@ -32,19 +32,116 @@ export function addMonths(iso, months) {
 const iso = (v) => (v ? String(v).slice(0, 10) : null);
 
 /**
+ * When one life's expectancy runs out.
+ *
+ * Counted from the date of that life's LE report, not from today — a
+ * report written two years ago has already used up two years of the
+ * estimate, and treating it as fresh would flatter every deal.
+ *
+ * `expected_close` is the fallback for a report with no date on it, and
+ * only for the first life: a second insured entered without a report date
+ * has nothing to count from and is simply not a candidate.
+ */
+function lifeMaturity(months, from, offsetMonths) {
+  const n = Number(months);
+  if (!Number.isFinite(n) || n <= 0 || !from) return null;
+  return addMonths(from, n + offsetMonths);
+}
+
+/**
+ * The lives on this deal, each with the date its own estimate runs out.
+ *
+ * One on an ordinary policy. Two on a survivorship contract, where the
+ * benefit is not paid until both have died -- which is why the second
+ * life is a fact about the price rather than a detail on the cover.
+ *
+ * Returned as a list rather than folded to a single date so the screen
+ * can say WHICH life is driving the maturity. On a survivorship deal that
+ * is the first question anybody asks, and deriving it twice in two places
+ * is how the screen and the arithmetic come to disagree.
+ */
+export function lives(opp, offsetMonths = 0) {
+  const close = iso(opp.expected_close);
+  const out = [{
+    n: 1,
+    /* Initials, never the name.
+     *
+     * This object travels inside `analysis`, which goes to an investor
+     * along with everything else on the deal. Every other field an
+     * investor is shown has been through the scrubbing that turns
+     * "Cornelius Wetherington" into "C." / "W."; a convenience copy of the
+     * full name assembled here goes out beside them untouched, which is
+     * precisely the leak the scrubbing exists to prevent -- and it did,
+     * until the privacy suite caught it.
+     *
+     * Nothing needs the full name from here. The screens that show one are
+     * staff screens reading `insured_first_name` off the record, which is
+     * the field the scrubbing already governs. */
+    initials: `${(opp.insured_first_name || '').trim().slice(0, 1)}${
+      (opp.insured_last_name || '').trim().slice(0, 1)}`.toUpperCase(),
+    dob: iso(opp.insured_dob),
+    gender: opp.insured_gender || '',
+    le_months: Number(opp.le_months) || null,
+    le_provider: opp.le_provider || '',
+    le_date: iso(opp.le_date) || close,
+    matures_on: lifeMaturity(opp.le_months, iso(opp.le_date) || close || today(), offsetMonths),
+  }];
+
+  /* The second life exists only when somebody has entered one. A blank
+     block on every ordinary deal would be a second set of empty fields
+     that the analysis has to keep deciding to ignore. */
+  const hasSecond = !!(String(opp.insured2_last_name || '').trim()
+    || Number(opp.insured2_le_months) > 0);
+  if (hasSecond) out.push({
+    n: 2,
+    initials: `${(opp.insured2_first_name || '').trim().slice(0, 1)}${
+      (opp.insured2_last_name || '').trim().slice(0, 1)}`.toUpperCase(),
+    dob: iso(opp.insured2_dob),
+    gender: opp.insured2_gender || '',
+    le_months: Number(opp.insured2_le_months) || null,
+    le_provider: opp.insured2_le_provider || '',
+    le_date: iso(opp.insured2_le_date),
+    /* No fallback to the close for the second life. A report date is
+       what an estimate is counted from, and inventing one would put a
+       maturity date on the record that no document supports. */
+    matures_on: lifeMaturity(opp.insured2_le_months, iso(opp.insured2_le_date), offsetMonths),
+  });
+  return out;
+}
+
+/**
  * When the policy would mature under a scenario.
  *
- * Life expectancy is counted from the date of the LE report, not from
- * today — a report written two years ago has already used up two years of
- * the estimate, and treating it as fresh would flatter every deal.
+ * With one life, when that life's estimate runs out. With two, the LATER
+ * of the two dates — because a survivorship contract pays on the second
+ * death, so the money does not arrive until both estimates have run out.
+ *
+ * Compared as DATES, not as month counts. Each estimate is counted from
+ * its own report, and the two reports are rarely written in the same
+ * week: an 84-month estimate dated last January runs out before a
+ * 72-month one dated this September. Taking the larger figure would pick
+ * the wrong life every time the reports are dated apart, which is most of
+ * the time.
+ *
+ * This is the later of two medians, and deliberately not a joint life
+ * expectancy. It is a floor on the wait rather than the expectation of
+ * it, which is a desk convention rather than an actuarial one -- the
+ * screen and the one-pager both say so, and the scenario two years past
+ * is where it gets tested.
  */
 export function maturityDate(opp, offsetMonths = 0) {
-  const months = Number(opp.le_months);
-  if (!Number.isFinite(months) || months <= 0) return null;
-  const from = iso(opp.le_date) || iso(opp.expected_close) || today();
-  const at = addMonths(from, months + offsetMonths);
+  const dates = lives(opp, offsetMonths).map((l) => l.matures_on).filter(Boolean);
+  if (!dates.length) return null;
+  const at = dates.sort()[dates.length - 1];
   // A scenario that has already passed is meaningless; floor it at today.
   return at < today() ? today() : at;
+}
+
+/** Which life the maturity date is waiting on, at this offset. */
+export function drivingLife(opp, offsetMonths = 0) {
+  const withDates = lives(opp, offsetMonths).filter((l) => l.matures_on);
+  if (withDates.length < 2) return null;
+  return withDates.reduce((a, b) => (b.matures_on > a.matures_on ? b : a));
 }
 
 /**
@@ -193,6 +290,11 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     death_benefit: benefit * share,
     benefit_changes: benefitSchedule(opp).length > 0,
     benefit_held_level: benefitRunsOut(opp, matures),
+    /* Which life this scenario is waiting on. Worked out per scenario
+       rather than once, because the offset moves both dates by the same
+       number of months and the later one can change hands when the two
+       estimates are close and the reports are dated apart. */
+    driving_life: drivingLife(opp, offsetMonths)?.n ?? null,
     rate: a.rate,
     /* Both readings of the same flows, always. Simple interest is what the
        provider workbooks quote and what this desk has always priced on;
@@ -229,5 +331,11 @@ export function analyseOpportunity(opp, share = 1, carryPct = 0) {
     /* So a screen can label the figures without re-deriving the rule. */
     benefit_changes: benefitSchedule(opp).length > 0,
     benefit_schedule: benefitSchedule(opp),
+    /* Both lives, each with its own estimate and the date that estimate
+       runs out, and which of them the maturity is waiting on. Solved once
+       here rather than in each of the three places that display it. */
+    lives: lives(opp, 0),
+    survivorship: lives(opp, 0).length > 1,
+    driving_life: drivingLife(opp, 0),
   };
 }

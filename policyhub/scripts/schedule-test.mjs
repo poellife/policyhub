@@ -130,11 +130,26 @@ check('changing it to a reminder drops the amount with it',
 console.log('\nWHO MAY TOUCH THEM');
 check('an investor cannot read the schedule',
   (await api(inv1, `/policies/${policy.id}/reminders`)).status === 403);
-check('nor is it in their copy of the policy', await (async () => {
+/* Not "no schedule at all" -- a scheduled premium is money the investor
+   will be asked for and belongs in front of them, which the check further
+   down asserts in as many words. What must not reach them is the desk's
+   errands: chase this form, call that carrier.
+   
+   Written as "no reminders" it agreed with the route only by accident,
+   and only while the fixture investor held no policies: with an empty
+   book the loop never ran and the check passed without testing anything.
+   The moment the sample book was allocated it started contradicting its
+   own sibling forty lines below. */
+check('nor are the desk’s errands in their copy of the policy', await (async () => {
   const own = (await json(await api(inv1, '/policies'))) || [];
   if (!own.length) return true;
-  const d = await json(await api(inv1, `/policies/${own[0].id}`));
-  return (d.reminders || []).length === 0;
+  for (const p of own.slice(0, 5)) {
+    const d = await json(await api(inv1, `/policies/${p.id}`));
+    const steps = d.reminders || [];
+    if (steps.some((r) => r.kind !== 'Premium')) return false;
+    if (steps.some((r) => r.done_at)) return false;   // nor anything already dealt with
+  }
+  return true;
 })());
 check('an investor cannot schedule one',
   (await api(inv1, `/policies/${policy.id}/reminders`, { method: 'POST', body: {

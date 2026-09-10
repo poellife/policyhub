@@ -1,71 +1,80 @@
-PolicyHub — build 2026-09-10b
+PolicyHub — build 2026-09-10c
 Minimal update. Paths are relative to the `policyhub` folder of your repo.
 
 WHAT THIS ADDS
 
-  "Forgotten your password?" on the sign-in card. An investor types their
-  address, gets an emailed link, chooses a new password, and is signed
-  in. No password is ever emailed and nothing is read down a telephone.
+  A SECOND INSURED on an opportunity, for survivorship policies.
 
-  And, for the phone-call case, Settings -> Users -> Edit now has
-  "Email them a reset link". Administrators only.
+  Tick "Two insureds" on the deal and a second block opens: name, date of
+  birth, sex, state, and that person's OWN life expectancy with its own
+  provider and report date.
 
-THE RULES IT ENFORCES
+  The return is modelled on WHICHEVER ESTIMATE RUNS OUT LATER, compared
+  as dates and never as month counts. Each estimate is counted from its
+  own report, so a 72-month report written this year outlasts an 84-month
+  one written two years ago; comparing months would pick the wrong life
+  every time the reports are dated apart, which is most of the time.
 
-  It never says whether an address has an account — the same sentence
-  either way, and about the same length of time either way, because a
-  reply that returns in 4ms for a miss and 400ms for a hit answers the
-  question just as clearly as words would.
+  This is the later of two medians and deliberately NOT a joint life
+  expectancy — a floor on the wait rather than the expectation of it. The
+  screen and both one-pagers say so, and the "24 months late" row is
+  where it gets tested.
 
-  The token is not stored. Only its SHA-256, for the same reason a
-  password is only stored as a hash.
+  On the Sommers file: Gerald 36 months, Judith 71, both written 26
+  August. Hers governs. Priced off his alone the deal reads 83.9%; off
+  the correct life, 31.1%.
 
-  One hour, one use. Asking again retires the previous link, so nobody
-  clicks a dead link out of an older email.
+  DOCUMENT READING now decides whether two LE reports are two opinions on
+  one person or one opinion each on two people, by comparing the names on
+  the certificates. Two different people fills the second insured and
+  ticks the box; two reports on the same person stay a second opinion.
+  When the names cannot be told apart it assumes two opinions, which is
+  the safer way to be wrong.
 
-  Completing a reset ends every other session, clears the
-  must-change-password flag, AND lifts the fifteen-minute sign-in
-  lockout — without that last one, somebody who did exactly what they
-  were told would still be locked out.
+  NOTE: the reading itself happens in the valuation service, not here.
+  This build maps its answer. If that service does not yet pull the name,
+  date of birth, sex, report date and month count off a 21st Services
+  certificate, that is a change there and not in this repo.
 
-  A suspended account is not let back in by remembering its password.
+FOUR DEFECTS FIXED ALONG THE WAY
 
-  A dead link says so on arrival, not after a password has been chosen
-  and typed twice.
+  1. schema.sql ran an ALTER above the CREATE TABLE it depended on. Fine
+     on a database that already had the table; the application REFUSED TO
+     START on an empty one. Any new environment would have hit it.
+
+  2. The analysis carried assembled full names to investors, in a payload
+     where every other name is scrubbed to initials.
+
+  3. The de-identifier did not know the new insured2_ columns, so a second
+     insured's name reached investors unmasked. It now gets its own
+     initial rather than sharing the first insured's.
+
+  4. A privacy check read "if the investor holds any policies…" against a
+     fixture where none were allocated, so it passed for a long time
+     without running. It also contradicted its own sibling assertion.
+     Rewritten to test what it means.
 
 FILES
 
-  src/schema.sql          the password_resets table, applied on boot
-  src/password-reset.js   NEW — tokens, expiry, throttling, and the
-                          reasoning behind each rule
-  src/api.js              POST /auth/forgot, GET /auth/reset/:token,
-                          POST /auth/reset, POST /users/:id/reset-link
-  src/mail.js             two new kinds (password_reset,
-                          password_changed) and appUrlMissing()
-  src/auth.js             unchanged in behaviour — issueToken is now
-                          exported so the reset can sign somebody in
-  public/app.js           the sign-in link, the two screens, the admin
-                          button
-  public/styles.css       .login-forgot
-  public/build.js         the build stamp the footer reads
-  .env.example            APP_URL / RESEND_API_KEY / MAIL_FROM, which
-                          previously existed only in render.yaml
-  scripts/password-reset-test.mjs      NEW
-  scripts/password-reset-ui-test.mjs   NEW
-  scripts/mail-test.mjs                the reset link is the first
-                                       message that links anywhere but
-                                       the front door; named as an
-                                       explicit exception
+  src/schema.sql               the ALTER moved below its CREATE; the eight
+                               insured2_ columns
+  src/opportunity-analysis.js  lives(), benefitAt-style maturity on the
+                               later of the two, drivingLife()
+  src/api.js                   OPP_FIELDS, the list query, and the
+                               de-identifier
+  src/extract.js               two opinions vs two people
+  src/opportunity-pdf.js       both lives on the PDF one-pager
+  public/app.js                the tick box, the second block, the two-
+                               lives card, the reader opening the block
+  public/reports.js            both lives on the HTML one-pager
+  public/build.js              the build stamp the footer reads
+  scripts/two-lives-test.mjs      NEW — the Sommers file as the fixture
+  scripts/two-lives-ui-test.mjs   NEW
+  scripts/extract-test.mjs        the two-people rule
+  scripts/schedule-test.mjs       the check that was not checking
 
 DEPLOY
   Copy over, commit, push. Render rebuilds. Hard-refresh; the footer
-  should read 2026-09-10b. No new environment variables — APP_URL and
-  RESEND_API_KEY are already set on your service, and the feature needs
-  exactly those.
-
-  The password_resets table applies itself on boot. No database step.
-
-BEFORE YOU TELL ANYONE ABOUT IT
-  Send yourself one from Settings -> Users -> Edit on your own account
-  and follow it through. That exercises the whole path — the key, the
-  from address, APP_URL, and the link — in about a minute.
+  should read 2026-09-10c. The eight new columns apply themselves on
+  boot. No new environment variables. An ordinary one-insured deal
+  behaves exactly as it did.

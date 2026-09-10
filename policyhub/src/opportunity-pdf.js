@@ -240,6 +240,14 @@ export function opportunityPdf(o, opts = {}) {
 
   const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
     || o.policy_number || '--';
+  /* Both lives on a survivorship deal, initials only. The second insured
+     is as much a person as the first and comes off the paper the same
+     way. */
+  const lives = a.lives || [];
+  const survivorship = !!a.survivorship;
+  const name2 = survivorship
+    ? `${initial(o.insured2_first_name)}${initial(o.insured2_last_name)}` : '';
+  const bothNames = survivorship && name2 ? `${name} & ${name2}` : name;
 
   const doc = new PdfDocument({ title: `Opportunity ${o.policy_number || ''}`,
     margin: MARGIN, size: PAGE, leading: 12 });
@@ -267,12 +275,14 @@ export function opportunityPdf(o, opts = {}) {
 
   /* ----------------------------- headline ---------------------------- */
   doc.reserve(2);
-  at(doc, name, 0, { style: 'sansBold', size: 19 });
+  at(doc, bothNames, 0, { style: 'sansBold', size: 19 });
   doc.y -= 23;
   doc.reserve(1);
   const headBits = [`${money(benefit, 2)} death benefit${changing ? ', rising' : ''}`];
   if (partial) headBits.push(`${share}% participation offered`);
-  if (o.le_months) headBits.push(`life expectancy ${o.le_months} months`);
+  if (o.le_months) headBits.push(survivorship && o.insured2_le_months
+    ? `life expectancy ${o.le_months} / ${o.insured2_le_months} months, two lives`
+    : `life expectancy ${o.le_months} months`);
   if (base) {
     headBits.push(interest === 'compound'
       ? `${rate(base.compound_rate)} at life expectancy, compounded`
@@ -291,8 +301,15 @@ export function opportunityPdf(o, opts = {}) {
     ['Death benefit', money((changing ? atLeBenefit : benefit) * f, 2),
       changing ? `at life expectancy · ${money(benefit * f, 2)} today`
         : partial ? `${share}% of the policy` : 'Net death benefit'],
-    ['Life expectancy', o.le_months ? `${o.le_months} mo` : '--',
-      [o.le_provider, o.le_date ? `report ${shortDate(o.le_date)}` : ''].filter(Boolean).join(' · ')],
+    ['Life expectancy',
+      survivorship && o.insured2_le_months
+        ? `${o.le_months || '--'} / ${o.insured2_le_months} mo`
+        : (o.le_months ? `${o.le_months} mo` : '--'),
+      survivorship
+        ? `two lives · modelled on the later${a.driving_life
+          ? `, the ${a.driving_life.n === 1 ? 'first' : 'second'}` : ''}`
+        : [o.le_provider, o.le_date ? `report ${shortDate(o.le_date)}` : '']
+          .filter(Boolean).join(' · ')],
     ['Average annual premium', money(running.length ? totalPrem * f / running.length : 0, 2),
       running.length ? `${money(totalPrem * f, 2)} over ${running.length} years` : ''],
   ];
@@ -311,7 +328,11 @@ export function opportunityPdf(o, opts = {}) {
   rule(doc, { gray: 0.85, gap: 12 });
 
   /* --------------------------- the scenarios -------------------------- */
-  label(doc, 'Return if the insured lives to...');
+  /* On a survivorship deal the wait is for the second death, not for one
+     insured living on, and a heading that says otherwise invites the
+     reader to read the dates against the wrong life. */
+  label(doc, survivorship
+    ? 'Return if the second death falls...' : 'Return if the insured lives to...');
   if (!scen.length) {
     doc.reserve(1);
     at(doc, 'Not priced -- an asking price and a death benefit are needed.', 0, { size: 8.5 });
@@ -345,6 +366,44 @@ export function opportunityPdf(o, opts = {}) {
     doc.space(6);
   }
 
+  /* --------------------------- the two lives --------------------------- */
+  if (survivorship) {
+    label(doc, 'The two lives -- the benefit is paid on the second death');
+    const lw = [92, 52, 52, 104, 128, 104, 120];
+    let lx = 0;
+    const lcols = ['Insured', 'Age', 'Sex', 'Life expectancy', 'Provider', 'Report date',
+      'Estimate runs out'].map((head, i) => {
+      const c = { head, x: lx, w: lw[i], align: i === 1 || i === 3 ? 'right' : 'left' };
+      lx += lw[i] + 8;
+      return c;
+    });
+    table(doc, lcols, lives.map((l) => [
+      l.initials ? `${l.initials.split('').join('.')}.` : `Life ${l.n}`,
+      l.dob == null ? '--' : String(ageOn(l.dob, new Date().toISOString().slice(0, 10)) ?? '--'),
+      l.gender || '--',
+      l.le_months ? `${l.le_months} mo` : '--',
+      l.le_provider || '--',
+      l.le_date ? shortDate(l.le_date) : '--',
+      l.matures_on ? shortDate(l.matures_on) : '--',
+    ]), { size: 8.5 });
+    doc.space(3);
+    /* Wrapped, not drawn as one line. `at` writes exactly what it is
+       given and the page does not stop it: the first version of this ran
+       off the right edge mid-word, which on a document that leaves the
+       building is worse than saying nothing. */
+    const lifeNote = 'The return is modelled on whichever estimate runs out later'
+      + (a.driving_life ? ` -- the ${a.driving_life.n === 1 ? 'first' : 'second'} life` : '')
+      + ', compared as dates rather than as months because each is counted from its own '
+      + 'report. This is the later of two medians and not a joint life expectancy: a floor '
+      + 'on the wait rather than the expectation of it.';
+    for (const l of wrap(lifeNote, WIDTH, 'regular', 7.2)) {
+      doc.reserve(1);
+      at(doc, l, 0, { size: 7.2 });
+      doc.y -= 9;
+    }
+    doc.space(6);
+  }
+
   /* ------------------------- terms and medicine ----------------------- */
   const colW = (WIDTH - 34) / 2;
   const top = doc.y;
@@ -354,8 +413,14 @@ export function opportunityPdf(o, opts = {}) {
     kv(doc, [
       ['Carrier', o.carrier_name || '--'],
       ['Product', o.product_type || '--'],
-      ['Insured', `${name}${o.insured_dob ? ` · ${ageOn(o.insured_dob)} · ${
-        o.insured_gender || ''}` : ''}`],
+      /* Both, when there are two. A survivorship deal whose terms name
+         one insured invites the reader to price it off one life, which is
+         the mistake this whole section exists to prevent. */
+      [survivorship ? 'Insureds' : 'Insured', lives.length > 1
+        ? lives.map((l) => `${l.initials ? `${l.initials.split('').join('.')}.` : `Life ${l.n}`}${
+          l.dob ? ` · ${ageOn(l.dob)}` : ''}${l.gender ? ` · ${l.gender}` : ''}`).join('   ')
+        : `${name}${o.insured_dob ? ` · ${ageOn(o.insured_dob)} · ${
+          o.insured_gender || ''}` : ''}`],
       ['State', o.insured_state || '--'],
       ['Expected close', shortDate(o.expected_close)],
       ['Offer closes', shortDate(o.offer_closes_on)],

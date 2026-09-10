@@ -5465,14 +5465,22 @@ async function opportunityView() {
           <div class="note">${o.face_amount && o.asking_price
             ? `${(Number(o.asking_price) / Number(o.face_amount) * 100).toFixed(1)}% of face` : ''}</div></div>
         <div><div class="label">Life expectancy</div>
-          <div class="value">${o.le_months ? `${o.le_months} mo` : '—'}</div>
-          <div class="note">${o.le_provider ? `${esc(o.le_provider)} · ` : ''}${
-            o.le_date ? `report ${fmtDate(o.le_date)}` : ''}</div></div>
-        <div><div class="label">Insured</div>
+          <div class="value">${o.le_months ? `${o.le_months} mo` : '—'}${
+  a.survivorship && o.insured2_le_months ? ` / ${o.insured2_le_months} mo` : ''}</div>
+          <div class="note">${a.survivorship
+    ? `two lives · modelled on ${a.driving_life
+      ? `the ${a.driving_life.n === 1 ? 'first' : 'second'}` : 'the later'}`
+    : `${o.le_provider ? `${esc(o.le_provider)} · ` : ''}${
+      o.le_date ? `report ${fmtDate(o.le_date)}` : ''}`}</div></div>
+        <div><div class="label">Insured${a.survivorship ? 's' : ''}</div>
           <div class="value" style="font-size:16px">${ageFrom(o.insured_dob) ?? '—'}${
-            o.insured_gender ? ` · ${esc(o.insured_gender)}` : ''}</div>
-          <div class="note">${o.insured_dob ? `born ${fmtDate(o.insured_dob)}` : ''}${
-            o.insured_state ? ` · ${esc(o.insured_state)}` : ''}</div></div>
+            o.insured_gender ? ` · ${esc(o.insured_gender)}` : ''}${
+  a.survivorship ? ` &amp; ${ageFrom(o.insured2_dob) ?? '—'}${
+    o.insured2_gender ? ` · ${esc(o.insured2_gender)}` : ''}` : ''}</div>
+          <div class="note">${a.survivorship
+    ? 'survivorship — pays on the second death'
+    : `${o.insured_dob ? `born ${fmtDate(o.insured_dob)}` : ''}${
+      o.insured_state ? ` · ${esc(o.insured_state)}` : ''}`}</div></div>
         <div><div class="label">Expected close</div>
           <div class="value" style="font-size:16px">${o.expected_close ? fmtDate(o.expected_close) : '—'}</div></div>
       </div>
@@ -5571,6 +5579,46 @@ async function opportunityView() {
         <span class="muted" style="font-size:12.5px">Surrender value is what the seller could
         take from the carrier today, so a price near it is a price the seller can refuse.
         Internal — investors do not see this card.</span>
+      </div>
+    </div>` : ''}
+
+    ${a.survivorship ? `
+    <div class="card">
+      <div class="card-head"><h2>The two lives</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">the benefit is paid on the second death</span></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th></th><th>Insured</th><th class="num">Age</th><th>Sex</th>
+          <th class="num">Life expectancy</th><th>Provider</th><th>Report date</th>
+          <th>Estimate runs out</th></tr></thead>
+        <tbody>${(a.lives || []).map((l) => `<tr class="${
+    a.driving_life && l.n === a.driving_life.n ? 'at-le' : ''}">
+          <td class="strong">${l.n}</td>
+          ${''/* Composed here from the record's own fields rather than
+                 carried on the analysis: those fields are the ones the
+                 scrubbing governs, so an investor sees initials and a
+                 member of staff sees the name, with no third copy to
+                 keep in step. */}
+          <td>${esc(l.n === 1
+    ? [o.insured_first_name, o.insured_last_name].filter(Boolean).join(' ')
+    : [o.insured2_first_name, o.insured2_last_name].filter(Boolean).join(' ')) || '—'}</td>
+          <td class="num">${ageFrom(l.dob) ?? '—'}</td>
+          <td>${esc(l.gender || '—')}</td>
+          <td class="num">${l.le_months ? `${l.le_months} mo` : '—'}</td>
+          <td>${esc(l.le_provider || '—')}</td>
+          <td>${l.le_date ? fmtDate(l.le_date) : '—'}</td>
+          <td class="strong">${l.matures_on ? fmtDate(l.matures_on) : '—'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--grid)">
+        <span class="muted" style="font-size:12.5px">
+          ${a.driving_life ? `The return is modelled on the <strong>${
+    a.driving_life.n === 1 ? 'first' : 'second'} life</strong>, whose estimate runs out
+          ${fmtDate(a.driving_life.matures_on)} — the later of the two. ` : ''}Compared as
+          dates rather than as months, because each estimate is counted from its own report.
+          This is the later of two medians and not a joint life expectancy: a floor on the
+          wait rather than the expectation of it. The scenarios below are where that is
+          tested.
+        </span>
       </div>
     </div>` : ''}
 
@@ -5879,6 +5927,7 @@ async function openOpportunityDialog(o) {
       ${inputField('Carrier', 'carrier_name', o?.carrier_name)}
       ${selectField('Product type', 'product_type', o?.product_type || '', PRODUCT_TYPES)}
     </div>
+    <div class="dlg-section" id="lifeOneHead" style="display:none">The first insured</div>
     <div class="field-row">
       ${inputField('Insured last name *', 'insured_last_name', o?.insured_last_name, 'text', 'required')}
       ${inputField('First name', 'insured_first_name', o?.insured_first_name)}
@@ -5897,6 +5946,47 @@ async function openOpportunityDialog(o) {
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
       Life expectancy is counted from the report date, not from today — an estimate written
       two years ago has already used two years of itself.</span></div>
+
+    ${''/* The second life on a survivorship contract. Behind a tick box
+           rather than always on screen: most deals have one insured, and
+           a permanently empty second set of name and date fields is six
+           more boxes to skip past on every deal that does not. */}
+    <label class="dlg-check">
+      <input type="checkbox" id="twoLives" name="two_lives" value="yes"
+             ${o?.insured2_last_name || o?.insured2_le_months ? 'checked' : ''}>
+      <span><strong>Two insureds</strong> — a survivorship or second-to-die policy, which
+        pays when the second of them dies.</span>
+    </label>
+
+    <div id="lifeTwo" style="display:none">
+      <div class="dlg-section">The second insured</div>
+      <div class="field-row">
+        ${inputField('Insured last name', 'insured2_last_name', o?.insured2_last_name)}
+        ${inputField('First name', 'insured2_first_name', o?.insured2_first_name)}
+        ${inputField('Date of birth', 'insured2_dob', dateInput(o?.insured2_dob), 'date')}
+      </div>
+      <div class="field-row">
+        ${selectField('Gender', 'insured2_gender', o?.insured2_gender || '', ['', 'M', 'F'])}
+        ${stateField('State', 'insured2_state', o?.insured2_state)}
+        ${inputField('Life expectancy (months)', 'insured2_le_months', o?.insured2_le_months, 'number')}
+      </div>
+      <div class="field-row">
+        ${inputField('LE provider', 'insured2_le_provider', o?.insured2_le_provider)}
+        ${inputField('LE report date', 'insured2_le_date', dateInput(o?.insured2_le_date), 'date')}
+        <div class="field"></div>
+      </div>
+      <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+        ${''/* Said here because it is the one thing about this that is
+               not obvious, and getting it wrong prices the deal off the
+               wrong person. */}
+        The return is modelled on <strong>whichever estimate runs out later</strong> — not on
+        the larger number of months. Each is counted from its own report date, so a
+        seventy-month estimate written this year can outlast an eighty-month one written two
+        years ago. This is the later of two medians and not a joint life expectancy: it is a
+        floor on the wait rather than the expectation of it, and the "24 months late" row is
+        where that gets tested.
+      </span></div>
+    </div>
 
     ${''/* A benefit that steps year by year is a different trade at every
            maturity date, not the same one priced three times, so it gets
@@ -5977,6 +6067,17 @@ async function openOpportunityDialog(o) {
        does not see -- so without this, turning the flag off would leave it
        on. Said explicitly either way. */
     v.changing_death_benefit = v.changing_death_benefit === 'yes';
+
+    /* `two_lives` is a switch on the form, not a column. Unticking it has
+       to actually clear the second life, or the deal keeps being priced
+       off a person the form no longer shows -- which is the worst of both
+       and impossible to spot from the screen. */
+    const twoLives = v.two_lives === 'yes';
+    delete v.two_lives;
+    if (!twoLives)
+      Object.assign(v, { insured2_last_name: '', insured2_first_name: '', insured2_dob: null,
+        insured2_gender: '', insured2_state: '', insured2_le_months: null,
+        insured2_le_provider: '', insured2_le_date: null });
     if (isNew) {
       const made = await api('/opportunities', { method: 'POST', body: v });
       /* The illustration's ledger, as the schedule the one-pager prints.
@@ -6003,6 +6104,18 @@ async function openOpportunityDialog(o) {
 
   /* The note only earns its space once somebody has said the benefit
      moves; before that it is an answer to a question nobody asked. */
+  /* The second life appears only when somebody says there is one, and
+     the first gains a heading at the same moment — an unlabelled block
+     of fields followed by "The second insured" reads as though the first
+     block belonged to nobody. */
+  const twoBox = $('#twoLives', dlg);
+  const syncLives = () => {
+    $('#lifeTwo', dlg).style.display = twoBox.checked ? '' : 'none';
+    $('#lifeOneHead', dlg).style.display = twoBox.checked ? '' : 'none';
+  };
+  twoBox?.addEventListener('change', syncLives);
+  syncLives();
+
   const dbBox = $('#changingDb', dlg);
   const dbNote = $('#changingDbNote', dlg);
   const syncDb = () => { dbNote.style.display = dbBox.checked ? '' : 'none'; };
@@ -6068,6 +6181,14 @@ function wireDocumentReader(dlg, onPremiums) {
     for (const f of chosen) body.append('files', f, f.name);
     try {
       const got = await api('/opportunities/extract', { method: 'POST', body });
+      /* The second-life fields sit behind a tick box, so the box has to be
+         ticked BEFORE they are written — a hidden block would take six
+         values nobody can see, and the deal would price off a person the
+         form does not show. */
+      if (got.two_lives) {
+        const box = dlg.querySelector('#twoLives');
+        if (box && !box.checked) { box.checked = true; box.dispatchEvent(new Event('change')); }
+      }
       const filled = Object.entries(got.fields || {})
         .filter(([k, v]) => setField(k, v)).length;
       onPremiums(got.premiums || []);
@@ -6107,10 +6228,15 @@ function readSummary(got, filled) {
   return `
     <div class="read-result">
       <div class="read-result-head">${filled} field${filled === 1 ? '' : 's'} filled in${
+        got.two_lives ? ' · two insureds' : ''}${
         got.premiums?.length ? ` · ${got.premiums.length} premium payments scheduled` : ''}</div>
       ${files ? `<ul class="read-list">${files}</ul>` : ''}
       ${les ? `<div class="read-sub">Life expectancy</div><ul class="read-list">${les}</ul>` : ''}
       ${got.notes ? `<div class="read-note">${esc(got.notes)}</div>` : ''}
+      ${got.two_lives ? `<div class="read-note">The reports name two different people, so
+        this has been read as a <strong>survivorship policy</strong> — two insureds, the
+        benefit paid on the second death. The return is modelled on whichever estimate runs
+        out later. Untick "Two insureds" if that is wrong.</div>` : ''}
       <div class="read-check">Check every figure against the documents before you post it.
         The price is not read from anything — it is what you agreed.</div>
     </div>`;

@@ -352,7 +352,7 @@ const INT4_MAX = 2147483647;
  * one bad row. A life expectancy is a number of months a person might
  * live; a hundred years of them is already generous. */
 const FIELD_RANGE = {
-  le_months: [0, 1200], le_months_2: [0, 1200],
+  le_months: [0, 1200], le_months_2: [0, 1200], insured2_le_months: [0, 1200],
   issue_age: [0, 120], grace_period_days: [0, 1825],
 };
 const NUMERIC_16_2_MAX = 1e14;      // NUMERIC(16,2): 14 digits before the point
@@ -371,6 +371,8 @@ const FIELD_LABEL = {
   cost_of_insurance: 'Cost of insurance', loan_balance: 'Loan balance',
   premium_paid_to_date: 'Premium paid to date', monthly_deduction: 'Monthly deduction',
   le_months: 'Life expectancy (months)', le_months_2: 'Second life expectancy (months)',
+  insured2_le_months: 'The second insured’s life expectancy (months)',
+  insured2_dob: 'The second insured’s date of birth',
   insured_dob: 'Date of birth', dob: 'Date of birth',
   issue_age: 'Issue age', grace_period_days: 'Grace period (days)',
   amount: 'Amount', face: 'Death benefit',
@@ -1380,6 +1382,16 @@ const FIRST_KEYS = ['insured_first', 'first_name', 'insured_first_name'];
 const LAST_KEYS = ['insured_last', 'last_name', 'insured_last_name'];
 const WHOLE_KEYS = ['display_name', 'insured', 'insured_name', 'primary_insured'];
 
+/* The second life on a survivorship deal, masked separately.
+ *
+ * It cannot join the lists above. `initialsFor` takes the first non-empty
+ * of FIRST_KEYS to build one set of initials for the row, so adding these
+ * to it would print the FIRST insured's initials against both people --
+ * which is worse than not masking at all, because it looks masked and is
+ * wrong. A second person needs their own initial, taken from their own
+ * field. */
+const SECOND_KEYS = ['insured2_first_name', 'insured2_last_name'];
+
 const initialOf = (v) => {
   const t = str(v).replace(/[^\p{L}]/gu, '');
   return t ? `${t[0].toUpperCase()}.` : '';
@@ -1424,6 +1436,13 @@ function deidentify(value, seen = new WeakSet()) {
     for (const k of WHOLE_KEYS) if (k in out && out[k] !== null) out[k] = whole;
     if (!WHOLE_KEYS.some((k) => k in out)) out.display_name = whole;
   }
+  /* Outside the block above, deliberately. It has to run whether or not
+     the first life is on the same object, and it must not drag a
+     display_name onto a row that never had one. A field that is empty
+     stays empty -- an ordinary deal has no second insured, and writing a
+     mask into a blank would invent one. */
+  for (const k of SECOND_KEYS)
+    if (k in out && str(out[k])) out[k] = initialOf(value[k]);
   return out;
 }
 
@@ -2747,6 +2766,14 @@ const OPP_FIELDS = {
   /* Whether the benefit steps year by year. The figures themselves are
      on the premium schedule; this says whether to read them. */
   changing_death_benefit: bool,
+  /* The second life on a survivorship contract, with its own estimate.
+     `insured2_` rather than `_2` on purpose: `le_months_2` beside it is a
+     second opinion on the FIRST insured, and two fields a keystroke apart
+     meaning different things is how a deal gets priced off the wrong
+     person's estimate. */
+  insured2_last_name: str, insured2_first_name: str, insured2_dob: date,
+  insured2_gender: str, insured2_state: str,
+  insured2_le_months: int, insured2_le_provider: str, insured2_le_date: date,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -2845,6 +2872,13 @@ router.get('/opportunities', wrap(async (req, res) => {
                the figure actually collected -- two numbers for one deal,
                which is worse than none. */
             o.changing_death_benefit,
+            /* The second life, for the same reason: the list solves the
+               same analysis the detail does, and a maturity date read off
+               one life here and two lives there is two answers to one
+               question. Caught by a test that compares them. */
+            o.insured2_last_name, o.insured2_first_name, o.insured2_dob,
+            o.insured2_gender, o.insured2_le_months, o.insured2_le_provider,
+            o.insured2_le_date,
             o.created_at, f.code AS fund_code,
             COALESCE(f.carry_pct, 0)      AS carry_pct,
             COALESCE(t.taken_pct, 0)      AS taken_pct,
