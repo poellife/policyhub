@@ -13,7 +13,7 @@ import { opportunityPdf } from './opportunity-pdf.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
-  mailFromProblem } from './mail.js';
+  appUrlMissing, mailFromProblem } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -26,7 +26,9 @@ import { agreementPdf } from './agreement-pdf.js';
 import { q, pool, audit } from './db.js';
 import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken,
-         hashPassword } from './auth.js';
+         hashPassword, issueToken } from './auth.js';
+import { issueReset, lookupReset, consumeReset, tooManyResets, noteResetRequest,
+         clearResetLocks, pause, RESET_REASON, RESET_TTL_WORDS } from './password-reset.js';
 // A tax number is the one field here that is encrypted rather than merely
 // scoped: see the file for why, and for how the key is chosen.
 import { sealField, openField, digitsOf, maskTaxId } from './secret-field.js';
@@ -616,6 +618,164 @@ const noteRegistration = (ip) =>
 
 router.post('/auth/login', wrap(login));
 router.post('/auth/logout', (req, res) => { clearToken(res); res.json({ ok: true }); });
+
+/* ------------------------------------------------------------------ *
+ * Forgotten passwords
+ *
+ * Three routes, none of them signed in, so they sit up here with the
+ * sign-in and the registration form rather than below `router.use(
+ * authenticate)`.
+ *
+ * The rules they enforce are set out at the top of password-reset.js.
+ * The one worth repeating where somebody editing these will see it: the
+ * answer to "is there an account at this address" is always the same
+ * sentence and always takes about as long, whichever it is. An investor
+ * list is worth fishing for and this is the form you would fish with.
+ * ------------------------------------------------------------------ */
+
+/** Said to everybody, whatever happened. */
+const RESET_SENT = 'If there is an account at that address, a link to set a new password is '
+  + `on its way. It works once and lasts ${RESET_TTL_WORDS}. Check the spam folder if it does `
+  + 'not appear — it comes from the same address as your statements.';
+
+/**
+ * Ask for a link.
+ *
+ * Answers 202 and the same sentence in every case: no account, a
+ * suspended account, a real one. The only reply that differs is 429,
+ * which reveals nothing about the address — it is keyed on the caller as
+ * much as on the mailbox.
+ */
+router.post('/auth/forgot', wrap(async (req, res) => {
+  const startedAt = Date.now();
+  const email = str(req.body?.email).toLowerCase().slice(0, 320);
+  const ip = clientIp(req) || 'unknown';
+
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    await pause(startedAt);
+    return res.status(202).json({ ok: true, message: RESET_SENT });
+  }
+
+  if (await tooManyResets(email, ip)) {
+    await pause(startedAt);
+    return res.status(429).json({
+      error: 'That is a lot of reset requests. Give it an hour, or ring the office and '
+        + 'somebody will send you a link.' });
+  }
+  await noteResetRequest(email, ip);
+
+  /* A link nobody can follow is worse than no link: it reads as a broken
+     product. So a deployment with no address to build one from refuses
+     out loud rather than posting dead letters. */
+  const problem = appUrlMissing();
+  if (problem) {
+    await audit(null, 'user', null, 'update',
+      `a password reset could not be sent — ${problem}`);
+    return res.status(503).json({
+      error: 'Password reset is not configured on this server yet. Ring the office and '
+        + 'somebody will let you in.' });
+  }
+
+  const { rows } = await q(
+    'SELECT id, email, full_name, is_active FROM users WHERE email = $1', [email]);
+  const user = rows[0];
+
+  /* Logged either way, and the miss is logged too: a run of requests for
+     addresses that do not exist is somebody working through a list, and
+     that should be visible on the record rather than silently discarded. */
+  if (!user || !user.is_active) {
+    await audit(null, 'user', user ? user.id : null, 'update',
+      `a password reset was asked for ${user ? 'a suspended account' : 'an address with no account'}`
+      + ` · ${describeOrigin(req)}`);
+    await pause(startedAt);
+    return res.status(202).json({ ok: true, message: RESET_SENT });
+  }
+
+  const token = await issueReset(user.id, { origin: describeOrigin(req) });
+  await sendMail('password_reset', { to: user.email, userId: user.id,
+    name: user.full_name, email: user.email, token });
+  await audit(null, 'user', user.id, 'update',
+    `a password reset link was sent to ${user.email} · ${describeOrigin(req)}`);
+
+  /* Pushed out now rather than on the worker's next minute. Somebody
+     staring at a mailbox waiting to get back into their account is the
+     one case where a minute is a long time. */
+  flushMail({ limit: 5 }).catch(() => {});
+
+  await pause(startedAt);
+  res.status(202).json({ ok: true, message: RESET_SENT });
+}));
+
+/**
+ * Is this link still good?
+ *
+ * Asked by the reset screen before it draws the form, so somebody
+ * holding an expired link is told on arrival rather than after choosing
+ * a password, typing it twice and pressing the button.
+ */
+router.get('/auth/reset/:token', wrap(async (req, res) => {
+  const found = await lookupReset(req.params.token);
+  if (!found.ok)
+    return res.status(400).json({ error: RESET_REASON[found.reason] || RESET_REASON.unknown,
+      reason: found.reason });
+  /* The address is echoed so the screen can say whose account this is —
+     somebody with three mailboxes should not have to guess. Nothing else
+     about the account goes out over an unauthenticated route. */
+  res.json({ ok: true, email: found.user.email });
+}));
+
+/**
+ * Set the new password.
+ *
+ * Everything that has to happen together happens here: the token is
+ * spent, the password is replaced, every other session dies, the
+ * must-change flag clears, the lockout is lifted, and the account is
+ * told by email that it happened.
+ */
+router.post('/auth/reset', wrap(async (req, res) => {
+  const newPassword = String(req.body?.newPassword || '');
+  if (newPassword.length < 10)
+    return res.status(400).json({ error: 'New password must be at least 10 characters' });
+
+  const found = await consumeReset(req.body?.token);
+  if (!found.ok)
+    return res.status(400).json({ error: RESET_REASON[found.reason] || RESET_REASON.unknown,
+      reason: found.reason });
+
+  const user = found.user;
+  const hash = await hashPassword(newPassword);
+  /* Bumped, so every cookie issued before this stops working. The usual
+     reason somebody cannot get into their account is that somebody else
+     can, and a reset that left those sessions alive would be theatre.
+     `must_change_password` clears too: an investor who has forgotten the
+     password the office set has just chosen their own, which is the whole
+     point of that flag. */
+  const { rows: bumped } = await q(
+    `UPDATE users SET password_hash = $1, token_version = token_version + 1,
+                      must_change_password = FALSE
+      WHERE id = $2 RETURNING id, email, role, full_name, investor_id, token_version`,
+    [hash, user.user_id]);
+
+  /* And the failures are cleared. Eight wrong guesses lock an account for
+     fifteen minutes; somebody who then did exactly what they were told
+     and reset it must not be met by that lockout. */
+  await clearResetLocks(String(user.email).toLowerCase(), clientIp(req) || 'unknown');
+
+  await sendMail('password_changed', { to: user.email, userId: user.user_id,
+    name: user.full_name, when: new Date().toLocaleDateString('en-US',
+      { year: 'numeric', month: 'long', day: 'numeric' }),
+    how: 'using a link sent to this address' });
+  flushMail({ limit: 5 }).catch(() => {});
+
+  await audit(user.user_id, 'user', user.user_id, 'update',
+    `password set with a reset link · ${describeOrigin(req)}`);
+
+  /* Signed in on the spot. They have just proved they hold the mailbox
+     and have chosen the password; sending them back to a sign-in screen
+     to type it again is a step that protects nobody. */
+  issueToken(res, bumped[0]);
+  res.json({ ok: true, email: bumped[0].email });
+}));
 router.get('/auth/me', authenticate, wrap(async (req, res) => {
   const out = { id: req.user.uid, email: req.user.email, name: req.user.name, role: req.user.role,
                 must_change_password: !!req.user.mustChangePassword,
@@ -1148,6 +1308,48 @@ router.put('/users/:id', authenticate, blockScoped, requireRole('admin'), wrap(u
 router.delete('/users/:id', authenticate, blockScoped, requireRole('admin'), wrap(deleteUser));
 router.post('/users/:id/password', authenticate, blockScoped,
   requireRole('admin'), wrap(resetPassword));
+
+/**
+ * Send somebody a reset link, from the office.
+ *
+ * The telephone case: an investor rings up saying they cannot get in.
+ * Better than typing a password for them and reading it down the line —
+ * nothing is spoken aloud, nothing is written down, and the link dies in
+ * an hour whether or not they use it.
+ *
+ * Administrators only, like every other route on this screen and for the
+ * same reason: sending a link is choosing which mailbox may take over an
+ * account. A portfolio manager who needs one sent asks an administrator,
+ * and an investor does not need to ask anybody -- "Forgotten your
+ * password?" on the sign-in screen is theirs, which is the point of the
+ * whole feature.
+ */
+router.post('/users/:id/reset-link', authenticate, blockScoped,
+  requireRole('admin'), wrap(async (req, res) => {
+    const id = int(req.params.id);
+    const { rows } = await q(
+      'SELECT id, email, full_name, role, is_active FROM users WHERE id = $1', [id]);
+    const user = rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.is_active)
+      return res.status(400).json({
+        error: 'That account is suspended. Reactivate it first — a reset link will not '
+          + 'let a suspended account in.' });
+
+    const problem = appUrlMissing();
+    if (problem)
+      return res.status(503).json({
+        error: `A reset link cannot be built on this server: ${problem}` });
+
+    const token = await issueReset(user.id,
+      { requestedBy: req.user.uid, origin: describeOrigin(req) });
+    await sendMail('password_reset', { to: user.email, userId: user.id,
+      name: user.full_name, email: user.email, token });
+    flushMail({ limit: 5 }).catch(() => {});
+    await audit(req.user.uid, 'user', user.id, 'update',
+      `sent a password reset link to ${user.email} · ${describeOrigin(req)}`);
+    res.json({ ok: true, email: user.email, expires_in: RESET_TTL_WORDS });
+  }));
 
 // Everything below requires a session AND a fresh read of the account.
 // authenticate is the pair; nothing may sit between its two halves.

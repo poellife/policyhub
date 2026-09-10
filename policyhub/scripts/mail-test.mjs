@@ -185,7 +185,7 @@ const forced = await queueMail({ to: TO, userId: me.id, kind: 'new_location',
 check('a security alert goes anyway', !!forced.id, JSON.stringify(forced));
 check('the kinds that cannot be switched off are the security ones',
   MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind).sort().join(',')
-    === 'bulk_export,new_location',
+    === 'bulk_export,new_location,password_changed,password_reset',
   MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind).join(','));
 await clearPrefs();
 
@@ -222,14 +222,28 @@ const links = MAIL_KINDS.map((k) => ({ kind: k.kind,
    cannot sign in yet, and a link that lands them on a login screen they will
    be refused by is worse than no link. */
 const NO_LINK = new Set(['registration_received']);
+/* And one deliberately goes deeper than the front door. Every other link
+   is a signpost to something behind a password; a reset link IS the
+   thing, and it cannot work any other way -- the token has to travel in
+   the address. The reasons for the rule below do not apply to it: there
+   is no login screen to be dumped on and nothing is lost by arriving
+   directly. Named here rather than exempted quietly, so the next person
+   to add a deep link has to argue for it too. */
+const DEEP_LINK = new Set(['password_reset']);
 check('every message somebody can act on carries a way in',
   links.filter((l) => !NO_LINK.has(l.kind)).every((l) => l.urls.length >= 1),
   links.filter((l) => !NO_LINK.has(l.kind) && !l.urls.length).map((l) => l.kind).join(', '));
 check('and the one that cannot be acted on yet carries none',
   links.find((l) => l.kind === 'registration_received').urls.length === 0);
 check('and it is the sign-in screen, not a page inside the portal',
-  links.every((l) => l.urls.every((u) => u.replace(/[.,)]+$/, '') === 'https://portal.example.test')),
-  links.flatMap((l) => l.urls).filter((u) => u !== 'https://portal.example.test').join(' · '));
+  links.filter((l) => !DEEP_LINK.has(l.kind))
+    .every((l) => l.urls.every((u) => u.replace(/[.,)]+$/, '') === 'https://portal.example.test')),
+  links.filter((l) => !DEEP_LINK.has(l.kind)).flatMap((l) => l.urls)
+    .filter((u) => u !== 'https://portal.example.test').join(' · '));
+check('except the reset link, which goes to the reset screen because that is what it is for',
+  links.find((l) => l.kind === 'password_reset').urls
+    .every((u) => u.startsWith('https://portal.example.test/#/reset/')),
+  links.find((l) => l.kind === 'password_reset').urls.join(' · '));
 
 console.log('\nTHE NAME ON THE ENVELOPE');
 /* The address is the provider's business — an unverified domain bounces and

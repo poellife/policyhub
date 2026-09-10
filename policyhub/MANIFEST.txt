@@ -1,48 +1,71 @@
-PolicyHub — build 2026-09-10a
+PolicyHub — build 2026-09-10b
 Minimal update. Paths are relative to the `policyhub` folder of your repo.
 
-WHAT CHANGED SINCE 09-09a
+WHAT THIS ADDS
 
-  The death benefit and the benefit schedule are now ONE figure.
+  "Forgotten your password?" on the sign-in card. An investor types their
+  address, gets an emailed link, chooses a new password, and is signed
+  in. No password is ever emailed and nothing is read down a telephone.
 
-  They were two: the Death benefit field on the deal, and the first row
-  of the premium schedule. Both claimed to be what the policy pays now,
-  and nothing kept them in step — so retyping the schedule left the
-  deal's field at the original, and the one-pager's headline, its "today"
-  note and its "% of face" all read that stale field. The scenario
-  columns were reading the schedule and were correct throughout, which is
-  why the sheet looked half right.
+  And, for the phone-call case, Settings -> Users -> Edit now has
+  "Email them a reset link". Administrators only.
 
-  Now, on a deal flagged as having a changing benefit:
+THE RULES IT ENFORCES
 
-    edit the benefit on the DEAL      -> year one of the schedule follows
-    edit the figures on the SCHEDULE  -> the deal's headline follows
+  It never says whether an address has an account — the same sentence
+  either way, and about the same length of time either way, because a
+  reply that returns in 4ms for a miss and 400ms for a hit answers the
+  question just as clearly as words would.
 
-  The later years do not move when "today" is edited. 2031's benefit is
-  the carrier's own figure, not something to derive from this year's.
-  The form says so.
+  The token is not stored. Only its SHA-256, for the same reason a
+  password is only stored as a hash.
 
-  A schedule that starts AFTER the expected close says nothing about
-  today, so the figure on the deal is left to cover that stretch alone.
+  One hour, one use. Asking again retires the previous link, so nobody
+  clicks a dead link out of an older email.
 
-  Level policies are untouched by all of it.
+  Completing a reset ends every other session, clears the
+  must-change-password flag, AND lifts the fifteen-minute sign-in
+  lockout — without that last one, somebody who did exactly what they
+  were told would still be locked out.
+
+  A suspended account is not let back in by remembering its password.
+
+  A dead link says so on arrival, not after a password has been chosen
+  and typed twice.
 
 FILES
 
-  src/api.js       syncBenefitToSchedule / syncScheduleToBenefit, called
-                   from PUT /opportunities/:id and from the premium
-                   schedule write
-  public/app.js    the deal form now says the field is year one and that
-                   the two records are kept in step
-  public/build.js  the build stamp the footer reads
-  scripts/changing-benefit-test.mjs   seven new checks on exactly this
+  src/schema.sql          the password_resets table, applied on boot
+  src/password-reset.js   NEW — tokens, expiry, throttling, and the
+                          reasoning behind each rule
+  src/api.js              POST /auth/forgot, GET /auth/reset/:token,
+                          POST /auth/reset, POST /users/:id/reset-link
+  src/mail.js             two new kinds (password_reset,
+                          password_changed) and appUrlMissing()
+  src/auth.js             unchanged in behaviour — issueToken is now
+                          exported so the reset can sign somebody in
+  public/app.js           the sign-in link, the two screens, the admin
+                          button
+  public/styles.css       .login-forgot
+  public/build.js         the build stamp the footer reads
+  .env.example            APP_URL / RESEND_API_KEY / MAIL_FROM, which
+                          previously existed only in render.yaml
+  scripts/password-reset-test.mjs      NEW
+  scripts/password-reset-ui-test.mjs   NEW
+  scripts/mail-test.mjs                the reset link is the first
+                                       message that links anywhere but
+                                       the front door; named as an
+                                       explicit exception
 
 DEPLOY
   Copy over, commit, push. Render rebuilds. Hard-refresh; the footer
-  should read 2026-09-10a. No database step, no new environment
-  variables.
+  should read 2026-09-10b. No new environment variables — APP_URL and
+  RESEND_API_KEY are already set on your service, and the feature needs
+  exactly those.
 
-FOR THE CASE THAT WENT WRONG
-  Open the deal and re-save its premium schedule. That one save pulls the
-  headline into line with the figures already entered — nothing needs
-  retyping.
+  The password_resets table applies itself on boot. No database step.
+
+BEFORE YOU TELL ANYONE ABOUT IT
+  Send yourself one from Settings -> Users -> Edit on your own account
+  and follow it through. That exercises the whole path — the key, the
+  from address, APP_URL, and the link — in about a minute.

@@ -26,7 +26,12 @@ async function api(path, opts = {}) {
     body: opts.body instanceof FormData ? opts.body
       : opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401 && !path.startsWith('/auth/login')) {
+  /* A 401 normally means the session went; the page drops to the sign-in
+     screen. Sign-in and the reset routes are the exceptions -- they are
+     reached with no session by design, and bouncing them would replace a
+     useful message ("that link has expired") with a login form. */
+  if (res.status === 401 && !path.startsWith('/auth/login')
+      && !path.startsWith('/auth/forgot') && !path.startsWith('/auth/reset')) {
     state.user = null;
     render();
     throw new Error('Please sign in again');
@@ -1281,6 +1286,174 @@ async function showSecurityNotices() {
 
 /* ------------------------------- login ------------------------------- */
 
+/**
+ * Asking for a link.
+ *
+ * Deliberately says the same thing whatever happened, because the server
+ * does: "if there is an account at that address". A screen that said
+ * "no account with that email" would hand a stranger the one fact worth
+ * fishing for from a list of addresses, and an investor list is worth
+ * fishing for.
+ */
+function forgotView() {
+  return `
+  <div class="login-wrap">
+    <div class="card login-card">
+      <div class="card-body">
+        <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
+        <div class="login-head">Forgotten<br><span class="dim">password.</span></div>
+        <div class="login-sub">We will email you a link</div>
+        <div id="forgotMsg"></div>
+        <form id="forgotForm">
+          <div class="field">
+            <label for="forgotEmail">The email address your account is under</label>
+            <input id="forgotEmail" name="email" type="email" autocomplete="username"
+                   required autofocus>
+          </div>
+          <button class="primary" type="submit" style="width:100%;margin-top:6px">
+            Email me a link</button>
+        </form>
+        <p class="muted" style="font-size:12px;margin:14px 0 0">
+          The link works once and lasts an hour. Your password is never sent by email, and
+          nobody here can see it.
+        </p>
+        <div class="login-alt"><a href="#/login" id="backToLogin">Back to signing in</a></div>
+        <div class="login-meta"><span>Index — 001</span><span>Southfield, MI</span></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function wireForgot() {
+  /* The hash change is what redraws — `hashchange` calls render itself.
+     Calling it here as well runs one render against the route being left
+     and another against the one arriving, and on a screen that awaits the
+     server the slow one lands last. */
+  $('#backToLogin')?.addEventListener('click', (e) => {
+    e.preventDefault(); location.hash = '#/login';
+  });
+  $('#forgotForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#forgotForm button');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Sending…';
+    try {
+      const out = await api('/auth/forgot', { method: 'POST', body: formValues(e.target) });
+      /* The form goes away on success. Leaving it there invites a second
+         and a third press, each of which retires the link the first one
+         sent -- so the person ends up clicking a dead link out of the
+         first email. */
+      $('#forgotForm').remove();
+      $('#forgotMsg').innerHTML = `<div class="notice-box">${esc(out.message
+        || 'If there is an account at that address, a link is on its way.')}</div>`;
+    } catch (err) {
+      $('#forgotMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Email me a link';
+    }
+  });
+}
+
+/**
+ * Following the link.
+ *
+ * The token is checked before the form is drawn, so somebody holding an
+ * expired link is told on arrival rather than after choosing a password
+ * and typing it twice.
+ */
+async function resetView() {
+  const token = state.params.id || '';
+  let who = null;
+  let problem = null;
+  try {
+    who = await api(`/auth/reset/${encodeURIComponent(token)}`);
+  } catch (err) {
+    problem = err.message;
+  }
+
+  const shell = (inner) => `
+  <div class="login-wrap">
+    <div class="card login-card">
+      <div class="card-body">
+        <div class="login-brand"><span class="brand-mark"></span>Poel Capital</div>
+        <div class="login-head">New<br><span class="dim">password.</span></div>
+        ${inner}
+        <div class="login-meta"><span>Index — 001</span><span>Southfield, MI</span></div>
+      </div>
+    </div>
+  </div>`;
+
+  if (problem) {
+    return shell(`
+      <div class="login-sub">That link did not work</div>
+      <div class="error-box" style="margin-top:10px">${esc(problem)}</div>
+      <div class="login-alt"><a href="#/forgot" id="askAgain">Ask for another link</a></div>`);
+  }
+
+  return shell(`
+    ${''/* Not in `.login-sub` — the house style sets that in uppercase
+           mono, and an email address shouted back in capitals reads as an
+           error message rather than as a reassurance. */}
+    <div class="login-sub">choose a new one</div>
+    <p style="margin:-22px 0 18px;font-size:13px">for <strong>${esc(who.email)}</strong></p>
+    <div id="resetMsg"></div>
+    <form id="resetForm">
+      <div class="field">
+        <label for="resetPw">New password (10 characters or more)</label>
+        <input id="resetPw" name="newPassword" type="password" autocomplete="new-password"
+               minlength="10" required autofocus>
+      </div>
+      <div class="field">
+        <label for="resetPw2">Type it again</label>
+        <input id="resetPw2" type="password" autocomplete="new-password" minlength="10" required>
+      </div>
+      <button class="primary" type="submit" style="width:100%;margin-top:6px">
+        Set it and sign me in</button>
+    </form>
+    <p class="muted" style="font-size:12px;margin:14px 0 0">
+      Setting this signs out anything else already signed in to this account, on every
+      device. That is deliberate.
+    </p>`);
+}
+
+function wireReset() {
+  $('#askAgain')?.addEventListener('click', (e) => {
+    e.preventDefault(); location.hash = '#/forgot';
+  });
+  const form = $('#resetForm');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pw = $('#resetPw').value;
+    if (pw !== $('#resetPw2').value) {
+      $('#resetMsg').innerHTML = '<div class="error-box">Those two do not match.</div>';
+      $('#resetPw2').focus();
+      return;
+    }
+    const btn = form.querySelector('button');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Setting it…';
+    try {
+      await api('/auth/reset', { method: 'POST',
+        body: { token: state.params.id || '', newPassword: pw } });
+      /* Signed in already — the server handed back a cookie, because they
+         have just proved they hold the mailbox and chosen the password.
+         Making them type it again protects nobody. */
+      state.user = await api('/auth/me');
+      state.signedOutReason = null;
+      noteActivity();
+      await loadPrefs();
+      location.hash = '#/dashboard';
+      await render();
+      toast('That is your password now');
+    } catch (err) {
+      $('#resetMsg').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Set it and sign me in';
+    }
+  });
+}
+
 function loginView() {
   return `
   <div class="login-wrap">
@@ -1302,6 +1475,13 @@ function loginView() {
           </div>
           <button class="primary" type="submit" style="width:100%;margin-top:6px">Sign in</button>
         </form>
+        ${''/* Its own class rather than a second `.login-alt`: two rows
+               with the same rule above each read as a list of equal
+               options, and these are not equal — one is for somebody who
+               has an account and one is for somebody who does not. */}
+        <div class="login-forgot">
+          <a href="#/forgot" id="forgotLink">Forgotten your password?</a>
+        </div>
         <div class="login-alt">
           <span>New investor?</span>
           <a href="#/register" id="registerLink">Register for access</a>
@@ -7748,8 +7928,11 @@ function openInvestorDialog(inv) {
     <div class="field">
       <div class="strong" style="padding:2px 0">${esc(inv.login_email)}</div>
       <span class="muted" style="font-size:12px">They already sign in with this address.
-        ${isAdmin ? 'A password reset is on Settings → Users.'
-          : 'An administrator can reset the password from Settings.'}</span>
+        ${isAdmin
+    ? 'If they cannot get in, Settings → Users will email them a reset link — better than '
+      + 'reading a password down a telephone.'
+    : 'If they cannot get in, they can use "Forgotten your password?" on the sign-in '
+      + 'screen, or an administrator can email them a link from Settings.'}</span>
     </div>` : ''}`;
 
   const dlg = openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
@@ -8832,7 +9015,21 @@ async function openUserDialog(u, funds, onSaved) {
         This login sees only the policies this investor holds a share of.</span>
     </div>
 
-    ${inputField('Set a new password (optional, 10+ characters)', 'password', '', 'password',
+    ${''/* Two ways to get somebody back in, and the first is better.
+           Emailing a link means nothing is read down a telephone, nothing
+           is written on a pad, and whatever is sent stops working in an
+           hour whether or not it was used. The field below stays for the
+           case where somebody has lost the mailbox too. */}
+    <div class="field">
+      <label>If they cannot get in</label>
+      <div class="row" style="gap:10px;align-items:center">
+        <button type="button" class="btn-sm" id="sendResetBtn">Email them a reset link</button>
+        <span class="muted" id="sendResetMsg" style="font-size:12px">Works once, lasts an
+          hour. Nothing is spoken aloud and nothing is written down.</span>
+      </div>
+    </div>
+
+    ${inputField('…or set a password for them (10+ characters)', 'password', '', 'password',
       'minlength=10 autocomplete=new-password')}
   `, async (v) => {
     // A disabled select submits nothing, so fall back to the record's own values.
@@ -8850,6 +9047,24 @@ async function openUserDialog(u, funds, onSaved) {
     toast(v.password ? 'Account updated and password reset' : 'Account updated');
     onSaved?.();
   }, 'Save changes');
+
+  $('#sendResetBtn', dlg)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const msg = $('#sendResetMsg', dlg);
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    try {
+      const out = await api(`/users/${u.id}/reset-link`, { method: 'POST' });
+      btn.textContent = 'Link sent';
+      msg.innerHTML = `Sent to <strong>${esc(out.email)}</strong>. It works once and lasts
+        ${esc(out.expires_in || 'an hour')}. Anything else already signed in to that account
+        stays signed in until they use it.`;
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Email them a reset link';
+      msg.innerHTML = `<span class="bad">${esc(err.message)}</span>`;
+    }
+  });
 
   const roleSel = $('select[name=role]', dlg);
   const sync = () => {
@@ -10843,6 +11058,26 @@ async function render({ soft = false } = {}) {
   screenKeys = null;
   const app = $('#app');
 
+  /* Before anything else, including whether somebody is signed in.
+     A reset link arrives in a mailbox and is clicked in whatever browser
+     opened it, which may well already be signed in as somebody else --
+     an adviser's machine, a shared office computer. The link is about the
+     account in the email, not about whoever happens to hold a cookie
+     here, so it always draws the reset screen. */
+  if (state.route === 'reset') {
+    /* Its own guard, because this is the only signed-out screen that has
+       to ask the server something before it can draw. Without it, a click
+       that leaves the page mid-lookup is overwritten a moment later by
+       the answer to a question nobody is waiting for any more — the
+       screen visibly goes back to where it just came from. */
+    const token = ++renderToken;
+    const html = await resetView();
+    if (token !== renderToken) return;
+    app.innerHTML = html;
+    wireReset();
+    return;
+  }
+
   if (!state.user) {
     /* Signed out, there are exactly two things a person can be doing:
        signing in, or asking for an account. The register form is a
@@ -10852,6 +11087,13 @@ async function render({ soft = false } = {}) {
     if (state.route === 'register') {
       app.innerHTML = registerView();
       wireRegister();
+      return;
+    }
+    /* Three, now: somebody who has lost their password is doing neither
+       of the above and should not be shown a form they cannot fill in. */
+    if (state.route === 'forgot') {
+      app.innerHTML = forgotView();
+      wireForgot();
       return;
     }
     app.innerHTML = loginView();

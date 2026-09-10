@@ -51,6 +51,25 @@ export function mailFromProblem() {
   return null;
 }
 
+/**
+ * Can a link be built at all?
+ *
+ * A narrower question than `appUrlProblem`, and a different job. That one
+ * is advice for whoever set the deployment up: it complains about a
+ * localhost address because a message posted to a real person carrying a
+ * link to 127.0.0.1 is useless. This one is a gate on a feature that
+ * cannot work without an address, and on a development machine localhost
+ * is not a misconfiguration -- it is the right answer. Refusing there
+ * would make the one feature that has to be tested end to end the one
+ * feature that cannot be.
+ */
+export function appUrlMissing() {
+  const url = APP();
+  if (!url) return 'APP_URL is not set, so a reset link cannot be built.';
+  if (!/^https?:\/\//i.test(url)) return `APP_URL (${url}) is not a web address.`;
+  return null;
+}
+
 export function appUrlProblem() {
   const url = APP();
   if (!url) return 'APP_URL is not set, so messages will not carry a link at all.';
@@ -102,6 +121,17 @@ export const MAIL_KINDS = [
   { kind: 'registration_approved', label: 'Your registration was approved',
     who: 'investor', once: true,
     note: 'Sent when the office opens your account.' },
+  /* Security, and therefore forced: a person who has lost their password
+     must be able to get a link, and a person whose password has just been
+     changed must be told, whatever either of them has switched off. */
+  { kind: 'password_reset', label: 'A link to set a new password',
+    who: 'everyone', forced: true,
+    note: 'Sent when somebody asks to reset their password. Carries a link that '
+      + 'works once and lasts an hour. Never carries a password.' },
+  { kind: 'password_changed', label: 'Your password was changed',
+    who: 'everyone', forced: true,
+    note: 'Sent to you, about your own account, so a change you did not make cannot '
+      + 'happen quietly.' },
 
   /* The other direction. Somebody at the firm hears when an investor does
      something that needs answering — otherwise a request sits in a queue
@@ -308,6 +338,17 @@ function wrapHtml(subject, text) {
  */
 const link = () => APP() || '';
 
+/**
+ * The one exception to the front-door rule above.
+ *
+ * A reset link is not a signpost to something inside the portal — it IS
+ * the thing the email is for, and it cannot work any other way: the token
+ * has to travel in the address. The reasons the rule exists do not apply
+ * here. There is no login screen to be dumped on, nothing is lost by
+ * arriving directly, and the page it lands on is the whole point.
+ */
+const resetLink = (token) => `${link()}/#/reset/${encodeURIComponent(String(token || ''))}`;
+
 export const TEMPLATES = {
   new_location: ({ name, label, when }) => ({
     subject: 'A sign-in from a place your account has not been used before',
@@ -336,6 +377,34 @@ export const TEMPLATES = {
       + `Your first password is not in this email — the office will give it to you directly. `
       + `You will be asked to replace it the first time you sign in, and after that nobody `
       + `here knows it.`,
+  }),
+
+  /* `url` rather than `password`, and it carries a token, not a
+     credential — the office cannot read it out and it is worthless an
+     hour after it is sent. */
+  password_reset: ({ name, email, token }) => ({
+    subject: 'Setting a new password for your Poel Capital portal account',
+    text: `${name ? `${name},\n\n` : ''}Somebody asked to set a new password for the `
+      + `Poel Capital portal account under ${email}.\n\n`
+      + `Use this link and choose a new one:\n\n${resetLink(token)}\n\n`
+      + `It works once and stops working an hour after this email was sent. If it has `
+      + `already expired, ask for another from the sign-in screen — there is a `
+      + `"Forgotten your password?" link under the password box.\n\n`
+      + `If you did not ask for this, you do not need to do anything: the link cannot be `
+      + `used without this email, and your current password still works. If you get these `
+      + `and did not ask, tell the office.\n\n`
+      + `Nobody here can see your password, and we will never ask you for it.`,
+  }),
+
+  password_changed: ({ name, when, how }) => ({
+    subject: 'Your Poel Capital portal password was changed',
+    text: `${name ? `${name},\n\n` : ''}The password on your Poel Capital portal account `
+      + `was changed on ${when}${how ? `, ${how}` : ''}.\n\n`
+      + `Every other session was signed out at the same time, so anything already signed `
+      + `in elsewhere now needs the new password.\n\n`
+      + `If this was you, there is nothing to do.\n\n`
+      + `If it was not, tell the office straight away — somebody else has had access to `
+      + `this mailbox. ${link()}`,
   }),
 
   agreement_out: ({ name, title, parties }) => ({

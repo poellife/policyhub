@@ -1040,6 +1040,42 @@ UPDATE agreement_signers SET party_type = 'Entity'
    --------------------------------------------------------------------- */
 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
 
+/* Forgotten passwords.
+ *
+ * A row is a single, dated permission to set one password without knowing
+ * the old one. Three things about its shape are deliberate.
+ *
+ * THE TOKEN IS NOT HERE. Only its SHA-256 is, for the same reason a
+ * password is only ever stored as a hash: a database that leaks should
+ * not hand the reader a working key to every account that has asked for
+ * one in the last hour. The token exists in the email and in nothing
+ * else.
+ *
+ * IT IS SPENT, NOT DELETED. `used_at` is stamped rather than the row
+ * removed, so a link clicked twice can be told it has already been used
+ * instead of being confused with one that never existed -- and so the
+ * record of who asked, from where, and whether it was acted on survives
+ * for the audit trail.
+ *
+ * IT REMEMBERS WHO ASKED. `requested_by` is null when the person asked
+ * for it themselves and carries the administrator's id when the office
+ * sent it on their behalf, which are different events and should not
+ * read the same afterwards. */
+CREATE TABLE IF NOT EXISTS password_resets (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL UNIQUE,
+  requested_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  origin        TEXT NOT NULL DEFAULT '',
+  expires_at    TIMESTAMPTZ NOT NULL,
+  used_at       TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user
+  ON password_resets (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_password_resets_live
+  ON password_resets (expires_at) WHERE used_at IS NULL;
+
 /* ---------------------------------------------------------------------
     Email that has to go out.
 

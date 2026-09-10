@@ -1356,6 +1356,16 @@ dialog.wide { width: 760px; }
 }
 .login-alt a { font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
 
+/* The way out for somebody who has an account and cannot get into it.
+   Set closer and quieter than the register row below it: it sits under
+   the password box because that is where somebody stuck will be looking,
+   not because it is a second front door. */
+.login-forgot { margin-top: 14px; font-size: 13px; }
+.login-forgot a {
+  color: var(--text-secondary); text-decoration: underline; text-underline-offset: 2px;
+}
+.login-forgot a:hover { color: var(--text-primary); }
+
 .reg-wrap { max-width: 620px; margin: 0 auto; padding: 44px 20px 60px; }
 .reg-head { margin-bottom: 24px; }
 .reg-head h1 {
