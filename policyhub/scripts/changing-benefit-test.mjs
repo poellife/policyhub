@@ -183,6 +183,64 @@ check('it is not extrapolated — inventing growth into the late scenario is the
   at(shortAn, 24).death_benefit < 4000000 + 250000 * 12);
 
 /* ------------------------------------------------------------------ *
+ * One figure, not two
+ *
+ * The benefit lives in two places that both claim to be what the policy
+ * pays now -- the field on the deal, and the first row of the schedule.
+ * They are the same fact. Left to drift, editing one leaves the other on
+ * screen, which is how a one-pager came to print a figure nobody
+ * recognised.
+ * ------------------------------------------------------------------ */
+console.log('\nEDITING EITHER RECORD MOVES THE OTHER');
+const sync = await make('SYNC', { changing_death_benefit: true });
+await post(sync.id, ladder());
+const read = async () => {
+  const x = await json(await api(admin, `/opportunities/${sync.id}`));
+  return { face: Number(x.face_amount), year1: Number(x.premiums[0].death_benefit),
+    scen: x.analysis.scenarios.map((v) => v.death_benefit) };
+};
+const before = await read();
+check('to start with they agree', near(before.face, before.year1),
+  `${before.face} / ${before.year1}`);
+
+await api(admin, `/opportunities/${sync.id}`,
+  { method: 'PUT', body: { face_amount: 6000000 } });
+const afterDeal = await read();
+check('retyping the benefit on the deal moves year one of the schedule with it',
+  near(afterDeal.face, 6000000) && near(afterDeal.year1, 6000000),
+  `${afterDeal.face} / ${afterDeal.year1}`);
+check('and leaves the later years alone, because those are the carrier\u2019s own figures',
+  afterDeal.scen.join() === before.scen.join(), afterDeal.scen.join(' / '));
+
+await post(sync.id, ladder(12, 300000).map((r, i) => ({ ...r,
+  death_benefit: 8000000 + 300000 * i })));
+const afterSched = await read();
+check('and retyping the schedule moves the deal\u2019s headline figure to match — '
+  + 'which is the bug that started this',
+  near(afterSched.face, 8000000) && near(afterSched.year1, 8000000),
+  `${afterSched.face} / ${afterSched.year1}`);
+check('the scenarios follow the schedule too',
+  afterSched.scen.every((v, i) => v > before.scen[i]), afterSched.scen.join(' / '));
+
+/* A schedule that starts after the close says nothing about today, so
+   the figure on the deal is left to cover that stretch on its own. */
+const gap = await make('GAP', { changing_death_benefit: true, expected_close: '2026-03-01' });
+await post(gap.id, [{ due_date: '2030-03-01', amount: 70000, death_benefit: 9000000 }]);
+check('a schedule that starts later does not overwrite the benefit today',
+  near(Number((await json(await api(admin, `/opportunities/${gap.id}`))).face_amount), 4000000));
+
+/* And none of it touches a level deal. Its own fixture, so the sheet
+   checked further down is still the one that was set up for it. */
+const flat = await make('FLAT');
+await post(flat.id, ladder());
+await api(admin, `/opportunities/${flat.id}`, { method: 'PUT', body: { face_amount: 4400000 } });
+const flatBack = await json(await api(admin, `/opportunities/${flat.id}`));
+check('a level deal is untouched by any of this',
+  near(Number(flatBack.face_amount), 4400000)
+  && near(Number(flatBack.premiums[0].death_benefit), 4000000),
+  `${flatBack.face_amount} / ${flatBack.premiums[0].death_benefit}`);
+
+/* ------------------------------------------------------------------ *
  * The list and the detail
  * ------------------------------------------------------------------ */
 console.log('\nTHE LIST AND THE DETAIL AGREE');

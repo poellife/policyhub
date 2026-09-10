@@ -1,59 +1,48 @@
-PolicyHub — build 2026-09-09a
+PolicyHub — build 2026-09-10a
 Minimal update. Paths are relative to the `policyhub` folder of your repo.
 
-WHAT CHANGED
+WHAT CHANGED SINCE 09-09a
 
-  Changing death benefit    A tick box on an opportunity. When it is on,
-                            the premium schedule gains a Death benefit
-                            column — one figure per policy year — and the
-                            return is solved on the benefit in force on
-                            each maturity date rather than on one face
-                            amount for all three scenarios.
+  The death benefit and the benefit schedule are now ONE figure.
 
-                            Each figure stands from its own date until the
-                            next one, so a blank year pays what the year
-                            before pays. Past the end of the schedule the
-                            last figure is HELD LEVEL, not extrapolated.
+  They were two: the Death benefit field on the deal, and the first row
+  of the premium schedule. Both claimed to be what the policy pays now,
+  and nothing kept them in step — so retyping the schedule left the
+  deal's field at the original, and the one-pager's headline, its "today"
+  note and its "% of face" all read that stale field. The scenario
+  columns were reading the schedule and were correct throughout, which is
+  why the sheet looked half right.
 
-  The one-pager             Per-scenario death benefit in the HTML sheet
-                            and the PDF, a Death benefit column in the
-                            year-by-year table, and the assumption stated
-                            on the document.
+  Now, on a deal flagged as having a changing benefit:
 
-  Two bugs found on the way
-                            - The PDF one-pager printed the constant face
-                              amount in all three scenario rows while the
-                              HTML sheet printed a per-scenario figure.
-                              They had already disagreed for an investor
-                              viewing net of carried interest.
-                            - The opportunities list builds its own SQL
-                              rather than SELECT *, so a new column has to
-                              be added there by hand or the list and the
-                              detail quote different rates for one deal.
+    edit the benefit on the DEAL      -> year one of the schedule follows
+    edit the figures on the SCHEDULE  -> the deal's headline follows
+
+  The later years do not move when "today" is edited. 2031's benefit is
+  the carrier's own figure, not something to derive from this year's.
+  The form says so.
+
+  A schedule that starts AFTER the expected close says nothing about
+  today, so the figure on the deal is left to cover that stretch alone.
+
+  Level policies are untouched by all of it.
 
 FILES
 
-  src/schema.sql               opportunities.changing_death_benefit and
-                               opportunity_premiums.death_benefit, both
-                               applied on boot
-  src/api.js                   the bool coercer, OPP_FIELDS, the schedule
-                               write path, the list SELECT
-  src/opportunity-analysis.js  benefitAt() — the benefit in force on a
-                               date — and scenario() using it
-  src/opportunity-pdf.js       the per-scenario benefit and the new column
-  public/app.js                the tick box, the schedule column, the
-                               Death benefit row on the detail table
-  public/reports.js            the HTML one-pager
-  public/build.js              the build stamp the footer reads
-  scripts/changing-benefit-test.mjs      new
-  scripts/changing-benefit-ui-test.mjs   new
+  src/api.js       syncBenefitToSchedule / syncScheduleToBenefit, called
+                   from PUT /opportunities/:id and from the premium
+                   schedule write
+  public/app.js    the deal form now says the field is year one and that
+                   the two records are kept in step
+  public/build.js  the build stamp the footer reads
+  scripts/changing-benefit-test.mjs   seven new checks on exactly this
 
 DEPLOY
   Copy over, commit, push. Render rebuilds. Hard-refresh; the footer
-  should read 2026-09-09a. No database step, no new environment
-  variables. Nothing changes for a policy whose benefit is level.
+  should read 2026-09-10a. No database step, no new environment
+  variables.
 
-HOW TO USE IT
-  Opportunity -> Edit -> tick "Changing death benefit" -> Save.
-  Then Premium schedule: the Death benefit column is there, one row per
-  year. Type only the years that step; leave the rest blank.
+FOR THE CASE THAT WENT WRONG
+  Open the deal and re-save its premium schedule. That one save pulls the
+  headline into line with the figures already entered — nothing needs
+  retyping.

@@ -2798,6 +2798,80 @@ router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => 
   res.status(201).json(rows[0]);
 }));
 
+/**
+ * Keep the deal's death benefit and its benefit schedule saying the same thing.
+ *
+ * A changing benefit is recorded in two places that both claim to be
+ * "what the policy pays now": `face_amount` on the deal, and the first
+ * row of the schedule. They are the same fact, and two records of one
+ * fact drift the moment somebody edits either -- which is exactly what
+ * happened: the benefit was changed on the deal, the schedule went on
+ * governing every date from its first row, and the one-pager printed a
+ * figure nobody recognised.
+ *
+ * So there is one record and the other follows it. The SCHEDULE governs,
+ * because it is the thing with dates on it; `face_amount` is set to the
+ * benefit in force at the expected close and is therefore always the
+ * headline figure a reader expects. When the schedule starts after the
+ * close there is a genuine stretch it does not cover, and `face_amount`
+ * is left alone to cover it.
+ *
+ * Returns the figure it settled on, or null if it changed nothing.
+ */
+async function syncBenefitToSchedule(oppId) {
+  const { rows } = await q(
+    `SELECT o.id, o.face_amount, o.expected_close, o.changing_death_benefit
+       FROM opportunities o WHERE o.id = $1`, [oppId]);
+  const o = rows[0];
+  if (!o || !o.changing_death_benefit) return null;
+
+  const { rows: sched } = await q(
+    `SELECT due_date, death_benefit FROM opportunity_premiums
+      WHERE opportunity_id = $1 AND death_benefit IS NOT NULL
+      ORDER BY due_date`, [oppId]);
+  if (!sched.length) return null;
+
+  const close = o.expected_close ? String(o.expected_close).slice(0, 10) : null;
+  /* The last figure dated on or before the close. Before the first row
+     the schedule says nothing about today, so neither does this. */
+  let now = null;
+  for (const r of sched) {
+    if (close && String(r.due_date).slice(0, 10) > close) break;
+    now = Number(r.death_benefit);
+  }
+  if (now === null || Number(o.face_amount) === now) return null;
+  await q('UPDATE opportunities SET face_amount = $1, updated_at = now() WHERE id = $2',
+    [now, oppId]);
+  return now;
+}
+
+/**
+ * And the other direction: the benefit typed on the deal is year one.
+ *
+ * Somebody correcting the death benefit on the deal form means the
+ * policy pays a different amount now, not that they want a second
+ * opinion stored beside the schedule. So the row the close falls in is
+ * moved to match, and the later steps -- which are separate figures --
+ * are left exactly as they were.
+ */
+async function syncScheduleToBenefit(oppId, faceAmount) {
+  const { rows } = await q(
+    'SELECT expected_close, changing_death_benefit FROM opportunities WHERE id = $1', [oppId]);
+  const o = rows[0];
+  if (!o || !o.changing_death_benefit || faceAmount === null || faceAmount === undefined)
+    return null;
+  const close = o.expected_close ? String(o.expected_close).slice(0, 10) : null;
+  if (!close) return null;
+  const { rows: gov } = await q(
+    `SELECT id FROM opportunity_premiums
+      WHERE opportunity_id = $1 AND death_benefit IS NOT NULL AND due_date <= $2
+      ORDER BY due_date DESC LIMIT 1`, [oppId, close]);
+  if (!gov[0]) return null;
+  await q('UPDATE opportunity_premiums SET death_benefit = $1 WHERE id = $2',
+    [faceAmount, gov[0].id]);
+  return gov[0].id;
+}
+
 router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
   if (!(await oppVisible(req, req.params.id)))
     return res.status(404).json({ error: 'Opportunity not found' });
@@ -2822,8 +2896,26 @@ router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) 
   const { rows } = await q(
     `UPDATE opportunities SET ${sets.join(',')}, updated_at = now() WHERE id = $${next} RETURNING *`,
     [...vals, req.params.id]);
-  await audit(req.user.uid, 'opportunity', rows[0].id, 'update', sets.join(','));
-  res.json(rows[0]);
+
+  /* The death benefit and the benefit schedule are one fact. Whichever
+     was just edited, the other is brought to it rather than left to
+     disagree -- see syncBenefitToSchedule. */
+  let synced = null;
+  if ('face_amount' in req.body) {
+    const moved = await syncScheduleToBenefit(rows[0].id, num(req.body.face_amount));
+    if (moved) synced = 'schedule';
+  }
+  if (!synced && 'changing_death_benefit' in req.body) {
+    const settled = await syncBenefitToSchedule(rows[0].id);
+    if (settled !== null) synced = 'benefit';
+  }
+  const { rows: back } = synced
+    ? await q('SELECT * FROM opportunities WHERE id = $1', [rows[0].id]) : { rows };
+
+  await audit(req.user.uid, 'opportunity', rows[0].id, 'update',
+    `${sets.join(',')}${synced === 'schedule' ? ' · year one of the benefit schedule moved with it'
+      : synced === 'benefit' ? ' · death benefit taken from the benefit schedule' : ''}`);
+  res.json(back[0]);
 }));
 
 router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manager'),
@@ -3850,9 +3942,14 @@ router.post('/opportunities/:id/premium-schedule', blockInvestors, oppEdit, wrap
     } finally {
       client.release();
     }
+    /* The schedule governs, so the deal's headline figure is taken from
+       it rather than left at whatever was typed before the schedule
+       existed. */
+    const settled = await syncBenefitToSchedule(Number(req.params.id));
     await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
-      `premium schedule: ${rows.length} payment${rows.length === 1 ? '' : 's'} entered by hand`);
-    return res.json({ ok: true, written: rows.length });
+      `premium schedule: ${rows.length} payment${rows.length === 1 ? '' : 's'} entered by hand${
+        settled === null ? '' : ` · death benefit now ${settled}`}`);
+    return res.json({ ok: true, written: rows.length, death_benefit: settled });
   }
 
   const start = date(req.body.start_date);

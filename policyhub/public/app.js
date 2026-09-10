@@ -5736,6 +5736,13 @@ async function openOpportunityDialog(o) {
     : 'Create the deal first, then enter the year-by-year figures on its premium schedule.'}
         Each figure stands from its own date until the next one, and the last figure is
         carried level beyond the end of the schedule rather than assumed to keep rising.
+        ${''/* Said because the alternative is finding out: the two records
+               are kept in step, and the field above is year one rather
+               than a separate figure sitting beside the schedule. */}
+        <br><br>The benefit above is <strong>year one</strong>. Changing it here moves the
+        first row of the schedule to match, and changing that row moves this — they are one
+        figure, not two. The later years are the carrier's own figures and are edited on the
+        schedule.
       </span>
     </div>
     <div class="field-row">
