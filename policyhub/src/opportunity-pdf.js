@@ -445,15 +445,8 @@ export function opportunityPdf(o, opts = {}) {
      premiums came to $1,908,000, two figures on one line that cannot
      both be true. */
   const perYear = base ? Number(base.premium_per_year) * f || 0 : 0;
-  /* "About $403,047" is a sentence arguing with itself. Rounded for the
-     cover only; every total on the document stays exact. */
-  const roughly = (v) => (Math.abs(v) >= 100000 ? Math.round(v / 1000) * 1000
-    : Math.abs(v) >= 10000 ? Math.round(v / 100) * 100 : Math.round(v));
-  /* Said only when it is worth saying. A level schedule described as an
-     average invites the reader to wonder what is being smoothed over. */
-  const premiumMoves = !!(base && base.premium_first_year && base.premium_last_year
-    && Math.abs(base.premium_last_year - base.premium_first_year)
-      > 0.15 * base.premium_first_year);
+
+
   /**
    * A scenario's return, in whichever convention the reader has chosen.
    *
@@ -494,16 +487,21 @@ export function opportunityPdf(o, opts = {}) {
     total: base ? Number(base.invested) * f : 0,
     price: price * f,
     perYear,
-    /* On a LEVEL schedule, quote the level amount rather than the mean.
-       A policy costing exactly $313,481 every year is described as
-       "about $323,000 a year" by an average, because the premium falling
-       on the closing day is inside the term as well as at the start of
-       it. The average is right and the sentence is wrong; the reader is
-       not multiplying, the grid below carries the total, and the figure
-       they will check against the carrier's bill is the level one. */
-    putInNote: `${money(price * f, 0)} at closing, then about ${
-      money(roughly(premiumMoves ? perYear : (Number(base?.premium_first_year) * f || perYear)),
-        0)} a year${premiumMoves ? ' on average' : ''}`,
+    /* No per-year figure here, on request, and it is the right call.
+       A single number standing for a whole schedule is a summary, and a
+       summary of an optimised survivorship schedule -- level early, thin
+       through the middle, a spike at extreme age -- is wrong whichever
+       way it is taken. An average understates the late years; the last
+       year overstates the early ones; the first year says nothing about
+       either. The total is already in the cell below and the schedule
+       itself is overleaf, so the cover names the obligation and sends
+       the reader to the page that sets it out. */
+    /* A middot, not an em-dash. `pdfString` transliterates the characters
+       WinAnsi has no glyph for, and an em-dash comes out as "--", which
+       on a finished document reads as a typing mistake. The middot is
+       the separator the rest of this page already uses. */
+    putInNote: `${money(price * f, 0)} at closing, plus annual premiums `
+      + '\u00b7 see the premium schedule for details',
     maturesOn: base ? longMonth(base.matures_on) : '',
     headRate,
     headRateNote,

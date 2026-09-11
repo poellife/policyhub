@@ -97,10 +97,18 @@ check('with the age and sex beside it, which identify nobody',
   /INSURED Z\.Q\. · 7[0-9] · F/i.test(flat),
   (flat.match(/INSURED[^A-Z]{0,30}/) || [''])[0]);
 
-console.log('\nAND IT SAYS THE OMISSION IS DELIBERATE');
-check('the confidentiality line explains the initials',
-  /identified by initials/i.test(sheetText),
+console.log('\nAND THE NOTICE STAYS, WITHOUT THE EXPLANATION');
+/* The sentence explaining WHY the insured is initials was taken off the
+   sheet on request. It was the document justifying itself to a reader
+   who can already see there is no name on it, and the substance it used
+   to guard is asserted directly above and below: the name is absent, the
+   initials are present, and neither depends on a sentence about them. */
+check('the confidentiality notice is still on the sheet',
+  /Confidential/i.test(sheetText) && /Do not distribute/i.test(sheetText),
   (sheetText.match(/Confidential[^\n]*/i) || [''])[0].slice(0, 130));
+check('and the explanation of the initials is gone',
+  !/identified by initials/i.test(sheetText)
+  && !/not needed to weigh the deal/i.test(sheetText));
 
 console.log('\nTHE REST OF THE SHEET IS UNCHANGED');
 check('the medical picture is still there — it is what the reader is weighing',

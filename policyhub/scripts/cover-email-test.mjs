@@ -67,9 +67,22 @@ if (!deal?.id) { console.log('  FAIL  fixture'); process.exit(1); }
 /* Premiums that run PAST the expected maturity, deliberately: the cover
    cell headed "to maturity" must count six of them, not ten, or it stops
    adding up to the total printed beside it. */
-for (let i = 0; i < 10; i++)
-  await api('/opportunity-premiums', { method: 'POST', body: {
-    opportunity_id: deal.id, due_date: `${2026 + i}-10-01`, amount: 313481 } });
+/* Posted through the real route, and CHECKED.
+   These used to go to `/opportunity-premiums`, which does not
+   exist: every one of them 404'd, the fixture had no schedule at
+   all, and the assertions below still passed -- because the deal
+   carries `annual_premium` and the analysis projects from that
+   when there is nothing posted, which lands on the same figures.
+   A suite that is green for a reason it does not state is not a
+   suite. A fixture write that fails now stops the run. */
+for (let i = 0; i < 10; i++) {
+  const r = await api(`/opportunities/${deal.id}/premiums`, { method: 'POST',
+    body: { due_date: `${2026 + i}-10-01`, amount: 313481 } });
+  if (!r.ok) {
+    console.log(`  FAIL  fixture: premium ${2026 + i} -> ${r.status}`);
+    process.exit(1);
+  }
+}
 
 const full = await json(await api(`/opportunities/${deal.id}`));
 const base = full.analysis.base;
@@ -95,21 +108,37 @@ const pdf = opportunityPdf(full, { share: 100, interest: 'simple' });
 const text = pdf.toString('latin1');
 const has = (s) => text.includes(s);
 check('the PDF carries the total invested', has('$4,080,886'), 'expected $4,080,886');
-check('and the split underneath it',
-  has('$2,200,000 at closing') && /\$313,000 a year/.test(text),
-  (/at closing, then about [^)]{0,30}a year/.exec(text) || [])[0]);
-/* The number a reader would check against the carrier's bill.
-   `annual_premium_assumed` -- the run-rate at the END of the posted
-   schedule, which exists only to project past it -- used to be printed
-   here, and on an optimised survivorship schedule that is the spike at
-   extreme age. It read "$911,000 a year" beside a premium total of
-   $1,908,000 over five years. */
-check('and that figure is the premium, not the tail of the schedule',
-  Math.abs(Number(full.analysis.base.premium_first_year) - 313481) < 1,
-  String(full.analysis.base.premium_first_year));
-check('which is not the same as the end-of-schedule run rate it replaced',
-  full.analysis.base.premium_per_year !== full.analysis.base.annual_premium_assumed
-  || full.analysis.base.premium_count === 10);
+/* Matched in pieces, because the note wraps and each drawn line is its
+   own text operator in the file — the whole sentence never appears as
+   one string no matter how right it is. */
+check('and the premiums named under it, without a per-year figure',
+  has('$2,200,000 at closing, plus annual premiums')
+  && /premium schedule for details/.test(text),
+  (/at closing[^)]{0,60}/.exec(text) || [])[0]);
+/* Why there is no figure in that sentence at all.
+   A single number standing for a whole schedule is a summary, and every
+   way of taking it is wrong on an optimised survivorship schedule --
+   level early, thin through the middle, a spike at extreme age. The
+   first version printed `annual_premium_assumed`, which is the run-rate
+   at the END of the posted schedule and exists only to project past it:
+   on a real case that read "$911,000 a year" beside a premium total of
+   $1,908,000 over five years. An average is defensible and still
+   misleads. So the cover names the obligation and points at the page
+   that sets it out. These assert the cover carries NO per-year figure,
+   in either of the readings that were tried. */
+const perYearShapes = [
+  Number(full.analysis.base.annual_premium_assumed),
+  Number(full.analysis.base.premium_per_year),
+  Number(full.analysis.base.premium_first_year),
+].filter((v) => Number.isFinite(v) && v > 0)
+  .map((v) => `$${Math.round(v).toLocaleString('en-US')}`);
+const coverOnly = text.slice(0, text.indexOf('DETAILED VIEW'));
+check('and no per-year figure is quoted on the cover at all',
+  perYearShapes.every((v) => !coverOnly.includes(`${v} a year`)),
+  `none of ${perYearShapes.join(' / ')} followed by "a year"`);
+check('though the analysis still carries one for the detail page',
+  Number(full.analysis.base.premium_per_year) > 0,
+  String(Math.round(full.analysis.base.premium_per_year)));
 check('and the premiums as their own line', has('$1,880,886'));
 /* The SPAN of the hold, not the number of payments and not the length of
    the schedule somebody typed. Ten years are posted; the deal matures in

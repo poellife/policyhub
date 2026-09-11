@@ -50,9 +50,22 @@ const deal = await json(await api('/opportunities', { method: 'POST', body: {
   insured2_dob: '1943-01-24', insured2_gender: 'F',
   insured2_le_months: 71, insured2_le_provider: '21st', insured2_le_date: '2026-08-26',
   thesis: 'Gerald is a repeat seller and the carrier has approved the transfer.' } }));
-for (let i = 0; i < 8; i++)
-  await api('/opportunity-premiums', { method: 'POST', body: {
-    opportunity_id: deal.id, due_date: `${2026 + i}-10-01`, amount: 313481 } });
+/* Posted through the real route, and CHECKED.
+   These used to go to `/opportunity-premiums`, which does not
+   exist: every one of them 404'd, the fixture had no schedule at
+   all, and the assertions below still passed -- because the deal
+   carries `annual_premium` and the analysis projects from that
+   when there is nothing posted, which lands on the same figures.
+   A suite that is green for a reason it does not state is not a
+   suite. A fixture write that fails now stops the run. */
+for (let i = 0; i < 8; i++) {
+  const r = await api(`/opportunities/${deal.id}/premiums`, { method: 'POST',
+    body: { due_date: `${2026 + i}-10-01`, amount: 313481 } });
+  if (!r.ok) {
+    console.log(`  FAIL  fixture: premium ${2026 + i} -> ${r.status}`);
+    process.exit(1);
+  }
+}
 
 /* Somebody to address it to. */
 const investors = await json(await api('/investors'));
@@ -82,9 +95,13 @@ console.log('THE COVER LEADS WITH WHAT YOU PUT IN, IN FULL');
 const cover = (await p.locator('.opp-cover').innerText()).replace(/\s+/g, ' ');
 check('the first big figure is the total, not the purchase price',
   /YOU PUT IN \$4,080,886/i.test(cover), cover.slice(0, 120));
-check('and the split is written under it',
-  /\$2,200,000 at closing, then about \$313,000 a year/i.test(cover),
-  (/at closing[^·]{0,40}a year/.exec(cover) || [])[0]);
+/* Scoped to the "You put in" cell. "a year, simple" belongs to the
+   Expected return cell two columns along and is exactly right there. */
+const putIn = cover.slice(cover.indexOf('YOU PUT IN'), cover.indexOf('YOU COLLECT'));
+check('and the premiums are named under it, without a per-year figure',
+  /\$2,200,000 at closing, plus annual premiums/i.test(putIn)
+  && /see the premium schedule for details/i.test(putIn)
+  && !/a year/i.test(putIn), putIn.slice(0, 120));
 check('the death benefit is beside it', /\$10,000,000/.test(cover));
 check('and the return', /31\.07%|31\.1%/.test(cover));
 check('the premium total gets a cell of its own', /\$1,880,886/.test(cover));

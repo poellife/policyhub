@@ -1593,13 +1593,7 @@ function coverBlock(c) {
      and it printed "$911,000 a year" against a five-year hold costing
      $1,908,000 in total. */
   const perYear = Number(base.premium_per_year) * f || 0;
-  const premiumMoves = !!(base.premium_first_year && base.premium_last_year
-    && Math.abs(base.premium_last_year - base.premium_first_year)
-      > 0.15 * base.premium_first_year);
-  /* "About $403,047" is a sentence arguing with itself. The cover only;
-     every total on the document stays exact. */
-  const roughly = (v) => (Math.abs(v) >= 100000 ? Math.round(v / 1000) * 1000
-    : Math.abs(v) >= 10000 ? Math.round(v / 100) * 100 : Math.round(v));
+
   const collect = (base.death_benefit ?? benefit) * f;
   const headRateNote = c.interest === 'compound' ? 'a year, compounded'
     : c.interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
@@ -1641,14 +1635,15 @@ function coverBlock(c) {
   ];
 
   const lead = [
-    /* On a level schedule the level amount, not the mean: a policy
-       costing exactly $313,481 a year is described as "about $323,000"
-       by an average, because the premium falling on the closing day sits
-       inside the term as well as at the start of it. */
+    /* No per-year figure, on request. A single number standing for a
+       whole schedule is a summary, and a summary of an optimised
+       survivorship schedule is wrong whichever way it is taken: an
+       average understates the late years, the last year overstates the
+       early ones. The total is in the cell below and the schedule is
+       further down the sheet. */
     ['You put in', money0(Number(base.invested) * f),
-      `${money0(price * f)} at closing, then about ${money0(roughly(premiumMoves
-        ? perYear : (Number(base.premium_first_year) * f || perYear)))} a year${
-        premiumMoves ? ' on average' : ''}`],
+      `${money0(price * f)} at closing, plus annual premiums · see the premium `
+      + 'schedule for details'],
     ['You collect', money0(collect), monthYear(base.matures_on)],
     ['Expected return', c.rateCell(base.rate, base.compound_rate), headRateNote],
   ];
@@ -1714,12 +1709,11 @@ export function buildOpportunitySheet(o, opts = {}) {
 
   const total = rows.reduce((s, r) => s + r.amount, 0);
   const years = rows.length;
-  const avg = years ? total / years : 0;
   /* What a year costs over the HOLDING PERIOD, from the analysis.
-     `avg` above divides the whole posted schedule by its own length —
-     twenty years of it on an optimised survivorship policy — and is the
-     wrong answer to "what does this cost me a year" for somebody whose
-     money is out for five. */
+     There is deliberately no average of the posted schedule anywhere on
+     this sheet any more: dividing twenty typed years by twenty describes
+     no year of an optimised survivorship policy and is not the cost of
+     holding it either. */
   const perYear = Number(base?.premium_per_year) * f || 0;
   const dynamics = describeRuns(rows, o.insured_dob);
 
@@ -1791,9 +1785,12 @@ export function buildOpportunitySheet(o, opts = {}) {
     ${letterhead('Life Settlement Investment Opportunity',
       `${esc(o.carrier_name || '—')}${o.policy_number ? ` · ${esc(o.policy_number)}` : ''}`,
       opts.asOf || longDate(), 'Overview')}
-    <div class="rpt-confidential">Confidential — for qualified investors only. Do not distribute.
-      The insured is identified by initials: this sheet carries the medical picture behind the
-      life expectancy, and a name is not needed to weigh the deal.</div>
+    ${''/* Just the notice. The sentence explaining WHY the insured is
+           initials was the document justifying itself to the reader, and
+           a reader who has been handed a medical summary with no name on
+           it can see what has been done without being told. */}
+    <div class="rpt-confidential">Confidential — for qualified investors only.
+      Do not distribute.</div>
 
     ${coverBlock({ o, a, base, scen, f, share, partial, changing, survivorship,
     bothNames, benefit, price, lives, runningRows, interest, rateCell })}
@@ -1918,7 +1915,12 @@ export function buildOpportunitySheet(o, opts = {}) {
           <table class="rpt-kv">
             <tr><td>Years covered</td><td>${years}</td></tr>
             <tr><td>Total premiums${partial ? ` (${share}%)` : ''}</td><td>${fmtExact(total * f)}</td></tr>
-            <tr><td>Average a year</td><td>${fmtExact(avg * f)}</td></tr>
+            ${''/* No average. It divided the whole posted schedule by its
+                   own length — twenty years of it on an optimised
+                   survivorship policy — and produced a figure that
+                   describes no year of this deal and is not the cost of
+                   holding it either. The schedule itself is right below;
+                   a reader who wants a year can read the year. */}
             ${partial ? `<tr><td>Total, whole policy</td><td>${fmtExact(total)}</td></tr>` : ''}
           </table>
           ${dynamics.length ? `<ul class="rpt-bullets">${dynamics.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
