@@ -454,18 +454,36 @@ export function opportunityPdf(o, opts = {}) {
   const premiumMoves = !!(base && base.premium_first_year && base.premium_last_year
     && Math.abs(base.premium_last_year - base.premium_first_year)
       > 0.15 * base.premium_first_year);
-  const headRate = base
-    ? (interest === 'compound' ? rate(base.compound_rate)
-      : interest === 'both' ? `${rate(base.rate)} / ${rate(base.compound_rate)}`
-        : rate(base.rate))
-    : '--';
+  /**
+   * A scenario's return, in whichever convention the reader has chosen.
+   *
+   * ONE function, used by every rate on the cover. It was two: the
+   * headline respected the setting and the early/late cell always
+   * printed `.rate`, the simple-interest reading. On a sheet set to
+   * compounded that put "16.32% a year, compounded" at the top and
+   * "9.53% two years late, 50.06% two years early" three inches below
+   * it, while the scenario table overleaf said 7.74% and 35.55% -- one
+   * document quoting two conventions and labelling only one of them.
+   * Simple interest and an IRR are different numbers; which one is on
+   * the page is the reader's choice, and it has to be the same choice
+   * everywhere on it.
+   */
+  const shownRate = (sc) => {
+    if (!sc) return null;
+    const simple = rate(sc.rate);
+    const comp = rate(sc.compound_rate);
+    if (interest === 'compound') return comp === '--' ? null : comp;
+    if (interest === 'both') {
+      return simple === '--' && comp === '--' ? null : `${simple} / ${comp}`;
+    }
+    return simple === '--' ? null : simple;
+  };
+  const headRate = shownRate(base) || '--';
   const headRateNote = interest === 'compound' ? 'a year, compounded'
     : interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
   const swing = [
-    scenLate && rate(scenLate.rate) !== '--'
-      ? `${rate(scenLate.rate)} two years late` : null,
-    scenEarly && rate(scenEarly.rate) !== '--'
-      ? `${rate(scenEarly.rate)} two years early` : null,
+    shownRate(scenLate) ? `${shownRate(scenLate)} two years late` : null,
+    shownRate(scenEarly) ? `${shownRate(scenEarly)} two years early` : null,
   ].filter(Boolean).join(', ');
 
   cover(doc, {

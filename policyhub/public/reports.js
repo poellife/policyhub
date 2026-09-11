@@ -1603,9 +1603,23 @@ function coverBlock(c) {
   const collect = (base.death_benefit ?? benefit) * f;
   const headRateNote = c.interest === 'compound' ? 'a year, compounded'
     : c.interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
+  /* The same convention as the headline, and as the table overleaf.
+     This cell used to print `.rate` -- the simple-interest reading --
+     whatever the reader had chosen, so a sheet set to compounded said
+     "16.32% a year, compounded" at the top and "9.53% two years late"
+     underneath, against 7.74% in the scenario table. One document, two
+     conventions, one of them unlabelled. `rateCell` carries markup for
+     the "both" case; this is the same rule in plain text, because the
+     grid cells are escaped. */
+  const shownRate = (sc) => {
+    if (!sc) return null;
+    if (c.interest === 'compound') return fmtRate(sc.compound_rate);
+    if (c.interest === 'both') return `${fmtRate(sc.rate)} / ${fmtRate(sc.compound_rate)}`;
+    return fmtRate(sc.rate);
+  };
   const swing = [
-    late ? `${fmtRate(late.rate)} two years late` : null,
-    early ? `${fmtRate(early.rate)} two years early` : null,
+    late ? `${shownRate(late)} two years late` : null,
+    early ? `${shownRate(early)} two years early` : null,
   ].filter(Boolean).join(', ');
 
   const grid = [

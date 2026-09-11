@@ -132,6 +132,45 @@ check('the cover is a page of its own', /\/Count 3/.test(text) || /\/Count [3-9]
 check('no insured name is drawn on any page',
   !/Sommers/.test(text) && !/Gerald/.test(text) && !/Judith/.test(text));
 
+/* ------------------------------------------------------------------ *
+ * One convention, everywhere on the page
+ * ------------------------------------------------------------------ */
+/* Simple interest and an IRR are different numbers. Which one is on the
+   sheet is the reader's choice; what is NOT negotiable is that it is the
+   same choice in every cell. The cover's early/late figures used to print
+   `.rate` -- the simple reading -- whatever was chosen, so a sheet set to
+   compounded carried "16.32% a year, compounded" at the top, "9.53% two
+   years late" three inches below it, and 7.74% in the scenario table
+   overleaf. Nothing on the page said they were three different things.
+
+   Asserted against the SCENARIOS rather than against fixed strings, so
+   this keeps working when the fixture's figures move. */
+console.log('\nAND ONE INTEREST CONVENTION, EVERYWHERE ON IT');
+const pct = (v) => `${(Number(v) * 100).toFixed(2)}%`;
+const scenOf = (m) => full.analysis.scenarios.find((x) => x.offset_months === m);
+for (const mode of ['simple', 'compound']) {
+  const page = opportunityPdf(full, { share: 100, interest: mode }).toString('latin1');
+  const key = mode === 'compound' ? 'compound_rate' : 'rate';
+  const other = mode === 'compound' ? 'rate' : 'compound_rate';
+  const want = [0, 24, -24].map((m) => pct(scenOf(m)[key]));
+  const wrong = [24, -24].map((m) => pct(scenOf(m)[other]));
+  check(`on ${mode}, the cover carries the ${mode} figures`,
+    want.every((v) => page.includes(v)), `${want.join(' / ')}`);
+  check(`and none of the ${mode === 'compound' ? 'simple' : 'compounded'} ones`,
+    wrong.every((v) => !page.slice(0, page.indexOf('DETAILED VIEW')).includes(v)),
+    `must not appear: ${wrong.join(' / ')}`);
+}
+/* And the same reading is what the scenario table overleaf prints, which
+   is the comparison a person actually makes when they turn the page. */
+const compounded = opportunityPdf(full, { share: 100, interest: 'compound' })
+  .toString('latin1');
+check('the cover and the table overleaf agree',
+  compounded.indexOf(pct(scenOf(24).compound_rate))
+    < compounded.indexOf('RETURN IF THE SECOND DEATH')
+  && compounded.split(pct(scenOf(24).compound_rate)).length >= 3,
+  `${pct(scenOf(24).compound_rate)} appears ${
+    compounded.split(pct(scenOf(24).compound_rate)).length - 1} times`);
+
 /* An unpriced deal still has to produce a page rather than a page of
    dashes, because a deal is entered before it is priced. */
 const bare = await json(await api('/opportunities', { method: 'POST', body: {
