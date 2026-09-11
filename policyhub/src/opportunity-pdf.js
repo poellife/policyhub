@@ -292,8 +292,7 @@ function cover(doc, c) {
   } else {
     const top = doc.y;
     const lead = [
-      ['You put in', money(c.total, 0),
-        `${money(c.price, 0)} at closing, then about ${money(c.perYear, 0)} a year`],
+      ['You put in', money(c.total, 0), c.putInNote],
       ['You collect', money(c.collect, 0), c.maturesOn || ''],
       ['Expected return', c.headRate, c.headRateNote],
     ];
@@ -304,25 +303,49 @@ function cover(doc, c) {
       /* 34pt is chosen so that the widest figure this desk writes --
          a ten-figure sum -- still fits a third of a landscape page. */
       say(v, i * cw, { style: 'sansBold', size: 34 }, 12);
-      say(n, i * cw, { size: 9.5 }, 0);
+      /* Wrapped, not drawn as one line. `at` writes exactly what it is
+         given and the page does not stop it; the note under "You put in"
+         is the longest string on this page and grows with the figures. */
+      const lines = wrap(String(n), cw - 22, 'regular', 9.5);
+      for (const l of lines) say(l, i * cw, { size: 9.5 }, 1.5);
     });
     doc.y = top - 118;
     rule(doc, { gray: 0.88, gap: 24 });
 
     /* ---------------------- the same figures, open ---------------------- */
+    /* The rows are measured, not spaced by a guess.
+       Every value here is wrapped -- "Survivorship universal life,
+       Pacific Life Insurance Company" is longer than a third of the page
+       and used to run off the right edge mid-word -- and once a cell can
+       take two lines, a fixed 50-point row pitch drops the second row's
+       caption under the first row's overflow. So row two starts below
+       whichever cell in row one ran longest. */
     const rowTop = doc.y;
-    c.grid.forEach(([k, v], i) => {
+    const cell = c.grid.map(([, v]) => wrap(String(v), cw - 22, 'regular', 12));
+    const tallest = (r) => Math.max(...cell.slice(r * 3, r * 3 + 3).map((l) => l.length), 1);
+    const rowH = (r) => 16 + tallest(r) * 14 + 18;
+    const rowY = [rowTop, rowTop - rowH(0)];
+    const gridH = rowH(0) + rowH(1);
+
+    c.grid.forEach(([k], i) => {
       const col = i % 3;
-      doc.y = rowTop - Math.floor(i / 3) * 50;
-      if (col > 0 && i < 3) divider(col * cw - 16, rowTop, 92);
+      const row = Math.floor(i / 3);
+      doc.y = rowY[row];
+      if (col > 0 && row === 0) divider(col * cw - 16, rowTop, gridH - 14);
       at(doc, String(k).toUpperCase(), col * cw, { style: 'sans', size: 7.5 });
       doc.y -= 16;
-      at(doc, v, col * cw, { size: 12 });
+      for (const l of cell[i]) {
+        at(doc, l, col * cw, { size: 12 });
+        doc.y -= 14;
+      }
     });
-    doc.y = rowTop - 116;
-    rule(doc, { gray: 0.88, gap: 16 });
-    /* The sentence the lead figure cannot say by itself. */
-    at(doc, c.premiumWarning, 0, { size: 10 });
+    doc.y = rowTop - gridH;
+    /* No closing sentence. It said the premiums were a commitment and
+       that a life expectancy is a median -- both true, both on the
+       detail pages and in the disclaimer, and both removed from the
+       cover on request. The lead figure already IS the commitment: it
+       is the purchase price and every premium added together, which is
+       the whole reason it leads. */
   }
 
   /* ----------------------------- footer ----------------------------- */
@@ -413,10 +436,24 @@ export function opportunityPdf(o, opts = {}) {
      own arithmetic is exactly how that happens. */
   const scenLate = scen.find((s) => s.offset_months === 24) || null;
   const scenEarly = scen.find((s) => s.offset_months === -24) || null;
-  const perYear = base
-    ? (Number(base.annual_premium_assumed) * f
-      || (running.length ? totalPrem * f / running.length : 0))
-    : 0;
+  /* What a year of THIS deal costs, from the analysis.
+     Not `annual_premium_assumed`, which is the run-rate at the end of the
+     whole posted schedule and exists only to project past it. On an
+     optimised survivorship schedule -- level while the account value
+     carries it, thin through the middle, a spike at extreme age -- that
+     is the spike. It printed "$911,000 a year" on a five-year hold whose
+     premiums came to $1,908,000, two figures on one line that cannot
+     both be true. */
+  const perYear = base ? Number(base.premium_per_year) * f || 0 : 0;
+  /* "About $403,047" is a sentence arguing with itself. Rounded for the
+     cover only; every total on the document stays exact. */
+  const roughly = (v) => (Math.abs(v) >= 100000 ? Math.round(v / 1000) * 1000
+    : Math.abs(v) >= 10000 ? Math.round(v / 100) * 100 : Math.round(v));
+  /* Said only when it is worth saying. A level schedule described as an
+     average invites the reader to wonder what is being smoothed over. */
+  const premiumMoves = !!(base && base.premium_first_year && base.premium_last_year
+    && Math.abs(base.premium_last_year - base.premium_first_year)
+      > 0.15 * base.premium_first_year);
   const headRate = base
     ? (interest === 'compound' ? rate(base.compound_rate)
       : interest === 'both' ? `${rate(base.rate)} / ${rate(base.compound_rate)}`
@@ -439,6 +476,16 @@ export function opportunityPdf(o, opts = {}) {
     total: base ? Number(base.invested) * f : 0,
     price: price * f,
     perYear,
+    /* On a LEVEL schedule, quote the level amount rather than the mean.
+       A policy costing exactly $313,481 every year is described as
+       "about $323,000 a year" by an average, because the premium falling
+       on the closing day is inside the term as well as at the start of
+       it. The average is right and the sentence is wrong; the reader is
+       not multiplying, the grid below carries the total, and the figure
+       they will check against the carrier's bill is the level one. */
+    putInNote: `${money(price * f, 0)} at closing, then about ${
+      money(roughly(premiumMoves ? perYear : (Number(base?.premium_first_year) * f || perYear)),
+        0)} a year${premiumMoves ? ' on average' : ''}`,
     maturesOn: base ? longMonth(base.matures_on) : '',
     headRate,
     headRateNote,
@@ -452,9 +499,14 @@ export function opportunityPdf(o, opts = {}) {
          headed "to maturity" that quietly counts four extra years does
          not add up to the total in the lead figure beside it. That is
          precisely the drift the cover exists to prevent. */
+      /* The SPAN, not the number of payments. A schedule with a premium
+         due on the closing date and one on each of five anniversaries is
+         six payments across five years, and "over 6 years" printed
+         beside "about 5.0 years" two cells away is the document
+         disagreeing with itself. */
       ['Premiums to maturity', base
         ? `${money(Number(base.premiums_paid) * f, 0)} over ${
-          base.premium_count} year${base.premium_count === 1 ? '' : 's'}`
+          Number(base.years).toFixed(1)} years`
         : running.length ? `${money(totalPrem * f, 0)} entered` : 'None entered yet'],
       ['Policy', [o.product_type ? productName(o.product_type) : 'Life insurance',
         o.carrier_name].filter(Boolean).join(', ')],
@@ -467,9 +519,6 @@ export function opportunityPdf(o, opts = {}) {
         : '--'],
       ['If the wait is longer', swing || 'Not modelled'],
     ],
-    /* The one sentence the lead figure cannot carry on its own. */
-    premiumWarning: 'The premiums are a commitment, not an option: the policy lapses if they '
-      + 'stop, and the benefit goes with it. A life expectancy is a median, not a promise.',
   });
   doc.newPage();
 
@@ -535,8 +584,20 @@ export function opportunityPdf(o, opts = {}) {
           ? `, the ${a.driving_life.n === 1 ? 'first' : 'second'}` : ''}`
         : [o.le_provider, o.le_date ? `report ${shortDate(o.le_date)}` : '']
           .filter(Boolean).join(' · ')],
-    ['Average annual premium', money(running.length ? totalPrem * f / running.length : 0, 2),
-      running.length ? `${money(totalPrem * f, 2)} over ${running.length} years` : ''],
+    /* The holding period, not the whole posted schedule.
+       This tile used to average every row somebody had typed -- twenty
+       years of them on an optimised survivorship policy -- and report
+       "$215,850 a year" to an investor whose five-year hold actually
+       costs $403,000 a year. The same confusion as the cover's $911,000
+       and in the opposite direction, which is worse: one overstates the
+       bill and the other hides it. What is posted beyond the modelled
+       maturity is still said, underneath, because it is real. */
+    ['Annual premium to maturity', money(perYear, 2),
+      base ? `${money(Number(base.premiums_paid) * f, 2)} over ${
+        Number(base.years).toFixed(1)} years${running.length && base.premium_count
+        && running.length > base.premium_count
+        ? ` · ${money(totalPrem * f, 2)} posted in all` : ''}`
+        : (running.length ? `${money(totalPrem * f, 2)} posted` : '')],
   ];
   doc.reserve(4);
   const tileTop = doc.y;

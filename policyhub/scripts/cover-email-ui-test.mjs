@@ -83,14 +83,16 @@ const cover = (await p.locator('.opp-cover').innerText()).replace(/\s+/g, ' ');
 check('the first big figure is the total, not the purchase price',
   /YOU PUT IN \$4,080,886/i.test(cover), cover.slice(0, 120));
 check('and the split is written under it',
-  /\$2,200,000 at closing, then about \$313,481 a year/i.test(cover));
+  /\$2,200,000 at closing, then about \$313,000 a year/i.test(cover),
+  (/at closing[^·]{0,40}a year/.exec(cover) || [])[0]);
 check('the death benefit is beside it', /\$10,000,000/.test(cover));
 check('and the return', /31\.07%|31\.1%/.test(cover));
 check('the premium total gets a cell of its own', /\$1,880,886/.test(cover));
-check('the page says what happens if the premiums stop',
-  /premiums are a commitment, not an option/i.test(cover));
-check('and that a life expectancy is a median',
-  /median, not a promise/i.test(cover));
+/* Both sentences came off the cover on request. The lead figure is the
+   commitment — purchase price plus every premium — and the risk language
+   is on the detail pages and in the disclaimer. */
+check('the cover carries no closing caveat any more',
+  !/premiums are a commitment/i.test(cover) && !/median, not a promise/i.test(cover));
 check('nobody is named on it',
   !/Sommers/i.test(cover) && !/Gerald/i.test(cover) && !/Judith/i.test(cover));
 check('the initials are', /G\.S\. & J\.S\./.test(cover));
@@ -109,9 +111,10 @@ const subject = await p.inputValue('#mailSubject');
 const body = await p.inputValue('#mailBody');
 check('with a subject line', /Investment opportunity/.test(subject), subject);
 check('and the same figures the sheet quotes',
-  body.includes('$4,080,886') && body.includes('$10,000,000'));
+  body.includes('$2,200,000') && body.includes('$1,880,886')
+  && body.includes('$10,000,000'), body.slice(0, 200));
 check('it tells the investor to look at the attachment',
-  /attached one-pager/i.test(body));
+  /Please see attached document for more detailed information\./.test(body));
 check('it names the file to attach',
   /one-pager\.pdf/.test(await p.locator('.mail-draft').innerText()));
 check('no name is in the draft',
@@ -133,7 +136,7 @@ if (investors?.length) {
   await p.waitForTimeout(200);
   const back = await p.inputValue('#mailBody');
   check('choosing nobody takes the greeting off again',
-    back.startsWith('We have an opportunity'), back.slice(0, 40));
+    back.startsWith("Here's the detail on a new opportunity"), back.slice(0, 40));
   check('and still does not touch the rest',
     /P\.S\. one line I typed myself\./.test(back));
 }

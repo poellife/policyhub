@@ -1586,9 +1586,20 @@ function coverBlock(c) {
     </div>`;
   }
 
-  const perYear = Number(base.annual_premium_assumed) * f
-    || (runningRows.length
-      ? runningRows.reduce((s2, r) => s2 + r.amount, 0) * f / runningRows.length : 0);
+  /* What a year of THIS deal costs, from the analysis. NOT
+     `annual_premium_assumed`, which is the run-rate at the end of the
+     whole posted schedule and exists only to project past it -- on an
+     optimised survivorship schedule that is the spike at extreme age,
+     and it printed "$911,000 a year" against a five-year hold costing
+     $1,908,000 in total. */
+  const perYear = Number(base.premium_per_year) * f || 0;
+  const premiumMoves = !!(base.premium_first_year && base.premium_last_year
+    && Math.abs(base.premium_last_year - base.premium_first_year)
+      > 0.15 * base.premium_first_year);
+  /* "About $403,047" is a sentence arguing with itself. The cover only;
+     every total on the document stays exact. */
+  const roughly = (v) => (Math.abs(v) >= 100000 ? Math.round(v / 1000) * 1000
+    : Math.abs(v) >= 10000 ? Math.round(v / 100) * 100 : Math.round(v));
   const collect = (base.death_benefit ?? benefit) * f;
   const headRateNote = c.interest === 'compound' ? 'a year, compounded'
     : c.interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
@@ -1616,8 +1627,14 @@ function coverBlock(c) {
   ];
 
   const lead = [
+    /* On a level schedule the level amount, not the mean: a policy
+       costing exactly $313,481 a year is described as "about $323,000"
+       by an average, because the premium falling on the closing day sits
+       inside the term as well as at the start of it. */
     ['You put in', money0(Number(base.invested) * f),
-      `${money0(price * f)} at closing, then about ${money0(perYear)} a year`],
+      `${money0(price * f)} at closing, then about ${money0(roughly(premiumMoves
+        ? perYear : (Number(base.premium_first_year) * f || perYear)))} a year${
+        premiumMoves ? ' on average' : ''}`],
     ['You collect', money0(collect), monthYear(base.matures_on)],
     ['Expected return', c.rateCell(base.rate, base.compound_rate), headRateNote],
   ];
@@ -1633,8 +1650,6 @@ function coverBlock(c) {
     <div class="opp-cover-grid">${grid.map(([k, v]) => `<div class="opp-cover-gcell">
       <div class="opp-cover-k">${esc(k)}</div>
       <div class="opp-cover-gv">${esc(v)}</div></div>`).join('')}</div>
-    <p class="opp-cover-caveat">The premiums are a commitment, not an option: the policy lapses
-      if they stop, and the benefit goes with it. A life expectancy is a median, not a promise.</p>
   </div>`;
 }
 
@@ -1686,6 +1701,12 @@ export function buildOpportunitySheet(o, opts = {}) {
   const total = rows.reduce((s, r) => s + r.amount, 0);
   const years = rows.length;
   const avg = years ? total / years : 0;
+  /* What a year costs over the HOLDING PERIOD, from the analysis.
+     `avg` above divides the whole posted schedule by its own length —
+     twenty years of it on an optimised survivorship policy — and is the
+     wrong answer to "what does this cost me a year" for somebody whose
+     money is out for five. */
+  const perYear = Number(base?.premium_per_year) * f || 0;
   const dynamics = describeRuns(rows, o.insured_dob);
 
   /* Initials, never the name.
@@ -1793,9 +1814,21 @@ export function buildOpportunitySheet(o, opts = {}) {
       ? `, the ${a.driving_life.n === 1 ? 'first' : 'second'}` : ''}`
     : `${esc(o.le_provider || '—')}${o.le_date ? ` · report ${fmtDate(o.le_date)}` : ''}${
       leSecond ? ` · ${esc(leSecond)}` : ''}`}</div></div>
-      <div class="rpt-tile"><div class="rpt-tile-label">${partial ? `Your premiums (avg)` : 'Average annual premium'}</div>
-        <div class="rpt-tile-value">${fmtExact(avg * f)}</div>
-        <div class="rpt-tile-note">${fmtExact(total * f)} over ${years} year${years === 1 ? '' : 's'}</div></div>
+      ${''/* The holding period, not the whole posted schedule. This tile
+             used to average every row somebody had typed — twenty years of
+             them on an optimised survivorship policy — and tell an investor
+             whose five-year hold costs $403,000 a year that the premium was
+             $215,850. The same confusion as the cover's $911,000 and in the
+             opposite direction, which is worse: one overstates the bill, the
+             other hides it. */}
+      <div class="rpt-tile"><div class="rpt-tile-label">${
+  partial ? `Your premium a year` : 'Annual premium to maturity'}</div>
+        <div class="rpt-tile-value">${fmtExact(perYear)}</div>
+        <div class="rpt-tile-note">${base
+    ? `${fmtExact(Number(base.premiums_paid) * f)} over ${Number(base.years).toFixed(1)} years${
+      years > (base.premium_count || 0)
+        ? ` · ${fmtExact(total * f)} posted in all` : ''}`
+    : `${fmtExact(total * f)} over ${years} year${years === 1 ? '' : 's'}`}</div></div>
     </div>
 
     <div class="rpt-block avoid-break">

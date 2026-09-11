@@ -96,14 +96,37 @@ const text = pdf.toString('latin1');
 const has = (s) => text.includes(s);
 check('the PDF carries the total invested', has('$4,080,886'), 'expected $4,080,886');
 check('and the split underneath it',
-  has('$2,200,000 at closing') && /313,481 a year/.test(text));
+  has('$2,200,000 at closing') && /\$313,000 a year/.test(text),
+  (/at closing, then about [^)]{0,30}a year/.exec(text) || [])[0]);
+/* The number a reader would check against the carrier's bill.
+   `annual_premium_assumed` -- the run-rate at the END of the posted
+   schedule, which exists only to project past it -- used to be printed
+   here, and on an optimised survivorship schedule that is the spike at
+   extreme age. It read "$911,000 a year" beside a premium total of
+   $1,908,000 over five years. */
+check('and that figure is the premium, not the tail of the schedule',
+  Math.abs(Number(full.analysis.base.premium_first_year) - 313481) < 1,
+  String(full.analysis.base.premium_first_year));
+check('which is not the same as the end-of-schedule run rate it replaced',
+  full.analysis.base.premium_per_year !== full.analysis.base.annual_premium_assumed
+  || full.analysis.base.premium_count === 10);
 check('and the premiums as their own line', has('$1,880,886'));
-check('the premiums-to-maturity cell counts 6 years, not 10',
-  /\$1,880,886 over 6 years/.test(text), (/\$1,880,886 over \d+ years?/.exec(text) || [])[0]);
-check('the page says what happens if the premiums stop',
-  /premiums are a commitment, not an option/.test(text));
-check('and that a life expectancy is a median',
-  /median, not a promise/.test(text));
+/* The SPAN of the hold, not the number of payments and not the length of
+   the schedule somebody typed. Ten years are posted; the deal matures in
+   5.8, and the cell has to agree with the maturity cell two along from
+   it rather than with the spreadsheet the schedule came from. */
+check('the premiums-to-maturity cell reports the hold, not the whole schedule',
+  /\$1,880,886 over 5\.8 years/.test(text),
+  (/\$1,880,886 over [\d.]+ years?/.exec(text) || [])[0]);
+/* Both sentences came off the cover on request. They are still on the
+   document -- the disclaimer carries the risk language in full -- and
+   still in the covering email, which is checked further down. What the
+   cover says instead is the lead figure itself: the purchase price and
+   every premium added together, which IS the commitment. */
+check('the cover no longer carries the closing caveat',
+  !/premiums are a commitment, not an option/.test(text.slice(0, text.indexOf('DETAILED VIEW'))));
+check('but the document still says a life expectancy is not a promise',
+  /statistical models, not/.test(text) && /longer or shorter than the estimate/.test(text));
 check('the cover is a page of its own', /\/Count 3/.test(text) || /\/Count [3-9]/.test(text),
   (/\/Count \d+/.exec(text) || [])[0]);
 check('no insured name is drawn on any page',
@@ -129,26 +152,45 @@ const draft = await json(await api(`/opportunities/${deal.id}/email?share=100&in
 check('the route composes one', !!draft?.body && !!draft?.subject,
   draft?.error || '');
 const b = String(draft?.body || '');
-check('it quotes the same total the sheet does', b.includes('$4,080,886'));
-check('and the same purchase price', b.includes('$2,200,000'));
+/* No combined total in the note, deliberately: "the purchase price is X,
+   with an additional Y in premiums" is the sentence a buyer reads without
+   working anything out, and the sheet carries the sum. What must hold is
+   that X and Y are the sheet's X and Y. */
+check('it quotes the sheet\u2019s purchase price', b.includes('$2,200,000'));
 check('and the same premium total', b.includes('$1,880,886'));
 check('and the same death benefit', b.includes('$10,000,000'));
 check('it points at the attachment',
-  /attached one-pager/i.test(b) && /attachment/i.test(b));
+  /Please see attached document for more detailed information\./.test(b));
 check('it names the attachment file', /one-pager\.pdf$/.test(draft?.attachment || ''),
   draft?.attachment);
-check('it says the premiums are a commitment',
-  /commitment, not an option/.test(b));
-check('and that a life expectancy is a median', /median, not a promise/.test(b));
-check('it carries the two-years-either-side rates',
-  /two years early/.test(b) && /two years late/.test(b));
+/* The shape, which is fixed on every deal so the sender does not have to
+   proof-read a new letter each time. */
+check('it opens the same way every time',
+  /^Here's the detail on a new opportunity\.$/m.test(b), b.split('\n')[0]);
+check('the policy is described in one sentence',
+  /\$10,000,000 survivorship universal life policy on two insureds, aged 85 and 83, paid on the second death\./
+    .test(b), (b.match(/\$10,000,000[^\n]*/) || [])[0]);
+check('the premiums are their own figure, not folded into a total',
+  /The purchase price is \$2,200,000 at closing, with an additional \$1,880,886 in premiums over the 5\.8 years to the expected maturity\./
+    .test(b), (b.match(/The purchase price[^\n]*/) || [])[0]);
+check('and the return is quoted at the estimate the price is built on',
+  /At the 71 month life expectancy mark, the return is 31\.1% a year, simple interest\./.test(b),
+  (b.match(/At the [^\n]*/) || [])[0]);
+check('it is short — four paragraphs, not a deal sheet',
+  b.split(/\n\n/).filter(Boolean).length <= 5,
+  `${b.split(/\n\n/).filter(Boolean).length} paragraphs`);
 
 console.log('\nAND NO NAME LEAVES IN IT');
 check('not the first insured', !/Gerald/i.test(b) && !/Sommers/i.test(b), b.slice(0, 160));
 check('not the second', !/Judith/i.test(b));
-check('not out of the investment case either, which had the name typed in it',
-  /repeat seller/i.test(b) && !/Gerald/i.test(b));
-check('the initials are there instead', /G\./.test(b) && /J\./.test(b));
+/* The investment case is no longer quoted in the covering note at all —
+   it is a judgement, it belongs on the sheet, and a note that carries it
+   stops being four paragraphs. The scrubber is still exercised directly
+   further down, and the sheet still runs everything through it. */
+check('the investment case stays on the sheet, out of the email',
+  !/repeat seller/i.test(b));
+check('and nothing is left where a name was',
+  !/\bis a repeat seller\b/.test(b), b.slice(0, 80));
 check('no date of birth', !/1941/.test(b) && !/1943/.test(b));
 check('the subject line is clean too',
   !/Sommers/i.test(draft?.subject || '') && !/Gerald/i.test(draft?.subject || ''),
@@ -174,9 +216,11 @@ check('and an empty record changes nothing',
 console.log('\nAND ONLY THE DESK WRITES IT');
 const share = await json(await api(`/opportunities/${deal.id}/email?share=12.5`));
 check('a participation scales every figure in the draft',
-  /\$510,111/.test(share.body) || /\$510,110/.test(share.body),
-  (/What you put in is ([^:]+):/.exec(share.body) || [])[1]);
-check('and says what share is being offered', /12\.5%/.test(share.body));
+  /\$275,000 at closing/.test(share.body) && /\$235,111 in premiums/.test(share.body),
+  (/The purchase price[^\n]*/.exec(share.body) || [])[0]);
+check('and says what share of the policy it is',
+  /your 12\.5% of a \$10,000,000 policy/.test(share.body),
+  (/\$1,250,000[^\n]*/.exec(share.body) || [])[0]);
 
 const invCookie = await login(INVESTOR1.email, INVESTOR1.password);
 const asInvestor = await fetch(`${BASE}/api/opportunities/${deal.id}/email`,
@@ -193,7 +237,8 @@ const single = { ...full, insured2_first_name: null, insured2_last_name: null,
 single.analysis = analyseOpportunity(single, 1, 0);
 const one = opportunityEmail(single, {});
 check('one insured reads as one insured',
-  /on one insured/.test(one.body) && !/second death/.test(one.body));
+  /on one insured, aged \d+\./.test(one.body) && !/second death/.test(one.body),
+  (/policy on[^\n]*/.exec(one.body) || [])[0]);
 
 const unpriced = opportunityEmail({ ...bareFull, analysis: bareFull.analysis }, {});
 check('an unpriced deal is not sent quoting a return',

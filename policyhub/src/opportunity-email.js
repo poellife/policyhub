@@ -20,29 +20,28 @@
        number. The age, the carrier and the size of the policy are
        enough to recognise the deal.
 
-     - THE WHOLE COMMITMENT, not the purchase price. A life settlement
-       is bought twice: once at closing and once a year afterwards until
-       it matures. On a deal where the premiums come to 85% of the
-       purchase price, an email that leads with the price alone is not
-       a summary, it is a sales pitch with the bill left off. The total
-       goes in the second paragraph, in full, with the annual figure
-       beside it and the sentence about what happens if they stop.
+     - THE PREMIUMS ARE THEIR OWN FIGURE. A life settlement is bought
+       twice: once at closing and once a year afterwards until it
+       matures. "The purchase price is $3,475,000 at closing, with an
+       additional $1,908,000 in premiums over the 5.1 years to the
+       expected maturity" is one sentence a buyer reads without having
+       to work anything out. A message quoting the price alone is not a
+       summary; it is a pitch with the bill left off.
 
      - THE ATTACHMENT IS THE DOCUMENT. This is a covering note, not a
-       replacement for the sheet. It is short on purpose and it says
-       where the detail is.
+       replacement for the sheet. It is short on purpose -- four short
+       paragraphs, the same four on every deal, only the figures moving
+       -- and it says where the detail is. A note that reads differently
+       every time is one the sender has to proof-read every time.
 
    Composed, not sent. It comes back to the screen as text somebody
    reads, edits and sends from their own mail client, because a covering
    note is a letter from a person and should be signed by one.
    ===================================================================== */
 
-import { initialOf, scrubNames, namesLeftIn } from '../public/initials.js';
+import { scrubNames, namesLeftIn } from '../public/initials.js';
 
 export { scrubNames };
-
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
-  'August', 'September', 'October', 'November', 'December'];
 
 const money = (v) => {
   const n = Number(v);
@@ -63,13 +62,6 @@ const shortDate = (iso) => {
   return m ? `${m[2]}/${m[3]}/${m[1]}` : null;
 };
 
-const monthYear = (iso) => {
-  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(iso || '').slice(0, 10));
-  return m ? `${MONTHS[Number(m[2]) - 1]} ${m[1]}` : null;
-};
-
-const initial = initialOf;
-
 const ageOn = (dob, on) => {
   if (!dob) return null;
   const b = new Date(`${String(dob).slice(0, 10)}T00:00:00Z`);
@@ -89,16 +81,6 @@ const PRODUCT = {
 const product = (t) => PRODUCT[String(t || '').toUpperCase().replace(/[^A-Z]/g, '')]
   || String(t || '').trim().toLowerCase() || 'life insurance';
 
-/** The first sentence or two of a longer piece of prose. */
-function opening(text, max = 260) {
-  const flat = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!flat) return '';
-  if (flat.length <= max) return flat;
-  const cut = flat.slice(0, max);
-  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '));
-  return stop > 80 ? cut.slice(0, stop + 1) : `${cut.replace(/\s+\S*$/, '')}…`;
-}
-
 /**
  * The covering note.
  *
@@ -117,13 +99,8 @@ export function opportunityEmail(o, opts = {}) {
 
   const a = o.analysis || {};
   const base = a.base || null;
-  const late = (a.scenarios || []).find((s) => s.offset_months === 24) || null;
-  const early = (a.scenarios || []).find((s) => s.offset_months === -24) || null;
 
   const survivorship = !!a.survivorship;
-  const one = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`;
-  const two = `${initial(o.insured2_first_name)}${initial(o.insured2_last_name)}`;
-  const who = survivorship && two ? `${one} and ${two}` : one;
 
   const benefitNow = Number(o.face_amount) || 0;
   const benefitAtLe = Number(base?.death_benefit);
@@ -136,9 +113,6 @@ export function opportunityEmail(o, opts = {}) {
 
   const price = (Number(o.asking_price) || 0) * f;
   const premiums = Number(base?.premiums_paid) * f;
-  const total = Number(base?.invested) * f;
-  const perYear = Number(base?.annual_premium_assumed) * f
-    || (Number(base?.premiums_paid) * f / (Number(base?.years) || 1));
   const years = Number(base?.years);
 
   /* ------------------------------ subject ----------------------------- */
@@ -154,95 +128,87 @@ export function opportunityEmail(o, opts = {}) {
   ].filter(Boolean).join(', ');
 
   /* ------------------------------- body ------------------------------- */
+  /* Four short paragraphs, in the order somebody actually asks the
+     questions: what is it, what does it cost, what does it pay, go and
+     read the attachment. The shape is fixed and only the figures move,
+     because a covering note that reads differently on every deal is one
+     the sender has to proof-read every time.
+     Everything here is the same `loadOpportunity` object the sheet is
+     drawn from, so the message and the paper cannot disagree. */
   const p = [];
   const name = String(opts.to || '').trim();
-  p.push(`${name ? `${name},\n\n` : ''}We have an opportunity for you. `
-    + 'The detail is in the attached one-pager — this is the short version.');
+  p.push(`${name ? `${name},\n\n` : ''}Here's the detail on a new opportunity.`);
 
-  /* What it is. Age and carrier, never a name or a date of birth. */
+  /* ---- what it is. Ages and carrier, never a name or a date of birth. */
   const ages = [ageOn(o.insured_dob, o.expected_close),
     survivorship ? ageOn(o.insured2_dob, o.expected_close) : null].filter((x) => x !== null);
-  const bits = [];
-  if (money(benefitNow)) {
-    bits.push(`${money(benefitNow * f)}${partial ? ` (your ${share}% of a ${
-      money(benefitNow)} policy)` : ''} ${product(o.product_type)} policy`
-      + `${o.carrier_name ? ` with ${o.carrier_name}` : ''}`);
-  } else bits.push(`a ${product(o.product_type)} policy`);
-  if (survivorship) {
-    bits.push(ages.length === 2 ? `on two insureds, aged ${ages[0]} and ${ages[1]}`
-      : 'on two insureds');
-    bits.push('paid on the second death');
-  } else if (ages.length) bits.push(`on one insured, aged ${ages[0]}`);
-  p.push(`${bits.join(', ')}. We identify ${survivorship ? 'them' : 'the insured'} by `
-    + `initials only${who ? `, as ${who}` : ''} — the full file is available under `
-    + 'a signed agreement.');
+  const whom = survivorship
+    ? `${ages.length === 2 ? `on two insureds, aged ${ages[0]} and ${ages[1]}`
+      : 'on two insureds'}, paid on the second death`
+    : (ages.length ? `on one insured, aged ${ages[0]}` : '');
+  const what = `${money(benefitNow * f) || 'A'}${partial
+    ? ` (your ${share}% of a ${money(benefitNow)} policy)` : ''} ${
+    product(o.product_type)} policy${whom ? ` ${whom}` : ''}.`;
+
+  /* ---- what it costs. The premiums are stated as their own figure and
+     not folded into a total: "the purchase price is X, with an
+     additional Y in premiums" is the sentence a buyer reads without
+     having to work out what they have committed to. */
+  const cost = [];
+  if (money(price)) {
+    const over = Number.isFinite(years)
+      ? ` over the ${years.toFixed(1)} years to the expected maturity` : '';
+    cost.push(`The purchase price is ${money(price)} at closing`);
+    if (Number.isFinite(premiums) && premiums > 0) {
+      cost.push(`, with an additional ${money(premiums)} in premiums${over}.`);
+    } else {
+      cost.push('. Premiums are payable on top of it for as long as the policy is held.');
+      warn.push('No premium schedule has been entered, so the email cannot say what the '
+        + 'premiums come to. It says they are payable and points at the attachment.');
+    }
+  }
+  p.push([what, cost.join('')].filter(Boolean).join('\n'));
 
   if (changing) {
     p.push('The death benefit on this policy rises year by year rather than staying level, '
-      + 'so the amount collected depends on when it matures. The schedule is in the '
-      + 'attachment and the figures below are the benefit in force at life expectancy.');
+      + 'so what it collects depends on when it matures. The figure above is the benefit '
+      + 'in force at life expectancy; the schedule is in the attachment.');
   }
 
-  /* What you put in. The whole of it, and the sentence about stopping. */
-  if (Number.isFinite(total) && total > 0) {
-    const closeOn = shortDate(o.expected_close);
-    const over = Number.isFinite(years)
-      ? ` over the ${years.toFixed(1)} years to the expected maturity` : '';
-    p.push(`What you put in is ${money(total)}: ${money(price)} at closing`
-      + `${closeOn ? `, expected ${closeOn}` : ''}, and then about ${money(perYear)} a year in `
-      + `premiums to keep the policy in force — ${money(premiums)}${over}. `
-      + 'The premiums are a commitment, not an option: if they stop, the policy lapses '
-      + 'and the benefit goes with it.');
-  } else if (money(price)) {
-    p.push(`The purchase price is ${money(price)}, and premiums are payable on top of it for `
-      + 'as long as the policy is held. The attachment sets both out in full.');
-    warn.push('No premium schedule has been entered, so the email cannot state the total '
-      + 'commitment. It says premiums are payable and points at the attachment instead.');
-  }
-
-  /* What you collect, and what it works out at. */
-  if (base && money(collect)) {
-    const on = monthYear(base.matures_on);
-    p.push(`What you collect is ${money(collect)}${on ? `, expected ${on}` : ''}.`);
-  }
-
+  /* ---- what it returns, at the estimate the price is built on. On a
+     survivorship deal that is the LATER of the two estimates, because
+     that is the one the maturity waits on -- quoting the shorter one
+     beside a rate solved off the longer would be two figures that do not
+     belong to each other. */
+  const tail = [];
   if (base) {
+    const drivingMonths = survivorship && a.driving_life?.n === 2
+      ? Number(o.insured2_le_months) : Number(o.le_months);
+    const at = Number.isFinite(drivingMonths) && drivingMonths > 0
+      ? `At the ${drivingMonths} month life expectancy mark` : 'At life expectancy';
     const simple = rate(base.rate);
     const comp = rate(base.compound_rate);
-    const shown = interest === 'compound'
-      ? (comp ? `${comp} a year, compounded` : null)
+    /* Named for what it is. An IRR and a simple-interest return are
+       different numbers and the reader is entitled to know which one
+       they have been sent. */
+    const said = interest === 'compound'
+      ? (comp ? `the IRR is ${comp} a year` : null)
       : interest === 'both'
-        ? [simple ? `${simple} a year simple` : null, comp ? `${comp} compounded` : null]
-          .filter(Boolean).join(', or ')
-        : (simple ? `${simple} a year, simple, on every dollar for the time it is out` : null);
-    const swing = [
-      early && rate(early.rate) ? `${rate(early.rate)} if it comes two years early` : null,
-      late && rate(late.rate) ? `${rate(late.rate)} if it comes two years late` : null,
-    ].filter(Boolean).join(', and ');
-    p.push(`${shown ? `That is ${shown}. ` : ''}A life expectancy is a median, not a promise `
-      + `— about half of insureds outlive one, and the wait is what decides the return`
-      + `${swing ? `: ${swing}` : ''}. The attachment prices all three side by side, with `
-      + 'the premium schedule behind them.');
+        ? (simple && comp ? `the return is ${simple} a year simple, ${comp} compounded` : null)
+        : (simple ? `the return is ${simple} a year, simple interest` : null);
+    if (said) tail.push(`${at}, ${said}.`);
   } else {
     warn.push('This deal has no price or no life expectancy yet, so the email cannot quote a '
       + 'return. Fill those in and rebuild it before sending.');
   }
-
-  if (o.thesis) {
-    const why = opening(o.thesis);
-    if (why) p.push(`Why we like it: ${/[.!?…]$/.test(why) ? why : `${why}.`}`);
-  }
+  tail.push('Please see attached document for more detailed information.');
+  p.push(tail.join('\n'));
 
   const closes = shortDate(o.offer_closes_on);
-  const ask = partial
-    ? `${share}% is what is being offered to you`
-    : 'the whole policy is available';
-  p.push(`${closes ? `The offer closes on ${closes}. ` : ''}Please read the attachment before `
-    + `you decide — ${ask}. To ask for a piece, sign in to the portal and open it under `
-    + 'Opportunities; asking is a request rather than a commitment, and we confirm it from '
-    + 'here. Reply or telephone if you would rather talk it through.');
+  if (closes) p.push(`The offer closes on ${closes}.`);
 
-  if (opts.from) p.push(String(opts.from).trim());
+  /* No signature. Every mail client appends the sender's own, and a
+     second one underneath it is how a short note stops being short. */
 
   const body = scrubNames(p.join('\n\n'), o);
 

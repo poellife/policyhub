@@ -283,7 +283,20 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     premiums_paid: premiums.reduce((s, p) => s + p.amount * share, 0),
     premium_count: premiums.length,
     projected_beyond_schedule: extended,
+    /* The run-rate at the END of the posted schedule, kept because the
+       projection is built on it. NOT the annual cost of this holding
+       period -- see `premium_per_year` below, and the note on
+       `premiumShape` for what went wrong when the two were confused. */
     annual_premium_assumed: annual,
+    /* What a year of this deal costs, over the years the deal lasts. */
+    ...(() => {
+      const shape = premiumShape(premiums, close, matures, share);
+      return {
+        premium_per_year: shape.per_year,
+        premium_first_year: shape.first_year,
+        premium_last_year: shape.last_year,
+      };
+    })(),
     /* Stated rather than inferred from `returned`, which is net of carry
        for an investor and would read as a smaller policy rather than as a
        smaller share of one. */
@@ -310,6 +323,81 @@ export function scenario(opp, offsetMonths, share = 1, carryPct = 0) {
     years: a.years,
     flows: a.flows,
   };
+}
+
+
+/**
+ * What the premiums actually look like over THIS holding period.
+ *
+ * Written because the cover was quoting the wrong number, and the wrong
+ * number was defensible enough to survive review.
+ *
+ * `annual_premium_assumed` above is `annualRate(scheduled)` — the last
+ * twelve months of the WHOLE posted schedule. It exists for one purpose:
+ * to carry the projection past the end of that schedule at the rate the
+ * schedule was running at when it stopped. That is the right figure for
+ * that job and the wrong figure for every other one. On a rising
+ * survivorship policy with twenty years posted, it is year twenty. Put
+ * on a cover as "then about $X a year" against a five-year hold, it read
+ * $911,000 beside a premium total of $1,908,000 over five years — two
+ * figures on the same line that cannot both be true.
+ *
+ * So this reports the premiums that fall inside the scenario and nothing
+ * else: what a whole year costs at the start, what it costs at the end,
+ * and the average across the term.
+ *
+ * A trailing PARTIAL year is folded into the one before it. Maturity
+ * rarely lands on an anniversary, so the last bucket is usually a stub,
+ * and a stub quoted as "rising to $40,000" on a policy costing $400,000
+ * a year is worse than saying nothing.
+ */
+function premiumShape(premiums, from, matures, share) {
+  const paid = premiums.map((p) => ({ date: p.date, amount: p.amount * share }));
+  const total = paid.reduce((s, p) => s + p.amount, 0);
+  const span = Math.max(yearsBetween(from, matures), 1 / 12);
+  const out = { first_year: null, last_year: null, per_year: total / span };
+  if (!paid.length) return { ...out, per_year: 0 };
+
+  /* Bucketed on the CALENDAR anniversary, not on elapsed year-fractions.
+     A year is 365 days and `yearsBetween` divides by 365.2425, so a
+     premium falling exactly one year after the close comes out at
+     0.9993 and floors into the first bucket alongside the close-date
+     premium -- which printed the opening year of this deal as $763,200
+     when it is $381,600. Whole months cannot drift. */
+  const buckets = new Map();
+  for (const p of paid) {
+    const n = Math.max(0, Math.floor(monthsApart(from, p.date) / 12));
+    buckets.set(n, (buckets.get(n) || 0) + p.amount);
+  }
+  const keys = [...buckets.keys()].sort((a, b) => a - b);
+  /* Is the last bucket a whole year of cover, or the stub before a
+     maturity three months into it? */
+  const lastKey = keys[keys.length - 1];
+  if (keys.length > 1 && span - lastKey < 0.75) {
+    buckets.set(keys[keys.length - 2],
+      buckets.get(keys[keys.length - 2]) + buckets.get(lastKey));
+    buckets.delete(lastKey);
+    keys.pop();
+  }
+  out.first_year = buckets.get(keys[0]);
+  out.last_year = buckets.get(keys[keys.length - 1]);
+  return out;
+}
+
+/** Whole months between two ISO dates, the way an anniversary counts them. */
+function monthsApart(from, to) {
+  const a = String(from).slice(0, 10).split('-').map(Number);
+  const b = String(to).slice(0, 10).split('-').map(Number);
+  if (a.length !== 3 || b.length !== 3 || a.some(Number.isNaN) || b.some(Number.isNaN)) return 0;
+  return (b[0] - a[0]) * 12 + (b[1] - a[1]) - (b[2] < a[2] ? 1 : 0);
+}
+
+/** Whole years and the fraction between two ISO dates. */
+function yearsBetween(from, to) {
+  const a = new Date(`${String(from).slice(0, 10)}T00:00:00Z`);
+  const b = new Date(`${String(to).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  return (b - a) / (365.2425 * 24 * 3600 * 1000);
 }
 
 /** Two years early, at life expectancy, two years late. */
