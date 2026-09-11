@@ -891,6 +891,48 @@ table.rpt-kv td:last-child { font-weight: 500; text-align: right; font-variant-n
 .opp-sheet .rpt-cols { gap: 20px; }
 .opp-sheet .rpt-confidential { margin-bottom: 14px; }
 .opp-sheet .rpt-tiles { margin-bottom: 16px; }
+
+/* ------------------------------- the cover --------------------------- *
+   Page one of the investor one-pager: three figures, the first of which is
+   the whole commitment. Sized so the widest sum this desk writes still
+   fits a third of the width; the grid beneath breaks that total apart.
+   `break-after: page` in print, so the detail never creeps up onto it. */
+.opp-cover { padding-bottom: 26px; }
+.opp-cover .rpt-h2 { font-size: 21px; margin-bottom: 4px; }
+.opp-cover-label { font-size: 8.5px; font-weight: 700; letter-spacing: 0.09em;
+  text-transform: uppercase; color: var(--text); margin: 30px 0 16px; }
+.opp-cover-lead { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+.opp-cover-cell { padding-right: 18px; }
+.opp-cover-cell + .opp-cover-cell { border-left: 1px solid #e6e6e6; padding-left: 18px; }
+.opp-cover-k { font-size: 8px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); }
+.opp-cover-v { font-size: 31px; font-weight: 700; letter-spacing: -0.035em;
+  line-height: 1.1; margin: 12px 0 9px; font-variant-numeric: tabular-nums; }
+.opp-cover-n { font-size: 9.5px; color: var(--text); line-height: 1.4; }
+.opp-cover-grid { display: grid; grid-template-columns: repeat(3, 1fr);
+  row-gap: 16px; margin-top: 24px; padding-top: 22px; border-top: 1px solid #e6e6e6; }
+.opp-cover-gcell { padding-right: 18px; }
+.opp-cover-gcell:not(:nth-child(3n+1)) { border-left: 1px solid #efefef; padding-left: 18px; }
+.opp-cover-gv { font-size: 12px; margin-top: 6px; line-height: 1.35; }
+.opp-cover-caveat { font-size: 10px; line-height: 1.5; margin: 22px 0 0;
+  padding-top: 16px; border-top: 1px solid #e6e6e6; }
+.opp-cover-unpriced { font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+  margin: 6px 0 0; }
+/* The detail pages still name the deal, quietly — a sheet separated from
+   its cover has to say which one it belongs to, and which half of the
+   document it is. */
+.opp-detail-mark { font-size: 8.5px; font-weight: 700; letter-spacing: 0.09em;
+  text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+:root[data-theme="dark"] .opp-cover-cell + .opp-cover-cell,
+:root[data-theme="dark"] .opp-cover-grid,
+:root[data-theme="dark"] .opp-cover-gcell:not(:nth-child(3n+1)),
+:root[data-theme="dark"] .opp-cover-caveat { border-color: var(--border-strong); }
+@media (max-width: 760px) {
+  .opp-cover-lead, .opp-cover-grid { grid-template-columns: 1fr; row-gap: 18px; }
+  .opp-cover-cell + .opp-cover-cell,
+  .opp-cover-gcell:not(:nth-child(3n+1)) { border-left: none; padding-left: 0; }
+  .opp-cover-v { font-size: 26px; }
+}
 .opp-sheet .rpt-tile { padding: 10px 12px; }
 .opp-sheet .rpt-tile-value { font-size: 14px; }
 .opp-sheet .rpt-tile-note { font-size: 8.5px; margin-top: 4px; }
@@ -1000,6 +1042,7 @@ table.rpt-table tr.rpt-zero td { color: #5f5f5f; }
   tfoot { display: table-row-group; }
   tr, img, svg { break-inside: avoid; }
   .avoid-break, .rpt-tiles { break-inside: avoid; }
+  .opp-cover { break-after: page; break-inside: avoid; }
   .rpt-h3 { break-after: avoid; }
   .page-break-after { break-after: page; }
   .page-break-before { break-before: page; }
@@ -1858,3 +1901,54 @@ table.data td.risk-note-cell {
 @media (max-width: 640px) {
   .le-step-label { font-size: 10.5px; }
 }
+
+/* ------------------------- the covering email ------------------------ *
+   Sits above the one-pager on screen and never prints. Text, not a
+   preview: the whole point is that somebody reads it, changes the bits
+   that need changing in their own voice, and sends it themselves. */
+.mail-draft { border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px 20px;
+  margin: 0 0 20px; background: var(--surface); }
+.mail-draft-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; }
+.mail-draft-head h3 { margin: 0 0 3px; font-size: 15px; }
+.mail-draft-head .spacer { flex: 1; }
+.mail-to { max-width: 240px; }
+.mail-label { display: block; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); margin: 12px 0 5px; }
+.mail-subject, .mail-body { width: 100%; font-family: inherit; font-size: 13px;
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text); }
+.mail-body { line-height: 1.6; resize: vertical; white-space: pre-wrap; }
+@media print { .mail-draft { display: none !important; } }
+
+/* --------------------------- medical review -------------------------- *
+   The reviewing doctor's screen is the whole application for that
+   account, so the queue is cards rather than a table: there are rarely
+   more than a handful, each one is a person, and a row of a table is not
+   how you want to meet a patient's chart. */
+.med-card { display: block; border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px; margin-bottom: 12px; background: var(--surface);
+  text-decoration: none; color: inherit; }
+.med-card:hover { border-color: var(--border-strong); background: var(--surface-hover, var(--surface)); }
+.med-card-top { display: flex; align-items: center; gap: 12px; }
+.med-who { font-size: 16px; font-weight: 600; flex: 1; }
+.med-ask { margin-top: 8px; font-size: 13px; line-height: 1.5; }
+.med-ask-full { margin: 0; font-size: 14px; line-height: 1.6; }
+.med-meta { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.med-section { font-size: 13px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); margin: 28px 0 12px; }
+.med-foot { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--muted); max-width: 620px; line-height: 1.6; }
+.med-h3 { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); margin: 18px 0 6px; }
+.med-oneliner { font-size: 13px; line-height: 1.6; margin: 12px 0; }
+.med-grid { align-items: start; }
+/* What came back, on the desk's side. Set as prose rather than as a cell:
+   the reasoning is the part worth more than the number. */
+.med-opinion { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 14px; }
+.med-opinion-head { font-size: 13px; margin-bottom: 8px; }
+.med-opinion-body { font-size: 13px; line-height: 1.65; margin: 0 0 10px;
+  white-space: pre-wrap; }
+.med-opinion-sub { margin-top: 8px; }
+.med-opinion-sub > span { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--muted); }
+@media (max-width: 900px) { .med-grid { grid-template-columns: 1fr; } }

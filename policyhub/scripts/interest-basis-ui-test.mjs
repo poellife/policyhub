@@ -164,8 +164,14 @@ check('the headline line says both',
   sheetText.replace(/\s+/g, ' ').slice(0, 200));
 check('the Return column is labelled so the reader knows which is which',
   /simple\s*·\s*compounded/i.test(sheetText));
+/* The footnote this suite is about is the one explaining how the two
+   rates are solved. "Life expectancy is a median" used to be on the same
+   list, and is not any more: the cover now says it in 10-point type
+   directly under the three lead figures, deliberately and at the reader's
+   request. Forbidding it here would be this suite asserting something it
+   was never about. */
 check('and the sheet carries no interest-convention footnote either',
-  !/Rates are solved|operating agreements|Life expectancy is a median/i.test(sheetText));
+  !/Rates are solved|operating agreements/i.test(sheetText));
 
 console.log('\nAND THE SHEET CAN BE SWITCHED WITHOUT LEAVING IT');
 check('the control is on the one-pager screen too',

@@ -10,6 +10,7 @@ import { cleanArrangement } from '../public/policy-fields.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
+import { opportunityEmail } from './opportunity-email.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
@@ -1356,6 +1357,54 @@ router.post('/users/:id/reset-link', authenticate, blockScoped,
 // Everything below requires a session AND a fresh read of the account.
 // authenticate is the pair; nothing may sit between its two halves.
 router.use(authenticate);
+
+/* ------------------------------------------------------------------ *
+ * The reviewing doctor's door
+ * ------------------------------------------------------------------ */
+
+/**
+ * A `medical` login reaches the review queue and nothing else.
+ *
+ * Written as an ALLOWLIST rather than as a guard on each route, and that
+ * is the only defensible way round. There are several hundred routes in
+ * this file and there will be more next month; a rule that has to be
+ * remembered on every one of them is a rule that will be forgotten on
+ * one of them, and the one it is forgotten on will be the one that
+ * quotes a price. Anything not named here is 403 for this role,
+ * including every route added after this comment was written.
+ *
+ * What is on the list, and why each is on it:
+ *   auth      - to sign in, sign out, change a password, and be told who
+ *               they are. Without these the account cannot be used.
+ *   me/prefs  - their own screen settings. Their own row, nobody else's.
+ *   medical-reviews - the work.
+ *
+ * Not on it, deliberately: policies, opportunities, investors, funds,
+ * documents in general, valuations, LE reports, exports, reports, the
+ * activity log. A reviewing doctor who can see the asking price is no
+ * longer giving an independent opinion, and a queue that can be walked
+ * sideways into the book is not a queue, it is an account.
+ */
+const MEDICAL_PATHS = [
+  /^\/auth\//,
+  /^\/me\/prefs$/,
+  /^\/medical-reviews(\/|$)/,
+];
+const isMedical = (req) => req.user?.role === 'medical';
+router.use((req, res, next) => {
+  if (!isMedical(req)) return next();
+  if (MEDICAL_PATHS.some((re) => re.test(req.path))) return next();
+  /* Said as "not available on this account" rather than "not found":
+     the reviewer is a colleague who has clicked something, not somebody
+     probing, and a bare 404 would read as a broken application. */
+  return res.status(403).json({
+    error: 'This is a medical review account. It reaches the review queue and nothing else.' });
+});
+
+/** The other direction: keep the desk out of the reviewer's chair. */
+const blockMedical = (req, res, next) => (isMedical(req)
+  ? res.status(403).json({ error: 'Not available on a medical review account' })
+  : next());
 
 /* ------------------------------------------------------------------ *
  * de-identification for investors
@@ -2809,6 +2858,12 @@ async function loadOpportunity(req, id) {
   o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
   o.le_reports = scopeId(req) === null && req.user?.canLe
     ? await leReportsFor('opportunity', id, req) : undefined;
+  /* Staff only, and not gated on `can_le`: a review is a colleague's
+     written opinion on the case, not a run of the report service, and
+     whoever works the deal needs to see that one is outstanding even if
+     they cannot spend money on records themselves. */
+  o.medical_reviews = scopeId(req) === null
+    ? await medicalReviewsFor('opportunity', id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
   o.remaining_pct = Math.max(0, 100 - o.taken_pct);
@@ -3012,6 +3067,55 @@ router.get('/opportunities/:id/sheet.pdf', wrap(async (req, res) => {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${slug}-one-pager.pdf"`);
   res.send(pdf);
+}));
+
+/**
+ * The covering note that goes out with the one-pager.
+ *
+ * Built every time the sheet is, from the same `loadOpportunity` object,
+ * so the figure in the email and the figure on the paper cannot drift.
+ * It is COMPOSED rather than sent: it comes back as text, and somebody
+ * reads it, edits it and sends it from their own mail client. A covering
+ * note is a letter from a person and ought to be signed by one.
+ *
+ * Staff only. An investor has no covering note to write — they are the
+ * recipient — and the draft names the participation being offered, which
+ * is a negotiating position rather than something to hand over.
+ *
+ * The recipient list is the investors this deal has already been shared
+ * with, with their email addresses, so the draft can be addressed and the
+ * mail client opened without going and looking somebody up. Scope is the
+ * ordinary opportunity scope; nothing here reaches an investor the caller
+ * could not already see on the deal.
+ */
+router.get('/opportunities/:id/email', blockInvestors, wrap(async (req, res) => {
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const o = await loadOpportunity(req, req.params.id);
+  if (!o) return res.status(404).json({ error: 'Opportunity not found' });
+
+  const asked = Number(req.query.share);
+  const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
+  const interest = ['simple', 'compound', 'both'].includes(str(req.query.interest))
+    ? str(req.query.interest) : 'simple';
+
+  const ids = (o.shares || []).map((x) => x.investor_id);
+  const { rows: people } = ids.length ? await q(
+    `SELECT i.id, i.name, COALESCE(u.email, i.email) AS email
+       FROM investors i
+       LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
+      WHERE i.id = ANY($1) ORDER BY i.name`, [ids]) : { rows: [] };
+
+  /* Signed by whoever is composing it, not by "the system". */
+  const from = [req.user.name || '', 'Poel Capital'].filter(Boolean).join('\n');
+  const draft = opportunityEmail(o, {
+    share, interest, from,
+    to: str(req.query.to) || '',
+  });
+
+  const slug = String(o.policy_number || `opportunity-${o.id}`)
+    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
+  res.json({ ...draft, attachment: `${slug}-one-pager.pdf`, recipients: people });
 }));
 
 router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => {
@@ -4294,12 +4398,23 @@ router.put('/opportunities/:id/shares', blockInvestors, oppEdit, wrap(async (req
       `SELECT i.id, i.name, i.email, u.email AS login_email, u.id AS user_id
          FROM investors i LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
         WHERE i.id = ANY($1)`, [fresh]);
-    /* What the deal is called in a sentence: the insured, the carrier, and
-       the face — enough to recognise it without opening anything, and not so
-       much that the email is the deal sheet. */
+    /* What the deal is called in a sentence: enough to recognise it
+       without opening anything, and not so much that the email is the
+       deal sheet.
+       INITIALS, NOT THE NAME. This used to read "Sommers, Gerald ·
+       Pacific Life · $10,000,000 death benefit" and go out to an
+       investor's ordinary mailbox — the one rule this file's own header
+       states, broken in the one place nobody looked. The one-pager and
+       the covering note both mask it; so does the notice that says a
+       deal has arrived. */
+    const initialsOf = (first, last) => [first, last]
+      .map((v) => String(v || '').trim().replace(/[^\p{L}\p{N}]/gu, '').charAt(0))
+      .filter(Boolean).map((c) => `${c.toUpperCase()}.`).join('');
+    const who = [initialsOf(opp.insured_first_name, opp.insured_last_name),
+      initialsOf(opp.insured2_first_name, opp.insured2_last_name)]
+      .filter(Boolean).join(' & ');
     const headline = [
-      [opp.insured_last_name, opp.insured_first_name].filter(Boolean).join(', ')
-        || opp.policy_number || 'a policy',
+      who || 'a policy',
       opp.carrier_name,
       opp.face_amount
         ? `$${Number(opp.face_amount).toLocaleString('en-US')} death benefit` : '',
@@ -5612,6 +5727,543 @@ export async function leReportsFor(kind, id, req = null) {
   const { rows } = await q(
     `${LE_SELECT} WHERE ${col} = $1${mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}
       ORDER BY r.ran_at DESC, r.id DESC`, [id, ...mine.args]);
+  return rows;
+}
+
+/* ------------------------------------------------------------------ *
+ * Medical review
+ *
+ * The report service reads the records and produces an estimate. It is a
+ * good first read and it is not a physician. So a case goes to a
+ * reviewing doctor, who reads the same file and returns HIS number and
+ * his reasoning, and the two sit on the case side by side.
+ *
+ * The reviewer's login reaches these routes and nothing else -- see
+ * `MEDICAL_PATHS` above the de-identifier. Two consequences run through
+ * everything below.
+ *
+ * HE IS BLIND TO THE ECONOMICS. Nothing here sends him the asking price,
+ * the death benefit, the modelled return or the estimate already on
+ * file. That is the point of a second opinion: it is worth having
+ * precisely because it was formed without knowing what answer the deal
+ * needs. `reviewPacket` is the whole of what he sees, and it is short on
+ * purpose.
+ *
+ * HE SEES THE NAME. Everywhere else an insured is initials. He is
+ * reading that person's records, every page of which carries the name,
+ * and matching a chart to the wrong patient is a clinical error rather
+ * than a privacy nicety. Every open is written to the log.
+ * ------------------------------------------------------------------ */
+
+const REVIEW_STATUSES = ['Requested', 'Opened', 'Returned', 'Declined', 'Cancelled'];
+const RECOMMENDATIONS = ['Proceed', 'Pass', 'More records needed', ''];
+const LE_BASIS = ['median', 'mean'];
+
+/* Enough for the desk's panel: who has it, where it has got to, and
+   what came back. The insured comes from the case, not from here. */
+const REVIEW_SELECT = `
+  SELECT m.*, u.full_name AS reviewer_name, u.email AS reviewer_email,
+         rq.full_name AS requested_by_name,
+         ad.full_name AS adopted_by_name,
+         o.policy_number AS opportunity_number, o.carrier_name AS opportunity_carrier,
+         p.policy_number AS policy_number
+    FROM medical_reviews m
+    LEFT JOIN users u  ON u.id = m.reviewer_id
+    LEFT JOIN users rq ON rq.id = m.requested_by
+    LEFT JOIN users ad ON ad.id = m.adopted_by
+    LEFT JOIN opportunities o ON o.id = m.opportunity_id
+    LEFT JOIN policies p ON p.id = m.policy_id`;
+
+/**
+ * The insured this review is about, read off whichever case it hangs on.
+ *
+ * A survivorship deal has two people and `life` says which. Getting this
+ * wrong would send a doctor one person's records under another person's
+ * name, so it is solved in one place rather than at each caller.
+ */
+async function reviewSubject(row) {
+  if (row.opportunity_id) {
+    const { rows } = await q(
+      `SELECT insured_first_name, insured_last_name, insured_dob, insured_gender,
+              insured_state, insured2_first_name, insured2_last_name, insured2_dob,
+              insured2_gender, insured2_state, impairments, mitigating, records_through
+         FROM opportunities WHERE id = $1`, [row.opportunity_id]);
+    const o = rows[0];
+    if (!o) return null;
+    const two = row.life === 2;
+    return {
+      first_name: two ? o.insured2_first_name : o.insured_first_name,
+      last_name: two ? o.insured2_last_name : o.insured_last_name,
+      dob: two ? o.insured2_dob : o.insured_dob,
+      gender: two ? o.insured2_gender : o.insured_gender,
+      state: (two ? o.insured2_state : o.insured_state) || o.insured_state,
+      /* The file's own summary of the medicine, as somebody typed it.
+         Background, not an answer -- and it is the only free text he is
+         sent. The investment case and the underwriter's note stay on the
+         desk's side, because both are about what the desk wants. */
+      impairments: o.impairments || '',
+      mitigating: o.mitigating || '',
+      records_through: o.records_through || null,
+    };
+  }
+  const { rows } = await q(
+    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state
+       FROM policies pol LEFT JOIN insureds i ON i.id = pol.insured_id
+      WHERE pol.id = $1`, [row.policy_id]);
+  const i = rows[0];
+  return i ? { ...i, impairments: '', mitigating: '', records_through: null } : null;
+}
+
+/** Everything the reviewer is sent, and nothing else. */
+async function reviewPacket(row) {
+  const subject = await reviewSubject(row);
+  let summary = null;
+  if (row.le_report_id) {
+    const { rows } = await q(
+      `SELECT id, case_id, status, initials, sex, age, one_liner, central_years,
+              range_low_years, range_high_years, confidence, pages, ran_at
+         FROM le_reports WHERE id = $1`, [row.le_report_id]);
+    summary = rows[0] || null;
+  }
+  return {
+    id: row.id,
+    life: row.life,
+    status: row.status,
+    ask: row.ask,
+    requested_at: row.requested_at,
+    requested_by_name: row.requested_by_name,
+    opened_at: row.opened_at,
+    returned_at: row.returned_at,
+    /* What came back, so he can reopen his own opinion and change it
+       before the desk has taken it. */
+    le_months: row.le_months,
+    le_basis: row.le_basis,
+    confidence: row.confidence,
+    findings: row.findings,
+    impairments: row.impairments,
+    mitigating: row.mitigating,
+    recommendation: row.recommendation,
+    adopted_at: row.adopted_at,
+    subject,
+    /* The machine's reading, offered as a reading rather than as an
+       answer. He may agree with it, and he may not. */
+    summary,
+    /* A survivorship case has a second person in the same file. Said, so
+       he knows which chart he is being asked about, and not who the
+       other one is. */
+    survivorship: row.life === 2 || undefined,
+  };
+}
+
+/** Whose queue is this? A reviewer only ever sees their own. */
+const reviewScope = (req) => (isMedical(req)
+  ? { sql: 'm.reviewer_id = $MINE', args: [req.user.uid] }
+  : { sql: '', args: [] });
+
+/**
+ * The queue, or the reviews on one case.
+ *
+ * One route with two readers. A reviewer gets their own errands with the
+ * economics stripped out; the desk gets the panel for a case it can
+ * already see. Both are the same rows, and neither can widen into the
+ * other's answer, because the scope is decided from the role rather than
+ * from a parameter.
+ */
+router.get('/medical-reviews', blockInvestors, wrap(async (req, res) => {
+  const mine = reviewScope(req);
+  const where = [];
+  const args = [];
+  if (mine.sql) { args.push(...mine.args); where.push(mine.sql.replace('$MINE', `$${args.length}`)); }
+
+  if (!isMedical(req)) {
+    const oppId = int(req.query.opportunity_id);
+    const polId = int(req.query.policy_id);
+    if (oppId) {
+      if (!(await oppVisible(req, oppId)))
+        return res.status(404).json({ error: 'Opportunity not found' });
+      args.push(oppId); where.push(`m.opportunity_id = $${args.length}`);
+    } else if (polId) {
+      if (!(await assertPolicyInScope(req, polId)))
+        return res.status(404).json({ error: 'Policy not found' });
+      args.push(polId); where.push(`m.policy_id = $${args.length}`);
+    } else {
+      /* No case named: the desk's own outstanding errands, so a request
+         sent last week does not need somebody to remember which deal it
+         was on. */
+      args.push(req.user.uid);
+      where.push(`(m.requested_by = $${args.length} OR m.status = 'Returned')`);
+    }
+  }
+  const { rows } = await q(
+    `${REVIEW_SELECT} ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY CASE m.status WHEN 'Requested' THEN 0 WHEN 'Opened' THEN 1 ELSE 2 END,
+               m.requested_at DESC LIMIT 200`, args);
+
+  if (!isMedical(req)) return res.json(rows);
+  res.json(await Promise.all(rows.map(reviewPacket)));
+}));
+
+/** The reviewing doctors an administrator has opened an account for. */
+router.get('/medical-reviews/reviewers', blockInvestors, blockMedical,
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `SELECT id, full_name, email FROM users
+        WHERE role = 'medical' AND is_active = TRUE ORDER BY full_name, email`);
+    res.json(rows);
+  }));
+
+/** One review. */
+router.get('/medical-reviews/:id', blockInvestors, wrap(async (req, res) => {
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  if (!isMedical(req)) return res.json(row);
+  /* Reading a chart is worth a line in the log even when the person
+     reading it is the person we asked to. */
+  if (row.status === 'Requested')
+    await q(`UPDATE medical_reviews SET status = 'Opened', opened_at = now()
+              WHERE id = $1 AND status = 'Requested'`, [row.id]);
+  await audit(req.user.uid, 'medical_review', row.id, 'read',
+    `opened the file for review · ${describeOrigin(req)}`);
+  const fresh = await oneReview(req, req.params.id);
+  res.json(await reviewPacket(fresh));
+}));
+
+/** The row, scoped: a reviewer's own, or a case the desk can see. */
+async function oneReview(req, id) {
+  const mine = reviewScope(req);
+  const { rows } = await q(
+    `${REVIEW_SELECT} WHERE m.id = $1${
+      mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}`,
+    [int(id), ...mine.args]);
+  const row = rows[0];
+  if (!row) return null;
+  if (isMedical(req)) return row;
+  if (row.opportunity_id && !(await oppVisible(req, row.opportunity_id))) return null;
+  if (row.policy_id && !(await assertPolicyInScope(req, row.policy_id))) return null;
+  return row;
+}
+
+/**
+ * Send a case for medical review.
+ *
+ * The summary is optional but expected: the ordinary path is that the
+ * desk has already run the records through the report service and is
+ * asking a doctor to read the same file. Sending without one is allowed
+ * because a case can arrive with a provider's own report and no run of
+ * ours, and refusing would make the feature unusable on exactly those
+ * cases.
+ */
+router.post('/medical-reviews', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const oppId = int(req.body.opportunity_id);
+    const polId = int(req.body.policy_id);
+    if (!!oppId === !!polId)
+      return res.status(400).json({
+        error: 'A review is about one case or the other, not both and not neither.' });
+    if (oppId && !(await oppVisible(req, oppId)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    if (polId && !(await assertPolicyInScope(req, polId)))
+      return res.status(404).json({ error: 'Policy not found' });
+
+    const reviewerId = int(req.body.reviewer_id);
+    const { rows: who } = await q(
+      `SELECT id, full_name, email FROM users
+        WHERE id = $1 AND role = 'medical' AND is_active = TRUE`, [reviewerId]);
+    if (!who[0])
+      return res.status(400).json({
+        error: 'Choose a reviewing doctor. An administrator opens the account under Users.' });
+
+    const life = int(req.body.life) === 2 ? 2 : 1;
+    /* A second life must actually exist before a chart can be asked for.
+       Without this the doctor is sent an empty name and a real file. */
+    if (life === 2 && oppId) {
+      const { rows: o } = await q(
+        'SELECT insured2_last_name FROM opportunities WHERE id = $1', [oppId]);
+      if (!str(o[0]?.insured2_last_name))
+        return res.status(400).json({
+          error: 'This case has no second insured to review.' });
+    }
+
+    /* A report is only worth sending if it is one of ours and finished. */
+    const leId = int(req.body.le_report_id);
+    if (leId) {
+      const { rows: r } = await q(
+        `SELECT id, status FROM le_reports WHERE id = $1
+           AND (opportunity_id = $2::int OR policy_id = $3::int)`,
+        [leId, oppId || null, polId || null]);
+      if (!r[0])
+        return res.status(400).json({ error: 'That summary is not attached to this case.' });
+    }
+
+    /* One open errand per life. Sending twice is almost always a second
+       click rather than a second opinion, and two identical rows in a
+       doctor's queue is how one of them gets answered and the other sits
+       there looking unanswered for a month. */
+    const { rows: open } = await q(
+      `SELECT id FROM medical_reviews
+        WHERE life = $1 AND status IN ('Requested','Opened')
+          AND (opportunity_id = $2::int OR policy_id = $3::int)`,
+      [life, oppId || null, polId || null]);
+    if (open[0])
+      return res.status(409).json({
+        error: 'This case is already out for review. Cancel that request first.',
+        review_id: open[0].id });
+
+    const { rows } = await q(
+      `INSERT INTO medical_reviews
+         (opportunity_id, policy_id, life, reviewer_id, requested_by, ask, le_report_id)
+       VALUES ($1::int,$2::int,$3,$4,$5,$6,$7::int) RETURNING *`,
+      [oppId || null, polId || null, life, reviewerId, req.user.uid,
+        str(req.body.ask).slice(0, 4000), leId || null]);
+
+    await audit(req.user.uid, 'medical_review', rows[0].id, 'create',
+      `sent ${oppId ? `opportunity ${oppId}` : `policy ${polId}`}${
+        life === 2 ? ' (second life)' : ''} to ${who[0].email} for review`);
+    /* NO NAME IN THE EMAIL, the same rule as everywhere else -- the
+       doctor signs in to see whose file it is. */
+    await sendMail('medical_review_requested', {
+      to: who[0].email, userId: who[0].id, name: who[0].full_name,
+      from: req.user.name || 'the office',
+      ask: str(req.body.ask).slice(0, 400),
+    });
+    res.status(201).json(rows[0]);
+  }));
+
+/**
+ * The doctor's answer.
+ *
+ * Only his, only while it is his to give, and it cannot be edited once
+ * the desk has taken the number onto the case -- at that point the deal
+ * has been repriced off it and a silent change would move a rate nobody
+ * asked to move.
+ */
+router.put('/medical-reviews/:id', wrap(async (req, res) => {
+  if (!isMedical(req))
+    return res.status(403).json({
+      error: 'Only the reviewing doctor writes the review.' });
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  if (row.adopted_at)
+    return res.status(409).json({
+      error: 'The office has already taken this estimate onto the case. '
+        + 'Telephone them if it needs to change.' });
+  if (row.status === 'Cancelled')
+    return res.status(409).json({ error: 'The office withdrew this request.' });
+
+  const months = int(req.body.le_months);
+  if (months !== null && (months < 0 || months > 1200))
+    return res.status(400).json({ error: 'A life expectancy in months, between 0 and 1200.' });
+  const basis = LE_BASIS.includes(str(req.body.le_basis)) ? str(req.body.le_basis) : 'median';
+  const rec = RECOMMENDATIONS.includes(str(req.body.recommendation))
+    ? str(req.body.recommendation) : '';
+  /* A draft can be saved without an estimate; returning it needs one, or
+     the desk is told an answer has arrived and finds a blank. */
+  const finish = !!req.body.returned;
+  if (finish && !months)
+    return res.status(400).json({
+      error: 'Enter the life expectancy in months before returning the review.' });
+  if (finish && !str(req.body.findings))
+    return res.status(400).json({
+      error: 'Say something about how you got there — the estimate on its own is not a review.' });
+
+  const { rows } = await q(
+    `UPDATE medical_reviews
+        SET le_months = $1::int, le_basis = $2, confidence = $3, findings = $4,
+            impairments = $5, mitigating = $6, recommendation = $7,
+            status = CASE WHEN $8 THEN 'Returned' ELSE 'Opened' END,
+            returned_at = CASE WHEN $8 THEN now() ELSE NULL END,
+            opened_at = COALESCE(opened_at, now())
+      WHERE id = $9 RETURNING *`,
+    [months, basis, str(req.body.confidence).slice(0, 200),
+      str(req.body.findings).slice(0, 20000), str(req.body.impairments).slice(0, 20000),
+      str(req.body.mitigating).slice(0, 20000), rec, finish, row.id]);
+
+  await audit(req.user.uid, 'medical_review', row.id, 'update',
+    finish ? `returned a review — ${months} months${rec ? `, ${rec}` : ''}`
+      : 'saved a draft review');
+
+  /* Attached to the case on its own, when there is nothing to overwrite.
+     "His notes and LE automatically get attached to that case" is the
+     requirement, and on a case with no estimate yet that is simply
+     right: there is no price built on an older number, nothing quoted,
+     nobody shown a rate. Where an estimate DOES exist the deal has been
+     priced off it and the desk takes it by hand -- see /adopt. */
+  if (finish) {
+    const already = await caseHasLe(rows[0]);
+    if (!already) {
+      await adoptReview({ ...rows[0], reviewer_name: req.user.name }, null);
+      await audit(req.user.uid, 'medical_review', row.id, 'update',
+        `estimate taken onto the case automatically — it had none`);
+    }
+  }
+
+  if (finish) {
+    const { rows: desk } = await q(
+      'SELECT id, email, full_name FROM users WHERE id = $1', [row.requested_by]);
+    if (desk[0]?.email)
+      await sendMail('medical_review_returned', {
+        to: desk[0].email, userId: desk[0].id, name: desk[0].full_name,
+        who: req.user.name || 'the reviewing doctor',
+        months, recommendation: rec,
+      });
+  }
+  res.json(await reviewPacket(rows[0]));
+}));
+
+/** Not this one. A reason is required, because "no" without one is not an answer. */
+router.post('/medical-reviews/:id/decline', wrap(async (req, res) => {
+  if (!isMedical(req))
+    return res.status(403).json({ error: 'Only the reviewing doctor declines a review.' });
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  const why = str(req.body.reason).slice(0, 4000);
+  if (!why) return res.status(400).json({ error: 'Say why, so the office knows what to do next.' });
+  await q(`UPDATE medical_reviews SET status = 'Declined', returned_at = now(),
+             findings = $1 WHERE id = $2`, [why, row.id]);
+  await audit(req.user.uid, 'medical_review', row.id, 'update', 'declined the review');
+  const { rows: desk } = await q(
+    'SELECT id, email, full_name FROM users WHERE id = $1', [row.requested_by]);
+  if (desk[0]?.email)
+    await sendMail('medical_review_declined', {
+      to: desk[0].email, userId: desk[0].id, name: desk[0].full_name,
+      who: req.user.name || 'the reviewing doctor', reason: why });
+  res.json({ ok: true });
+}));
+
+/** The desk withdrawing the errand. */
+router.post('/medical-reviews/:id/cancel', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    if (row.status === 'Returned')
+      return res.status(409).json({
+        error: 'It has already come back. There is nothing to withdraw.' });
+    await q(`UPDATE medical_reviews SET status = 'Cancelled' WHERE id = $1`, [row.id]);
+    await audit(req.user.uid, 'medical_review', row.id, 'update', 'withdrew the request');
+    res.json({ ok: true });
+  }));
+
+/**
+ * Taking his estimate onto the case.
+ *
+ * The one thing that is NOT automatic, and the comment is the argument.
+ *
+ * When the case has no life expectancy yet there is nothing to overwrite
+ * and adopting is obviously right, so it happens on its own the moment
+ * the review comes back -- see the caller above. When the case already
+ * has one, the deal has been priced off it, quoted at that price, and
+ * possibly shown to investors at that rate. Replacing it silently would
+ * move every figure on the one-pager without anybody pressing anything.
+ * So that case is one click, and the screen shows the rate before and
+ * after.
+ */
+router.post('/medical-reviews/:id/adopt', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    if (row.status !== 'Returned')
+      return res.status(409).json({ error: 'That review has not come back yet.' });
+    if (!row.le_months)
+      return res.status(400).json({ error: 'That review carries no estimate to take.' });
+    const out = await adoptReview(row, req.user.uid);
+    await audit(req.user.uid, 'medical_review', row.id, 'update',
+      `took the reviewer's ${row.le_months}-month estimate onto the case`);
+    res.json(out);
+  }));
+
+/**
+ * Write a returned estimate onto the case it belongs to.
+ *
+ * Both lives are handled, because on a survivorship deal the doctor may
+ * have been asked about either and the second one is a different set of
+ * columns. The provider is recorded as the reviewer's name so that six
+ * months later the sheet says where the number came from -- an estimate
+ * whose source is blank is an estimate nobody can defend.
+ */
+/**
+ * Does the case already carry a life expectancy for this life?
+ *
+ * The question that decides whether a returned review lands on the case
+ * by itself or waits for a click. Asked of the record rather than
+ * remembered from when the review was sent, because weeks pass in
+ * between and somebody may have typed one in the meantime -- adopting
+ * over a number entered yesterday because the case was empty last month
+ * is exactly the silent repricing this is arranged to avoid.
+ */
+async function caseHasLe(row) {
+  if (row.opportunity_id) {
+    const col = row.life === 2 ? 'insured2_le_months' : 'le_months';
+    const { rows } = await q(
+      `SELECT ${col} AS months FROM opportunities WHERE id = $1`, [row.opportunity_id]);
+    return Number(rows[0]?.months) > 0;
+  }
+  /* On a policy the estimate lives on the INSURED, not on the contract —
+     two policies on the same life share one life expectancy, which is
+     correct and is why this join exists. */
+  const { rows } = await q(
+    `SELECT i.le_months FROM policies p
+       LEFT JOIN insureds i ON i.id = p.insured_id WHERE p.id = $1`, [row.policy_id]);
+  return Number(rows[0]?.le_months) > 0;
+}
+
+async function adoptReview(row, uid) {
+  const provider = row.reviewer_name || 'Medical review';
+  /* `returned_at` comes back from pg as a Date, and String(a Date) is
+     "Thu Sep 10 2026 ..." — sliced to ten characters that is "Thu Sep 10",
+     which the date validator quite rightly refuses. Normalised here, once,
+     because every caller has the same problem. */
+  const at = row.returned_at ? new Date(row.returned_at) : new Date();
+  const on = (Number.isNaN(at.getTime()) ? new Date() : at).toISOString().slice(0, 10);
+  if (row.opportunity_id) {
+    const cols = row.life === 2
+      ? ['insured2_le_months', 'insured2_le_provider', 'insured2_le_date']
+      : ['le_months', 'le_provider', 'le_date'];
+    await q(`UPDATE opportunities SET ${cols[0]} = $1, ${cols[1]} = $2, ${cols[2]} = $3
+              WHERE id = $4`, [row.le_months, provider, on, row.opportunity_id]);
+  } else if (row.policy_id) {
+    await q(
+      `UPDATE insureds SET le_months = $1, le_provider = $2, le_date = $3, updated_at = now()
+        WHERE id = (SELECT insured_id FROM policies WHERE id = $4)`,
+      [row.le_months, provider, on, row.policy_id]);
+  }
+  const { rows } = await q(
+    `UPDATE medical_reviews SET adopted_at = now(), adopted_by = $1::int
+      WHERE id = $2 RETURNING *`, [uid || null, row.id]);
+  return rows[0];
+}
+
+/**
+ * The machine summary, streamed to the reviewer.
+ *
+ * The same route the desk has under /le-reports, reached through the
+ * review instead -- the doctor holds no `can_le` grant and should not,
+ * because that grant is permission to SPEND MONEY running the service.
+ * He is reading what the desk already ran, on the one case he was asked
+ * about. Never written down here; the service still holds it or it has
+ * gone, and the screen says which.
+ */
+router.get('/medical-reviews/:id/summary.pdf', blockInvestors, wrap(async (req, res) => {
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  if (!row.le_report_id)
+    return res.status(404).json({ error: 'No summary was sent with this review.' });
+  const { rows } = await q('SELECT * FROM le_reports WHERE id = $1', [row.le_report_id]);
+  if (!rows[0]) return res.status(404).json({ error: 'That summary is no longer on file.' });
+  const pdf = await casePdf(rows[0].case_id);
+  await audit(req.user.uid, 'medical_review', row.id, 'read',
+    `read the medical summary · ${describeOrigin(req)}`);
+  const who = String(rows[0].initials || 'XX').replace(/[^A-Za-z0-9]/g, '') || 'XX';
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${who}_Medical_Summary_and_LE_Analysis.pdf"`);
+  res.send(pdf);
+}));
+
+/** The reviews on one case, for its own page. */
+export async function medicalReviewsFor(kind, id) {
+  const col = kind === 'policy' ? 'm.policy_id' : 'm.opportunity_id';
+  const { rows } = await q(
+    `${REVIEW_SELECT} WHERE ${col} = $1 ORDER BY m.requested_at DESC`, [id]);
   return rows;
 }
 

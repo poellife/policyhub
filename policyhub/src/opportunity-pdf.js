@@ -21,6 +21,7 @@
    ===================================================================== */
 
 import { PdfDocument, textWidth, wrap, pdfString } from './pdf.js';
+import { scrubNames } from '../public/initials.js';
 
 const PAGE = [792, 612];          // Letter, on its side
 const MARGIN = 36;
@@ -54,6 +55,23 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
   'August', 'September', 'October', 'November', 'December'];
 const longDate = (d = new Date()) =>
   `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+
+/** "July 2032". The cover states a month, because a day it cannot know is
+    a precision it should not claim. */
+const longMonth = (iso) => {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(iso || '').slice(0, 10));
+  return m ? `${MONTHS[Number(m[2]) - 1]} ${m[1]}` : '--';
+};
+
+/* The cover is written in sentences, so the product code is spelled out.
+   An unknown code is printed as it was typed rather than guessed at. */
+const PRODUCT_NAME = {
+  SUL: 'Survivorship universal life', UL: 'Universal life',
+  GUL: 'Guaranteed universal life', IUL: 'Indexed universal life',
+  VUL: 'Variable universal life', WL: 'Whole life', TERM: 'Term life',
+};
+const productName = (t) => PRODUCT_NAME[String(t || '').toUpperCase().replace(/[^A-Z]/g, '')]
+  || String(t || '').trim() || 'Life insurance';
 
 const ageOn = (dob, on) => {
   if (!dob) return null;
@@ -192,6 +210,130 @@ const SCENARIO_LABEL = {
   '-24': '24 months early', 0: 'At life expectancy', 24: '24 months late',
 };
 
+/* ------------------------------------------------------------------ *
+ * The cover
+ * ------------------------------------------------------------------ */
+
+/**
+ * Page one: three figures, and the whole commitment is the first of them.
+ *
+ * Everything below this page is detail. What page one has to do is let a
+ * reader who never turns it away with a true impression of the trade,
+ * and the way to get that wrong is the way the first draft got it wrong:
+ * lead with the purchase price. A life settlement is bought twice, once
+ * at closing and once a year afterwards, and on a deal where the
+ * premiums come to 85% of the price a cover that says "$2.2m in, $10m
+ * out" is not a summary. It is a lie of omission set in 34-point type.
+ *
+ * So the lead figure is TOTAL INVESTED -- purchase price and every
+ * premium to the expected maturity -- with the split written underneath
+ * it in the same breath, and the grid below breaks it back apart. The
+ * closing line says what happens if the premiums stop, because that is
+ * the risk the number alone does not carry.
+ *
+ * Drawn with absolute cursor moves rather than the flowing helpers the
+ * rest of the file uses: this page is one screenful of fixed furniture,
+ * and a block that reflows is a block that can collide with the footer.
+ */
+function cover(doc, c) {
+  const cw = WIDTH / 3;
+  /* `at` writes without moving the cursor, which is right for a grid and
+     wrong for a stack. This walks it down by the size just drawn. */
+  const say = (text, x, o2 = {}, gap = 6) => {
+    at(doc, text, x, o2);
+    doc.y -= (o2.size || 9) + gap;
+  };
+  const divider = (x, top, height) => {
+    doc.ops.push(`q 0.86 G 0.5 w ${(MARGIN + x).toFixed(2)} ${(top - height).toFixed(2)} m ${
+      (MARGIN + x).toFixed(2)} ${(top + 10).toFixed(2)} l S Q`);
+  };
+
+  /* ---------------------------- masthead ---------------------------- */
+  at(doc, c.firm, 0, { style: 'sansBold', size: 12 });
+  at(doc, 'Life Settlement Investment Opportunity', 0,
+    { style: 'sansBold', size: 12, align: 'right', width: WIDTH });
+  doc.y -= 15;
+  /* What this page is, where the software used to name itself. "Policy
+     Portfolio" told the reader nothing they wanted; "Overview" tells
+     them exactly what they are holding and that there is more behind
+     it. The detail pages carry the matching word. */
+  at(doc, 'OVERVIEW', 0, { style: 'sans', size: 7 });
+  at(doc, `${(c.o.carrier_name || '--').toUpperCase()}  ·  ${
+    (c.o.policy_number || '').toUpperCase()}`, 0,
+  { style: 'sans', size: 7, align: 'right', width: WIDTH });
+  doc.y -= 10;
+  at(doc, `AS OF ${c.asOf.toUpperCase()}`, 0,
+    { style: 'sans', size: 7, align: 'right', width: WIDTH });
+  doc.y -= 12;
+  rule(doc, { gray: 0.75, gap: 10 });
+
+  /* ---------------------------- headline ---------------------------- */
+  doc.y -= 34;
+  say(c.bothNames, 0, { style: 'sansBold', size: 15 }, 8);
+  say([`${money(c.benefitNow * c.f, 0)} death benefit${c.changing ? ', rising' : ''}`,
+    c.survivorship ? 'two insureds, paid on the second death' : c.oneLine,
+    c.partial ? `${c.share}% participation offered` : '',
+  ].filter(Boolean).join('  ·  '), 0, { size: 11 }, 38);
+
+  say('SUMMARY OF TERMS', 0, { style: 'sansBold', size: 8 }, 22);
+
+  /* -------------------------- the three -------------------------- */
+  if (!c.base) {
+    /* Nothing to lead with. Said plainly rather than dressed up: a cover
+       showing a death benefit and three dashes reads as a broken
+       document, and this one is a deal that has not been priced yet. */
+    say('This policy has not been priced yet.', 0, { style: 'sansBold', size: 18 }, 14);
+    for (const l of wrap('An asking price, a death benefit and a life expectancy are needed '
+      + 'before a return can be modelled. The terms entered so far, the medical picture and '
+      + 'the premium schedule are on the pages that follow.', WIDTH, 'regular', 11)) {
+      at(doc, l, 0, { size: 11 });
+      doc.y -= 15;
+    }
+  } else {
+    const top = doc.y;
+    const lead = [
+      ['You put in', money(c.total, 0),
+        `${money(c.price, 0)} at closing, then about ${money(c.perYear, 0)} a year`],
+      ['You collect', money(c.collect, 0), c.maturesOn || ''],
+      ['Expected return', c.headRate, c.headRateNote],
+    ];
+    lead.forEach(([k, v, n], i) => {
+      doc.y = top;
+      if (i > 0) divider(i * cw - 16, top, 92);
+      say(k.toUpperCase(), i * cw, { style: 'sansBold', size: 8 }, 20);
+      /* 34pt is chosen so that the widest figure this desk writes --
+         a ten-figure sum -- still fits a third of a landscape page. */
+      say(v, i * cw, { style: 'sansBold', size: 34 }, 12);
+      say(n, i * cw, { size: 9.5 }, 0);
+    });
+    doc.y = top - 118;
+    rule(doc, { gray: 0.88, gap: 24 });
+
+    /* ---------------------- the same figures, open ---------------------- */
+    const rowTop = doc.y;
+    c.grid.forEach(([k, v], i) => {
+      const col = i % 3;
+      doc.y = rowTop - Math.floor(i / 3) * 50;
+      if (col > 0 && i < 3) divider(col * cw - 16, rowTop, 92);
+      at(doc, String(k).toUpperCase(), col * cw, { style: 'sans', size: 7.5 });
+      doc.y -= 16;
+      at(doc, v, col * cw, { size: 12 });
+    });
+    doc.y = rowTop - 116;
+    rule(doc, { gray: 0.88, gap: 16 });
+    /* The sentence the lead figure cannot say by itself. */
+    at(doc, c.premiumWarning, 0, { size: 10 });
+  }
+
+  /* ----------------------------- footer ----------------------------- */
+  doc.y = 58;
+  rule(doc, { gray: 0.85, gap: 12 });
+  at(doc, 'CONFIDENTIAL  ·  FOR QUALIFIED INVESTORS ONLY  ·  DO NOT DISTRIBUTE  ·  '
+    + 'THE INSURED IS IDENTIFIED BY INITIALS', 0, { style: 'sans', size: 6.6 });
+  at(doc, 'DETAILED VIEW, SCENARIOS AND THE PREMIUM SCHEDULE OVERLEAF', 0,
+    { style: 'sans', size: 6.6, align: 'right', width: WIDTH });
+}
+
 /**
  * @param {object} o    an opportunity as loadOpportunity returns it
  * @param {object} opts { share, interest, firm, asOf }
@@ -238,6 +380,17 @@ export function opportunityPdf(o, opts = {}) {
     age: ageOn(o.insured_dob, r.date), benefit: benefitOn(r.date) }; });
   const totalPrem = rows.reduce((s, r) => s + r.amount, 0);
 
+  /* The free text, with the insureds' names taken out of it.
+     The numbered fields were never the leak -- nobody prints
+     `insured_last_name` on an investor sheet by accident. The leak is
+     the investment case, which somebody types as "Gerald is a repeat
+     seller" because on the screen where they type it that is allowed.
+     It is not allowed on the page that leaves the building. */
+  const thesis = scrubNames(o.thesis, o);
+  const impairments = scrubNames(o.impairments, o);
+  const mitigating = scrubNames(o.mitigating, o);
+  const underwriterNote = scrubNames(o.underwriter_note, o);
+
   const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
     || o.policy_number || '--';
   /* Both lives on a survivorship deal, initials only. The second insured
@@ -252,13 +405,81 @@ export function opportunityPdf(o, opts = {}) {
   const doc = new PdfDocument({ title: `Opportunity ${o.policy_number || ''}`,
     margin: MARGIN, size: PAGE, leading: 12 });
 
+  /* ------------------------------ page one ---------------------------- */
+  /* Everything the cover needs, worked out here where the rest of the
+     document's figures are worked out. The cover draws; it does not
+     decide. Two documents that disagree about the size of a deal is the
+     failure this whole file is arranged to prevent, and a cover with its
+     own arithmetic is exactly how that happens. */
+  const scenLate = scen.find((s) => s.offset_months === 24) || null;
+  const scenEarly = scen.find((s) => s.offset_months === -24) || null;
+  const perYear = base
+    ? (Number(base.annual_premium_assumed) * f
+      || (running.length ? totalPrem * f / running.length : 0))
+    : 0;
+  const headRate = base
+    ? (interest === 'compound' ? rate(base.compound_rate)
+      : interest === 'both' ? `${rate(base.rate)} / ${rate(base.compound_rate)}`
+        : rate(base.rate))
+    : '--';
+  const headRateNote = interest === 'compound' ? 'a year, compounded'
+    : interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
+  const swing = [
+    scenLate && rate(scenLate.rate) !== '--'
+      ? `${rate(scenLate.rate)} two years late` : null,
+    scenEarly && rate(scenEarly.rate) !== '--'
+      ? `${rate(scenEarly.rate)} two years early` : null,
+  ].filter(Boolean).join(', ');
+
+  cover(doc, {
+    o, firm, f, share, partial, changing, survivorship, bothNames, base,
+    asOf: opts.asOf || longDate(),
+    benefitNow: benefit,
+    collect: ((base?.death_benefit ?? benefit) || 0) * f,
+    total: base ? Number(base.invested) * f : 0,
+    price: price * f,
+    perYear,
+    maturesOn: base ? longMonth(base.matures_on) : '',
+    headRate,
+    headRateNote,
+    oneLine: o.le_months ? `life expectancy ${o.le_months} months` : 'one insured',
+    grid: [
+      ['At closing', `${money(price * f, 0)}${o.expected_close
+        ? `, ${shortDate(o.expected_close)}` : ''}`],
+      /* From the SCENARIO, not from the posted schedule. The schedule can
+         run past the expected maturity -- somebody types ten years of
+         premiums on a policy modelled to mature in six -- and a cell
+         headed "to maturity" that quietly counts four extra years does
+         not add up to the total in the lead figure beside it. That is
+         precisely the drift the cover exists to prevent. */
+      ['Premiums to maturity', base
+        ? `${money(Number(base.premiums_paid) * f, 0)} over ${
+          base.premium_count} year${base.premium_count === 1 ? '' : 's'}`
+        : running.length ? `${money(totalPrem * f, 0)} entered` : 'None entered yet'],
+      ['Policy', [o.product_type ? productName(o.product_type) : 'Life insurance',
+        o.carrier_name].filter(Boolean).join(', ')],
+      [survivorship ? 'Insureds' : 'Insured', survivorship
+        ? `Two, ${lives.map((l) => `${ageOn(l.dob, o.expected_close) ?? '--'} ${
+          l.gender || ''}`.trim()).join(' and ')}`
+        : `${ageOn(o.insured_dob, o.expected_close) ?? '--'} ${o.insured_gender || ''}`.trim()],
+      ['Expected maturity', base
+        ? `${longMonth(base.matures_on)}, about ${Number(base.years).toFixed(1)} years`
+        : '--'],
+      ['If the wait is longer', swing || 'Not modelled'],
+    ],
+    /* The one sentence the lead figure cannot carry on its own. */
+    premiumWarning: 'The premiums are a commitment, not an option: the policy lapses if they '
+      + 'stop, and the benefit goes with it. A life expectancy is a median, not a promise.',
+  });
+  doc.newPage();
+
   /* ---------------------------- masthead ---------------------------- */
   doc.reserve(3);
   at(doc, firm, 0, { style: 'sansBold', size: 12 });
   at(doc, 'Life Settlement Investment Opportunity', 0,
     { style: 'sansBold', size: 12, align: 'right', width: WIDTH });
   doc.y -= 15;
-  at(doc, 'POLICY PORTFOLIO', 0, { style: 'sans', size: 7 });
+  at(doc, 'DETAILED VIEW', 0, { style: 'sans', size: 7 });
   at(doc, `${(o.carrier_name || '--').toUpperCase()}  ·  ${
     (o.policy_number || '').toUpperCase()}`, 0,
   { style: 'sans', size: 7, align: 'right', width: WIDTH });
@@ -274,9 +495,13 @@ export function opportunityPdf(o, opts = {}) {
   doc.y -= 16;
 
   /* ----------------------------- headline ---------------------------- */
+  /* Smaller than it used to be, and deliberately. The cover carries the
+     name and the three figures at full size; this line exists so that a
+     page separated from its cover -- printed, stapled, photocopied --
+     still says which deal it belongs to. */
   doc.reserve(2);
-  at(doc, bothNames, 0, { style: 'sansBold', size: 19 });
-  doc.y -= 23;
+  at(doc, bothNames, 0, { style: 'sansBold', size: 13 });
+  doc.y -= 17;
   doc.reserve(1);
   const headBits = [`${money(benefit, 2)} death benefit${changing ? ', rising' : ''}`];
   if (partial) headBits.push(`${share}% participation offered`);
@@ -426,29 +651,29 @@ export function opportunityPdf(o, opts = {}) {
       ['Offer closes', shortDate(o.offer_closes_on)],
       ...(o.records_through ? [['Records through', shortDate(o.records_through)]] : []),
     ], dx, colW);
-    if (o.thesis) {
+    if (thesis) {
       doc.space(8);
       label(doc, 'Investment case', { dx });
-      bullets(doc, o.thesis, dx, colW);
+      bullets(doc, thesis, dx, colW);
     }
   });
   const leftEnd = doc.y;
 
   doc.y = top;
   column(doc, colW + 34, colW, (dx) => {
-    if (o.impairments) {
+    if (impairments) {
       label(doc, 'Medical factors behind the life expectancy', { dx });
-      bullets(doc, o.impairments, dx, colW);
+      bullets(doc, impairments, dx, colW);
       doc.space(6);
     }
-    if (o.mitigating) {
+    if (mitigating) {
       label(doc, 'Mitigating factors', { dx });
-      bullets(doc, o.mitigating, dx, colW);
+      bullets(doc, mitigating, dx, colW);
       doc.space(6);
     }
-    if (o.underwriter_note) {
+    if (underwriterNote) {
       label(doc, 'Underwriter assessment', { dx });
-      for (const l of wrap(o.underwriter_note, colW, 'regular', 8.5)) {
+      for (const l of wrap(underwriterNote, colW, 'regular', 8.5)) {
         doc.reserve(1);
         at(doc, l, dx, { size: 8.5 });
         doc.y -= 11;

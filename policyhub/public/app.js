@@ -873,7 +873,7 @@ function wireFirstPassword() {
       await api('/auth/password', { method: 'POST', body: formValues(e.target) });
       state.user = await api('/auth/me');
       await loadPrefs();
-      location.hash = '#/dashboard';
+      location.hash = homeHash();
       toast('That is your password now');
       await render();
     } catch (err) {
@@ -892,10 +892,21 @@ function wireFirstPassword() {
 
 /* ------------------------------ router ------------------------------- */
 
+/**
+ * Where an empty address goes.
+ *
+ * "Dashboard" for everybody who has one. A reviewing doctor does not:
+ * the dashboard reads the whole book, which is the one thing that
+ * account may not do, so landing there would greet him with an error on
+ * the screen he is meant to live on. His home is his queue.
+ */
+const homeRoute = () => (state.user?.role === 'medical' ? 'medical' : 'dashboard');
+const homeHash = () => `#/${homeRoute()}`;
+
 function parseHash() {
-  const h = location.hash.replace(/^#\/?/, '') || 'dashboard';
+  const h = location.hash.replace(/^#\/?/, '') || homeRoute();
   const [route, id, extra] = h.split('/');
-  return { route: route || 'dashboard', params: { id, extra } };
+  return { route: route || homeRoute(), params: { id, extra } };
 }
 
 export function closeAllDialogs() {
@@ -1017,8 +1028,18 @@ const MANAGER_NAV = STAFF_NAV
    again unless the account holds the grant, which is the only place that
    question can be answered. */
 
+/* The reviewing doctor's menu, which is two entries and would be one if
+   people did not have to change their own passwords. Everything else on
+   the staff menu is a screen this account cannot reach, and a tab that
+   answers 403 reads as a broken application rather than as a boundary. */
+const MEDICAL_NAV = [
+  ['medical', 'To review'],
+  ['settings', 'Account'],
+];
+
 const isInvestorUser = () => state.user?.role === 'investor';
 const isManagerUser  = () => state.user?.role === 'manager';
+const isMedicalUser  = () => state.user?.role === 'medical';
 /**
  * A keyboard shortcut that belongs to the screen currently rendered.
  *
@@ -1101,7 +1122,8 @@ const isAdminUser    = () => state.user?.role === 'admin';
  * granted ends up on a manager's screen.
  */
 const navItems = () => {
-  const list = isInvestorUser() ? INVESTOR_NAV
+  const list = isMedicalUser() ? MEDICAL_NAV
+    : isInvestorUser() ? INVESTOR_NAV
     : isManagerUser() ? MANAGER_NAV
     // An editor or viewer is staff but not an administrator.
     : state.user?.role === 'admin' ? STAFF_NAV
@@ -1443,7 +1465,7 @@ function wireReset() {
       state.signedOutReason = null;
       noteActivity();
       await loadPrefs();
-      location.hash = '#/dashboard';
+      location.hash = homeHash();
       await render();
       toast('That is your password now');
     } catch (err) {
@@ -1508,7 +1530,7 @@ function wireLogin() {
       state.signedOutReason = null;
       noteActivity();
       if (!state.user.must_change_password) await loadPrefs();
-      location.hash = '#/dashboard';
+      location.hash = homeHash();
       await render();
     } catch (err) {
       $('#loginError').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
@@ -5755,7 +5777,11 @@ async function opportunityView() {
     ${''/* Staff only, and the server decides that rather than this line:
            an investor's copy of the deal arrives without the field at all. */}
     ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}
-    ${o.le_reports === undefined ? '' : leReportPanel(o.le_reports, 'opportunity', o.id, o)}`;
+    ${o.le_reports === undefined ? '' : leReportPanel(o.le_reports, 'opportunity', o.id, o)}
+    ${''/* Not gated on `can_le`: a review is a colleague's written opinion
+           on the case, and whoever works the deal needs to see that one is
+           outstanding even if they may not spend money running records. */}
+    ${o.medical_reviews === undefined ? '' : medicalPanel(o.medical_reviews, o)}`;
 
   return {
     html,
@@ -5773,6 +5799,7 @@ async function opportunityView() {
         });
       }
       if (o.valuations !== undefined) wireValuationPanel('opportunity', o.id);
+      if (o.medical_reviews !== undefined) wireMedicalPanel(o);
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
       $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
@@ -6632,13 +6659,105 @@ async function opportunitySheetView() {
         <strong>Default</strong>, "Headers and footers" <strong>off</strong> and
         <strong>Background graphics</strong> ticked.
       </div>
+      <div class="no-print" id="sheetEmail"></div>
       <div class="rpt-output">${buildOpportunitySheet(o, {
     share, interest: interestShown() })}</div>`,
     after: () => {
       wireInterestToggle();
       $('#sheetPrint')?.addEventListener('click', () => window.print());
+      /* Built every time the sheet is, rather than behind a button. The
+         covering note is part of sending the deal out, not an extra step
+         somebody remembers -- and a note written by hand beside a sheet
+         drawn by the server is how the figure in the email comes to
+         disagree with the figure on the paper. */
+      loadCoveringEmail(o, share);
     },
   };
+}
+
+/**
+ * The covering email, on the one-pager screen.
+ *
+ * Composed by the server from the same record the sheet is drawn from,
+ * shown as plain editable text, and left for a person to send. Not sent
+ * from here: a covering note is a letter, it should go from the sender's
+ * own mailbox, and the reply should come back to them.
+ *
+ * Fetched after the sheet rather than with it, so a slow round trip never
+ * holds up the document itself.
+ */
+async function loadCoveringEmail(o, share) {
+  const box = $('#sheetEmail');
+  if (!box) return;
+  box.innerHTML = '<div class="rpt-hint">Writing the covering email…</div>';
+  let draft;
+  try {
+    draft = await api(`/opportunities/${o.id}/email?share=${share}&interest=${
+      encodeURIComponent(interestShown())}`);
+  } catch (err) {
+    box.innerHTML = `<div class="rpt-hint">The covering email could not be written:
+      ${esc(err.message)}</div>`;
+    return;
+  }
+  /* Rendered as an option list rather than pre-filled: the draft opens
+     with no name on it, because the same draft goes to four people and
+     the worst thing this screen could do is send one addressed to
+     somebody else. */
+  const people = draft.recipients || [];
+  box.innerHTML = `
+    <div class="mail-draft">
+      <div class="mail-draft-head">
+        <div><h3>Covering email</h3>
+          <div class="muted" style="font-size:12px">Attach the PDF above, then copy this
+            across. Initials only — no name, no date of birth, no diagnosis leaves in an
+            email.</div></div>
+        <div class="spacer"></div>
+        ${people.length ? `<select id="mailTo" class="mail-to">
+          <option value="">No name at the top</option>
+          ${people.map((r) => `<option value="${esc(r.name)}" data-email="${esc(r.email || '')}"
+            >${esc(r.name)}${r.email ? '' : ' (no email on file)'}</option>`).join('')}
+        </select>` : ''}
+        <button type="button" class="btn" id="mailCopy">Copy</button>
+        <button type="button" class="btn btn-primary" id="mailOpen">Open in mail</button>
+      </div>
+      ${(draft.warnings || []).length ? `<div class="error-box" style="margin:0 0 12px">
+        ${draft.warnings.map((w) => `<div>${esc(w)}</div>`).join('')}</div>` : ''}
+      <label class="mail-label">Subject</label>
+      <input type="text" id="mailSubject" class="mail-subject" value="${esc(draft.subject)}">
+      <label class="mail-label">Message</label>
+      <textarea id="mailBody" class="mail-body" rows="18">${esc(draft.body)}</textarea>
+      <div class="muted" style="font-size:12px;margin-top:8px">
+        Attachment: <strong>${esc(draft.attachment || 'the one-pager')}</strong> — use
+        <strong>Download PDF</strong> above, then attach the file you saved.</div>
+    </div>`;
+
+  const body = $('#mailBody');
+  const subject = $('#mailSubject');
+  const sel = $('#mailTo');
+  /* Retyping the salutation in the draft when a recipient is picked, and
+     only the salutation: whatever the sender has edited below it is
+     theirs and must survive. */
+  sel?.addEventListener('change', () => {
+    const name = sel.value;
+    const lines = body.value.split('\n');
+    const greeted = /^[^\n]{1,60},$/.test(lines[0] || '') && lines[1] === '';
+    if (greeted) lines.splice(0, name ? 1 : 2, ...(name ? [`${name},`] : []));
+    else if (name) lines.unshift(`${name},`, '');
+    body.value = lines.join('\n');
+  });
+  $('#mailCopy')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(`${subject.value}\n\n${body.value}`);
+      toast('Copied — subject and message');
+    } catch { body.select(); toast('Press ⌘C or Ctrl+C to copy'); }
+  });
+  $('#mailOpen')?.addEventListener('click', () => {
+    const to = sel?.selectedOptions?.[0]?.dataset?.email || '';
+    /* mailto has no attachment field, which is the whole reason the hint
+       above says to attach the PDF by hand. */
+    window.location.href = `mailto:${encodeURIComponent(to)}?subject=${
+      encodeURIComponent(subject.value)}&body=${encodeURIComponent(body.value)}`;
+  });
 }
 
 /**
@@ -8583,7 +8702,7 @@ async function settingsView() {
   const isAdmin = state.user.role === 'admin';
   const canEdit = ['admin', 'editor'].includes(state.user.role);
   // Anything beyond the password panel is off-limits to scoped accounts.
-  const accountOnly = isInvestorUser() || isManagerUser();
+  const accountOnly = isInvestorUser() || isManagerUser() || isMedicalUser();
   const investorUser = accountOnly;
   const [users, audit, funds, docs, investors, myPlaces, firmNotices, mail, mailHealth]
     = await Promise.all([
@@ -8593,7 +8712,7 @@ async function settingsView() {
     // Staff read the cabinet on the Documents tab; here it is only an
     // investor's own copies, on the one page they have for them.
     isInvestorUser() ? api('/documents').catch(() => []) : Promise.resolve([]),
-    isInvestorUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
+    isInvestorUser() || isMedicalUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
     // Everybody can see where their own account has been used. Only an
     // administrator sees the firm's.
     api('/security/locations').catch(() => []),
@@ -8986,7 +9105,8 @@ async function settingsView() {
           ${inputField('Email *', 'email', '', 'email', 'required')}
           ${inputField('Full name', 'full_name')}
           ${inputField('Password (10+ characters) *', 'password', '', 'password', 'required minlength=10')}
-          ${selectField('Role', 'role', 'editor', ['admin', 'editor', 'viewer', 'manager', 'investor'])}
+          ${selectField('Role', 'role', 'editor',
+            ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'])}
           <div class="field" id="fundPick" style="display:none">
             <label>Owner entities *</label>
             <select name="fund_ids" multiple size="${Math.min(5, Math.max(2, funds.length))}">
@@ -9015,6 +9135,23 @@ async function settingsView() {
             <span class="muted" style="font-size:12px">
               This login will see only the policies this investor holds a share of.</span>
           </div>
+          ${''/* Said before the account exists, because the narrowness is
+                 the whole point of the role and an administrator who
+                 expects a read-only staff login will wonder where the
+                 book went. */}
+          <div class="field" id="medicalNote" style="display:none">
+            <div class="dlg-note">
+              <strong>A reviewing doctor.</strong> This login opens on one screen: the cases
+              sent to them for review. No policy, no opportunity, no investor, no price, no
+              death benefit and no rate of return — not hidden, absent. That is deliberate:
+              a clinical opinion is worth having because it was formed without knowing what
+              the deal needs.
+              <br><br>
+              They <em>do</em> see the insured's name on a case sent to them, because they
+              are reading that person's records and matching a chart to the wrong patient is
+              a clinical error. Every file they open is recorded against their name.
+            </div>
+          </div>
         `, async (v) => {
           await api('/users', { method: 'POST', body: v });
           toast('User created');
@@ -9026,6 +9163,11 @@ async function settingsView() {
           $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
           $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
         };
+        $('#medicalNote', dlg).style.display = 'none';
+        const syncMed = () => {
+          $('#medicalNote', dlg).style.display = roleSel.value === 'medical' ? '' : 'none';
+        };
+        roleSel.addEventListener('change', syncMed);
         roleSel.addEventListener('change', sync);
         sync();
       });
@@ -9056,7 +9198,7 @@ async function openUserDialog(u, funds, onSaved) {
     <div class="field-row">
       <div class="field"><label>Role</label>
         <select name="role" ${self ? 'disabled' : ''}>
-          ${['admin', 'editor', 'viewer', 'manager', 'investor'].map((r) =>
+          ${['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'].map((r) =>
             `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
         </select>
       </div>
@@ -9127,6 +9269,18 @@ async function openUserDialog(u, funds, onSaved) {
         before there is any holding to go on. Without it they would have to key in a second
         copy of a client the firm already has. It only lets them <em>name</em> the investor;
         it does not open up holdings outside their entities.</span>
+    </div>
+
+    <div class="field" id="medicalNote" style="display:none">
+      <div class="dlg-note">
+        <strong>A reviewing doctor.</strong> This login opens on one screen: the cases sent
+        to them for review. No policy, no opportunity, no investor, no price, no death
+        benefit and no rate of return — not hidden, absent. A clinical opinion is worth
+        having because it was formed without knowing what the deal needs.
+        <br><br>
+        They <em>do</em> see the insured's name on a case sent to them, because they are
+        reading that person's records. Every file they open is recorded against their name.
+      </div>
     </div>
 
     <div class="field" id="investorPick" style="display:none">
@@ -9201,6 +9355,7 @@ async function openUserDialog(u, funds, onSaved) {
        it, so the choice is only meaningful for the roles in between. */
     $('#valuePick', dlg).style.display =
       ['manager', 'editor', 'viewer'].includes(roleSel.value) ? '' : 'none';
+    $('#medicalNote', dlg).style.display = roleSel.value === 'medical' ? '' : 'none';
   };
   roleSel.addEventListener('change', sync);
   sync();
@@ -10706,6 +10861,512 @@ function leCard(r, { compact = false } = {}) {
     </div>`;
 }
 
+/* ------------------------------------------------------------------ *
+ * Medical review, on the desk's side of the case
+ * ------------------------------------------------------------------ */
+
+/**
+ * The panel on a deal: what has been sent, what has come back, and the
+ * one button that takes a returned estimate onto the case.
+ *
+ * Why there is a button at all, when the requirement was that the
+ * reviewer's answer attaches automatically: it DOES attach
+ * automatically, and it is adopted automatically too — but only when the
+ * case had no life expectancy on it. Where one already exists the deal
+ * has been priced off it, quoted at that price and possibly shown to
+ * investors at that rate, and replacing it silently would move every
+ * figure on the one-pager without anybody pressing anything. So that one
+ * case is a click, and the line above it says what it would change.
+ */
+function medicalPanel(reviews, o) {
+  const rows = reviews || [];
+  const live = rows.filter((r) => ['Requested', 'Opened'].includes(r.status));
+  const back = rows.filter((r) => r.status === 'Returned');
+  const twoLives = !!(o?.analysis?.survivorship);
+
+  const line = (r) => {
+    const [label, tone] = REVIEW_STATE[r.status] || [r.status, ''];
+    const mine = r.life === 2 ? 'the second insured' : (twoLives ? 'the first insured' : '');
+    const current = r.life === 2 ? Number(o?.insured2_le_months) : Number(o?.le_months);
+    const differs = r.le_months && current && Number(r.le_months) !== current;
+    return `<tr>
+      <td><span class="badge ${tone}"><span class="dot"></span>${esc(label)}</span></td>
+      <td class="strong">${esc(r.reviewer_name || r.reviewer_email || '—')}${
+        mine ? `<div class="secondary">${esc(mine)}</div>` : ''}</td>
+      <td>${fmtDate(r.requested_at)}</td>
+      <td class="num">${r.le_months
+        ? `<strong>${r.le_months} mo</strong><div class="secondary">${
+          (Number(r.le_months) / 12).toFixed(1)} years, ${esc(r.le_basis || 'median')}</div>`
+        : '—'}</td>
+      <td>${esc(r.recommendation || '—')}</td>
+      <td>${r.adopted_at
+        ? `<span class="muted">on the case since ${fmtDate(r.adopted_at)}</span>`
+        : r.status === 'Returned' && r.le_months
+          ? `<button class="btn-sm" data-med-adopt="${r.id}"
+               data-months="${r.le_months}" data-life="${r.life}"
+               data-current="${current || ''}">${differs
+                 ? `Use ${r.le_months} mo instead of ${current}` : 'Put it on the case'}</button>`
+          : r.status === 'Requested' || r.status === 'Opened'
+            ? `<button class="btn-sm" data-med-cancel="${r.id}">Withdraw</button>`
+            : '—'}</td>
+    </tr>`;
+  };
+
+  const opinion = (r) => `<div class="med-opinion">
+    <div class="med-opinion-head">${esc(r.reviewer_name || 'The reviewer')} —
+      <strong>${r.le_months} months</strong>${r.recommendation
+        ? ` · ${esc(r.recommendation)}` : ''}${r.confidence
+        ? ` · ${esc(r.confidence)}` : ''}</div>
+    ${r.findings ? `<p class="med-opinion-body">${esc(r.findings)}</p>` : ''}
+    ${r.impairments ? `<div class="med-opinion-sub"><span>Impairments</span>
+      <ul class="rpt-bullets">${String(r.impairments).split('\n').map((l) => l.trim())
+        .filter(Boolean).map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>` : ''}
+    ${r.mitigating ? `<div class="med-opinion-sub"><span>Against it</span>
+      <ul class="rpt-bullets">${String(r.mitigating).split('\n').map((l) => l.trim())
+        .filter(Boolean).map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>` : ''}
+  </div>`;
+
+  return `
+  <div class="card">
+    <div class="card-head"><h2>Medical review</h2>
+      <div class="spacer"></div>
+      ${canEditData() ? `<button class="btn-sm" id="medSendBtn">Send for medical review</button>`
+        : ''}
+    </div>
+    <div class="card-body">
+      ${rows.length ? `<div class="table-wrap"><table class="data">
+          <thead><tr><th>Status</th><th>Reviewer</th><th>Sent</th>
+            <th class="num">Their estimate</th><th>Recommendation</th><th></th></tr></thead>
+          <tbody>${rows.map(line).join('')}</tbody></table></div>`
+        : `<div class="empty">Nobody has looked at this case yet.
+           <strong>Send for medical review</strong> puts it in a doctor's queue with the
+           records summary attached. He sees the file and nothing else — no price, no death
+           benefit, no rate of return.</div>`}
+      ${back.map(opinion).join('')}
+      ${live.length ? `<div class="muted" style="font-size:12px;margin-top:10px">
+        Out for review since ${fmtDate(live[0].requested_at)}. The estimate lands on this
+        case by itself if the case has none; if it already has one, it waits for you.</div>`
+        : ''}
+    </div>
+  </div>`;
+}
+
+/** The dialog that sends it. */
+async function openMedicalReviewDialog(o) {
+  let reviewers = [];
+  try { reviewers = await api('/medical-reviews/reviewers'); } catch { /* shown below */ }
+  if (!reviewers.length) {
+    alert('There is no reviewing doctor on the system yet. An administrator opens one under '
+      + 'Settings → Users, with the role "medical".');
+    return;
+  }
+  /* Only a finished run is worth sending: an errored or still-running case
+     would arrive as a broken link in a doctor's queue. */
+  const summaries = (o.le_reports || []).filter((r) => r.status === 'done');
+  const twoLives = !!o.analysis?.survivorship;
+  const outstanding = (o.medical_reviews || [])
+    .filter((r) => ['Requested', 'Opened'].includes(r.status)).map((r) => r.life);
+
+  openDialog(`Send ${oppName(o)} for medical review`, `
+    <div class="field"><label>Reviewing doctor *</label>
+      <select name="reviewer_id" required>
+        ${reviewers.map((r) => `<option value="${r.id}">${esc(r.full_name || r.email)}</option>`)
+          .join('')}
+      </select>
+    </div>
+    ${twoLives ? `<div class="field"><label>Which insured *</label>
+      <select name="life">
+        <option value="1" ${outstanding.includes(1) ? 'disabled' : ''}>The first insured${
+          outstanding.includes(1) ? ' — already out for review' : ''}</option>
+        <option value="2" ${outstanding.includes(2) ? 'disabled' : ''}>The second insured${
+          outstanding.includes(2) ? ' — already out for review' : ''}</option>
+      </select>
+      <span class="muted" style="font-size:12px">This case has two lives and they are two
+        different charts. Send them separately — a doctor asked about "the case" will give
+        you one number, and the deal is priced off two.</span>
+    </div>` : '<input type="hidden" name="life" value="1">'}
+    <div class="field"><label>Records summary to send with it</label>
+      <select name="le_report_id">
+        <option value="">None — he reads the file cold</option>
+        ${summaries.map((r) => `<option value="${r.id}">${esc(r.initials || 'Case')} · ${
+          fmtDate(r.ran_at)}${r.central_years != null
+            ? ` · its estimate ${Number(r.central_years).toFixed(1)} years` : ''}</option>`)
+          .join('')}
+      </select>
+      <span class="muted" style="font-size:12px">${summaries.length
+        ? 'He can open the full summary from his queue. The service keeps its copy for about '
+          + 'a day, so send it while it is fresh.'
+        : 'No finished records summary is attached to this case. He will read whatever the '
+          + 'file itself says.'}</span>
+    </div>
+    <div class="field"><label>What you want looked at</label>
+      <textarea name="ask" rows="4"
+        placeholder="The 21st estimate is 36 months and the cardiology notes look worse than that to me. Is 36 defensible?"></textarea>
+    </div>
+    <div class="dlg-note">
+      He will see the insured's name, date of birth, sex, state, whatever is typed in the
+      medical section, and the summary you attach. He will <strong>not</strong> see the
+      asking price, the death benefit, the modelled return, or any other case. His estimate
+      goes onto this deal by itself if it has none; if it already has one, you decide.
+    </div>
+  `, async (v) => {
+    await api('/medical-reviews', { method: 'POST', body: {
+      opportunity_id: o.id, life: Number(v.life) || 1,
+      reviewer_id: Number(v.reviewer_id), ask: v.ask,
+      le_report_id: v.le_report_id ? Number(v.le_report_id) : null } });
+    toast('Sent for review');
+    render();
+  }, 'Send it');
+}
+
+/** The buttons in the panel above. */
+function wireMedicalPanel(o) {
+  $('#medSendBtn')?.addEventListener('click', () =>
+    openMedicalReviewDialog(o).catch((e) => alert(e.message)));
+  document.querySelectorAll('[data-med-adopt]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const { months, current, life } = b.dataset;
+      /* Named, because the answer is a repricing. A dialog that says
+         "are you sure?" is not a question, it is a speed bump; one that
+         says what is about to change is. */
+      const what = current
+        ? `Replace the ${current}-month life expectancy on ${
+          life === '2' ? 'the second insured' : 'this deal'} with ${months} months?\n\n`
+          + 'Every figure on the one-pager is priced off it and will move.'
+        : `Put ${months} months on ${life === '2' ? 'the second insured' : 'this deal'}?`;
+      if (!confirm(what)) return;
+      try {
+        await api(`/medical-reviews/${b.dataset.medAdopt}/adopt`, { method: 'POST' });
+        toast('On the case'); render();
+      } catch (err) { alert(err.message); }
+    }));
+  document.querySelectorAll('[data-med-cancel]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!confirm('Withdraw this request? The doctor will see it has gone.')) return;
+      try {
+        await api(`/medical-reviews/${b.dataset.medCancel}/cancel`, { method: 'POST' });
+        toast('Withdrawn'); render();
+      } catch (err) { alert(err.message); }
+    }));
+}
+
+/* ===================================================================== *
+ * The reviewing doctor's screen
+ *
+ * The whole application, for this account. Two views: the queue, and one
+ * case open.
+ *
+ * What is NOT on it is the design. No asking price, no death benefit, no
+ * rate of return, no other case on the book, no menu into any of them.
+ * A second opinion is worth having because it was formed without knowing
+ * what answer the deal needs, and a screen that quietly shows the price
+ * in the corner destroys that on the first case.
+ *
+ * What IS on it: the name. Everywhere else an insured is initials. He is
+ * reading that person's records, every page of which carries the name,
+ * and matching a chart to the wrong patient is a clinical error rather
+ * than a privacy nicety. Every open is logged.
+ * ===================================================================== */
+
+/* The label a person reads, and the badge class that colours it. The
+   status column stores the short word; nobody outside this file should
+   have to know that "Requested" means "waiting for you". */
+const REVIEW_STATE = {
+  Requested: ['Waiting for you', 'lapsed'],
+  Opened: ['In progress', ''],
+  Returned: ['Returned', 'inforce'],
+  Declined: ['Declined', 'lapsed'],
+  Cancelled: ['Withdrawn by the office', ''],
+};
+
+/** "M. Sommers, 85, male" — the line at the top of a chart. */
+function subjectLine(s) {
+  if (!s) return 'This case has no insured on it.';
+  const name = [s.first_name, s.last_name].filter(Boolean).join(' ') || 'Unnamed';
+  const age = s.dob ? ageFromDob(s.dob) : null;
+  const sex = s.gender === 'M' ? 'male' : s.gender === 'F' ? 'female' : s.gender || '';
+  return [name, age != null ? `${age}` : null, sex, s.state].filter(Boolean).join(' · ');
+}
+
+const ageFromDob = (dob) => {
+  const b = new Date(`${String(dob).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(b.getTime())) return null;
+  const now = new Date();
+  let a = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) a -= 1;
+  return a >= 0 && a < 130 ? a : null;
+};
+
+/** Months, said the way a person says them. */
+const inYears = (months) => (months == null || months === ''
+  ? '—' : `${(Number(months) / 12).toFixed(1)} years`);
+
+async function medicalQueueView() {
+  if (state.params.id) return medicalCaseView();
+  const rows = await api('/medical-reviews');
+  const waiting = rows.filter((r) => ['Requested', 'Opened'].includes(r.status));
+  const done = rows.filter((r) => !['Requested', 'Opened'].includes(r.status));
+
+  const card = (r) => {
+    const [label, tone] = REVIEW_STATE[r.status] || [r.status, ''];
+    return `<a class="med-card" href="#/medical/${r.id}">
+      <div class="med-card-top">
+        <div class="med-who">${esc(subjectLine(r.subject))}</div>
+        <span class="badge ${tone}"><span class="dot"></span>${esc(label)}</span>
+      </div>
+      ${r.ask ? `<div class="med-ask">${esc(r.ask)}</div>` : ''}
+      <div class="med-meta">
+        Sent ${fmtDate(r.requested_at)}${r.requested_by_name
+          ? ` by ${esc(r.requested_by_name)}` : ''}${r.life === 2
+          ? ' · the second insured on a joint case' : ''}${r.summary
+          ? ' · a records summary is attached' : ''}
+        ${r.le_months ? ` · your estimate: <strong>${r.le_months} months</strong>` : ''}
+      </div>
+    </a>`;
+  };
+
+  return {
+    html: `
+      <div class="page-head"><div><h1>To review</h1>
+        <div class="sub">Cases the office has put in front of you.</div></div></div>
+
+      ${waiting.length ? waiting.map(card).join('')
+        : `<div class="card"><div class="card-body empty">
+             Nothing is waiting for you. When the office sends a case it appears here,
+             and you will get an email.</div></div>`}
+
+      ${done.length ? `<h2 class="med-section">Already answered</h2>
+        ${done.map(card).join('')}` : ''}
+
+      <div class="med-foot">
+        You will not see a price, a death benefit or a rate of return anywhere on these
+        screens. That is deliberate — your reading is worth having because it was made
+        without them.
+      </div>`,
+  };
+}
+
+/**
+ * One case, open.
+ *
+ * The file on the left, the box for the opinion on the right. The
+ * estimate is asked for in MONTHS because that is the unit every life
+ * expectancy in this business is quoted in, with the years shown beside
+ * it as you type so a slip of a digit is visible rather than arithmetic.
+ */
+async function medicalCaseView() {
+  const r = await api(`/medical-reviews/${state.params.id}`);
+  const s = r.subject || {};
+  const [label, tone] = REVIEW_STATE[r.status] || [r.status, ''];
+  const done = r.status === 'Returned' || r.status === 'Declined';
+  const locked = !!r.adopted_at || r.status === 'Cancelled';
+
+  return {
+    html: `
+      <div class="page-head">
+        <div><a class="back" href="#/medical">← Back to the queue</a>
+          <h1>${esc([s.first_name, s.last_name].filter(Boolean).join(' ') || 'Case')}</h1>
+          ${''/* The name is the heading; repeating it in the line under
+                 it, which is what `subjectLine` would do, is the page
+                 telling you twice. What belongs here is the rest of the
+                 identification. */}
+          <div class="sub">${esc([s.dob ? `${ageFromDob(s.dob)}` : null,
+    s.gender === 'M' ? 'male' : s.gender === 'F' ? 'female' : s.gender,
+    s.state, s.records_through ? `records through ${fmtDate(s.records_through)}` : null,
+  ].filter(Boolean).join(' · '))}</div></div>
+        <div class="spacer"></div>
+        <span class="badge ${tone}"><span class="dot"></span>${esc(label)}</span>
+      </div>
+
+      <div class="grid-2 med-grid">
+        <div>
+          <div class="card">
+            <div class="card-head"><h2>What you have been asked</h2></div>
+            <div class="card-body">
+              ${r.ask ? `<p class="med-ask-full">${esc(r.ask)}</p>`
+                : '<p class="muted">Nothing in particular — a life expectancy and your '
+                  + 'reading of the case.</p>'}
+              <div class="muted" style="font-size:12px;margin-top:10px">
+                Sent ${fmtDate(r.requested_at)}${r.requested_by_name
+                  ? ` by ${esc(r.requested_by_name)}` : ''}.
+                ${r.life === 2 ? 'This is the second insured on a joint case; you are being '
+                  + 'asked about this person only.' : ''}
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>The file</h2></div>
+            <div class="card-body">
+              <dl class="kv">
+                <dt>Name</dt><dd>${esc([s.first_name, s.last_name]
+                  .filter(Boolean).join(' ') || '—')}</dd>
+                <dt>Date of birth</dt><dd>${s.dob ? `${fmtDate(s.dob)} · ${
+                  ageFromDob(s.dob)} today` : '—'}</dd>
+                <dt>Sex</dt><dd>${esc(s.gender || '—')}</dd>
+                <dt>State</dt><dd>${esc(s.state || '—')}</dd>
+                ${s.records_through ? `<dt>Records through</dt>
+                  <dd>${fmtDate(s.records_through)}</dd>` : ''}
+              </dl>
+              ${s.impairments ? `<h3 class="med-h3">What the file says</h3>
+                <ul class="rpt-bullets">${String(s.impairments).split('\n')
+                  .map((l) => l.trim()).filter(Boolean)
+                  .map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+              ${s.mitigating ? `<h3 class="med-h3">Noted against it</h3>
+                <ul class="rpt-bullets">${String(s.mitigating).split('\n')
+                  .map((l) => l.trim()).filter(Boolean)
+                  .map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+            </div>
+          </div>
+
+          ${r.summary ? `<div class="card">
+            <div class="card-head"><h2>The records summary</h2></div>
+            <div class="card-body">
+              ${''/* Offered as a reading, not as an answer. The wording
+                     matters: a doctor told "the estimate is 66 months"
+                     is being anchored, and the number he was asked for
+                     is the one he would have reached on his own. */}
+              <p class="muted" style="margin-top:0">
+                Written by the records service from the same file. It is a first read and it
+                is not a physician's opinion. Disagree with it freely.</p>
+              <dl class="kv">
+                <dt>Its estimate</dt><dd>${r.summary.central_years != null
+                  ? `${Number(r.summary.central_years).toFixed(1)} years${
+                    r.summary.range_low_years != null
+                      ? ` (${Number(r.summary.range_low_years).toFixed(1)}–${
+                        Number(r.summary.range_high_years).toFixed(1)})` : ''}`
+                  : 'not stated'}</dd>
+                ${r.summary.confidence ? `<dt>Its confidence</dt>
+                  <dd>${esc(r.summary.confidence)}</dd>` : ''}
+                ${r.summary.pages ? `<dt>Pages read</dt>
+                  <dd>${r.summary.pages}</dd>` : ''}
+              </dl>
+              ${r.summary.one_liner ? `<p class="med-oneliner">${esc(r.summary.one_liner)}</p>` : ''}
+              <a class="btn" id="medSummary"
+                 href="/api/medical-reviews/${r.id}/summary.pdf">Open the full summary</a>
+              <div class="muted" style="font-size:12px;margin-top:8px">
+                The service keeps its copy for a day or so. If it has gone, ask the office
+                to run it again.</div>
+            </div>
+          </div>` : `<div class="card"><div class="card-body empty">
+            No records summary was sent with this case.</div></div>`}
+        </div>
+
+        <div>
+          <div class="card">
+            <div class="card-head"><h2>Your review</h2></div>
+            <div class="card-body">
+              ${locked ? `<div class="dlg-note">
+                ${r.adopted_at ? 'The office has taken this estimate onto the case, so it '
+                  + 'can no longer be changed here. Telephone them if it needs to.'
+                  : 'The office withdrew this request.'}
+              </div>` : ''}
+              <form id="medForm" ${locked ? 'inert' : ''}>
+                <div class="field-row">
+                  <div class="field"><label>Life expectancy, in months *</label>
+                    <input type="number" name="le_months" min="0" max="1200" step="1"
+                      value="${r.le_months ?? ''}" ${locked ? 'disabled' : ''}>
+                    <span class="muted" id="medYears" style="font-size:12px">${
+                      inYears(r.le_months)}</span>
+                  </div>
+                  <div class="field"><label>Is that a median or a mean?</label>
+                    <select name="le_basis" ${locked ? 'disabled' : ''}>
+                      <option value="median" ${r.le_basis !== 'mean' ? 'selected' : ''}
+                        >Median — half live longer</option>
+                      <option value="mean" ${r.le_basis === 'mean' ? 'selected' : ''}
+                        >Mean — the average</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field"><label>How sure are you?</label>
+                  <input type="text" name="confidence" maxlength="200"
+                    value="${esc(r.confidence || '')}"
+                    placeholder="Records are complete and recent; I would not move far on this"
+                    ${locked ? 'disabled' : ''}>
+                </div>
+                <div class="field"><label>How you got there *</label>
+                  <textarea name="findings" rows="7" ${locked ? 'disabled' : ''}
+                    placeholder="The three-vessel disease is the driver. Ejection fraction has held at 40% across two years of records…">${esc(r.findings || '')}</textarea>
+                  <span class="muted" style="font-size:12px">The office reads this. It is the
+                    part that is worth more than the number.</span>
+                </div>
+                <div class="field"><label>The impairments you would list</label>
+                  <textarea name="impairments" rows="4" ${locked ? 'disabled' : ''}
+                    placeholder="One per line">${esc(r.impairments || '')}</textarea>
+                </div>
+                <div class="field"><label>Anything that argues the other way</label>
+                  <textarea name="mitigating" rows="3" ${locked ? 'disabled' : ''}
+                    placeholder="One per line">${esc(r.mitigating || '')}</textarea>
+                </div>
+                <div class="field"><label>Your recommendation</label>
+                  <select name="recommendation" ${locked ? 'disabled' : ''}>
+                    ${['', 'Proceed', 'Pass', 'More records needed'].map((o) =>
+                      `<option value="${esc(o)}" ${o === (r.recommendation || '')
+                        ? 'selected' : ''}>${esc(o || 'No view')}</option>`).join('')}
+                  </select>
+                </div>
+                <div id="medMsg"></div>
+                <div class="row" style="gap:10px;margin-top:6px">
+                  <button type="button" class="btn" id="medDraft" ${locked ? 'disabled' : ''}
+                    >Save a draft</button>
+                  <button type="button" class="primary" id="medReturn" ${locked ? 'disabled' : ''}
+                    >${done ? 'Send the change' : 'Return it to the office'}</button>
+                  <div class="spacer"></div>
+                  ${done || locked ? '' : `<button type="button" class="btn-link" id="medDecline"
+                    >I am not reviewing this</button>`}
+                </div>
+              </form>
+              ${r.returned_at ? `<div class="muted" style="font-size:12px;margin-top:12px">
+                Returned ${fmtDate(r.returned_at)}.${r.adopted_at
+                  ? ` The office took it onto the case ${fmtDate(r.adopted_at)}.` : ''}
+              </div>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>`,
+    after: () => {
+      const form = $('#medForm');
+      const months = $('input[name=le_months]');
+      months?.addEventListener('input', () => {
+        $('#medYears').textContent = inYears(months.value);
+      });
+
+      const send = async (returned) => {
+        const v = formValues(form);
+        const msg = $('#medMsg');
+        msg.innerHTML = '';
+        try {
+          await api(`/medical-reviews/${r.id}`, { method: 'PUT', body: {
+            le_months: v.le_months === '' ? null : Number(v.le_months),
+            le_basis: v.le_basis, confidence: v.confidence, findings: v.findings,
+            impairments: v.impairments, mitigating: v.mitigating,
+            recommendation: v.recommendation, returned } });
+          toast(returned ? 'Returned to the office' : 'Draft saved');
+          if (returned) go('#/medical'); else render();
+        } catch (err) {
+          msg.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+        }
+      };
+      $('#medDraft')?.addEventListener('click', () => send(false));
+      $('#medReturn')?.addEventListener('click', () => send(true));
+      $('#medDecline')?.addEventListener('click', () => {
+        openDialog('Not reviewing this case', `
+          <div class="field"><label>Why *</label>
+            <textarea name="reason" rows="4" required
+              placeholder="Outside my field; the records stop in 2023 and I would be guessing…"></textarea>
+            <span class="muted" style="font-size:12px">The office reads this and decides what
+              to do next. Nothing is written to the case.</span></div>
+        `, async (v) => {
+          await api(`/medical-reviews/${r.id}/decline`, { method: 'POST', body: v });
+          toast('The office has been told');
+          go('#/medical');
+        }, 'Send it back');
+      });
+    },
+  };
+}
+
 async function leReportsView() {
   /* Refused here as well as absent from the menu. The server refuses it
      too -- that is the lock -- but a person who followed a stale link
@@ -11122,6 +11783,7 @@ const VIEWS = {
   valuations: valuationsView,
   longevity: longevityView,
   'le-reports': leReportsView,
+  medical: medicalQueueView,
   reports: () => reportsView(api, state),
   import: importView,
   // An investor has an Agreements tab of their own; for staff the list
@@ -11235,7 +11897,11 @@ async function render({ soft = false } = {}) {
     return;
   }
 
-  const view = VIEWS[state.route] || dashboardView;
+  /* An address this account has no screen for falls back to its own
+     home, not to the dashboard — for a reviewing doctor the dashboard
+     reads the whole book, so the fallback for a mistyped hash would be
+     an error message on a screen he may not open. */
+  const view = VIEWS[state.route] || VIEWS[homeRoute()] || dashboardView;
   const token = ++renderToken;
   const focus = rememberFocus();
 

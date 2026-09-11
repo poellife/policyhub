@@ -165,10 +165,16 @@ export async function loadScope(req, res, next) {
   /* Read from the account on every request, like the role is, so a grant
      taken away applies at once rather than at the end of a session. An
      investor never holds it whatever the column says. */
-  req.user.canValue = u.role !== 'investor' && (u.role === 'admin' || !!u.can_value);
+  req.user.canValue = !['investor', 'medical'].includes(u.role)
+    && (u.role === 'admin' || !!u.can_value);
   /* The same rule for the LE report service. Separately granted, because
      a medical file is not a price. */
-  req.user.canLe = u.role !== 'investor' && (u.role === 'admin' || !!u.can_le);
+  /* Not a reviewing doctor either, despite the obvious pun on "medical":
+     `can_le` is permission to SPEND MONEY running the report service on
+     records, which is a desk decision. The doctor reads what the desk
+     has already run. */
+  req.user.canLe = !['investor', 'medical'].includes(u.role)
+    && (u.role === 'admin' || !!u.can_le);
   req.user.fundIds = null;
   req.user.investorIds = null;
   if (u.role === 'manager') {
@@ -202,7 +208,13 @@ async function activeAdminCount(excludeId = null) {
   return rows[0].n;
 }
 
-const ROLES = ['admin', 'editor', 'viewer', 'manager', 'investor'];
+/* `medical` is a reviewing doctor, and it is not a smaller version of
+   `viewer`. It reaches the medical-review queue and nothing else: no
+   price, no death benefit, no modelled return, no other case on the
+   book. That narrowness is the feature — an independent clinical opinion
+   is contaminated the moment the clinician knows the desk needs 36
+   months for the deal to work. See `medicalOnly` in api.js for the door. */
+const ROLES = ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'];
 
 export async function updateUser(req, res) {
   const id = parseInt(req.params.id, 10);
@@ -236,17 +248,18 @@ export async function updateUser(req, res) {
    * Never held by an investor and never needed by an administrator, who
    * has it inherently -- storing it on either would be a value the door
    * ignores, which is a lie waiting in a table. */
+  const grantable = role !== 'investor' && role !== 'admin' && role !== 'medical';
   const canValue = 'can_value' in req.body
-    ? !!req.body.can_value && role !== 'investor' && role !== 'admin'
-    : !!target.can_value && role !== 'investor' && role !== 'admin';
+    ? !!req.body.can_value && grantable
+    : !!target.can_value && grantable;
 
   /* LE reports, granted the same way and held to the same rule. A second
      column rather than a wider one: whoever prices policies is not
      automatically whoever reads the medical file, and the audit line has
      to be able to say which of the two was handed over. */
   const canLe = 'can_le' in req.body
-    ? !!req.body.can_le && role !== 'investor' && role !== 'admin'
-    : !!target.can_le && role !== 'investor' && role !== 'admin';
+    ? !!req.body.can_le && grantable
+    : !!target.can_le && grantable;
 
   await q(
     `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4,
@@ -473,9 +486,7 @@ export const hashPassword = (plain) => bcrypt.hash(String(plain), 12);
 export async function createUser(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const role = ['admin', 'editor', 'viewer', 'investor', 'manager'].includes(req.body.role)
-    ? req.body.role
-    : 'viewer';
+  const role = ROLES.includes(req.body.role) ? req.body.role : 'viewer';
   // An investor login is meaningless without the investor it belongs to.
   const investorId = role === 'investor' ? parseInt(req.body.investor_id, 10) : null;
   if (role === 'investor' && !Number.isInteger(investorId))

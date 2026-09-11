@@ -133,6 +133,26 @@ export const MAIL_KINDS = [
     note: 'Sent to you, about your own account, so a change you did not make cannot '
       + 'happen quietly.' },
 
+  /* The reviewing doctor.
+     NOT forced, though the first draft made them so. `forced` is reserved
+     for the messages that exist because somebody may be under attack --
+     a sign-in from a new country, a password changed, the book exported.
+     These are work. A doctor who would rather not be emailed about every
+     case can switch it off and read his queue when he signs in, and
+     nothing about the firm's security depends on him seeing it.
+     Neither message carries a name: the reviewer signs in to find out
+     whose file it is, which is the same rule the one-pager follows. */
+  { kind: 'medical_review_requested', label: 'A case is waiting for your review',
+    who: 'medical',
+    note: 'Sent when a case is put in front of you. Never names the insured — switch '
+      + 'it off and the case still appears in your queue.' },
+  { kind: 'medical_review_returned', label: 'A medical review has come back',
+    who: 'staff',
+    note: 'Sent to whoever asked for it, with the estimate.' },
+  { kind: 'medical_review_declined', label: 'A medical review was declined',
+    who: 'staff',
+    note: 'Sent to whoever asked for it, with the reason.' },
+
   /* The other direction. Somebody at the firm hears when an investor does
      something that needs answering — otherwise a request sits in a queue
      until whoever happens to open the page finds it. */
@@ -168,7 +188,11 @@ export const choosableKinds = (role) => MAIL_KINDS.filter((k) => !k.once && (
   k.who === 'everyone'
   || (k.who === 'investor' && role === 'investor')
   || (k.who === 'admin' && role === 'admin')
-  || (k.who === 'staff' && role !== 'investor')));
+  || (k.who === 'medical' && role === 'medical')
+  /* `staff` means the desk, and a reviewing doctor is not on the desk —
+     he would be offered a tick box for "an investor asked for a piece",
+     about a book he cannot see. */
+  || (k.who === 'staff' && !['investor', 'medical'].includes(role))));
 
 /** Has this person switched this off? Forced kinds ignore the answer. */
 async function wants(userId, kind) {
@@ -455,6 +479,40 @@ export const TEMPLATES = {
       + `The full terms, the premium schedule and what is still available are on your `
       + `portal under Opportunities, along with the button to ask for a share. ${link()}\n\n`
       + `Asking for a piece is a request, not a commitment — the office confirms it.`,
+  }),
+
+  medical_review_requested: ({ name, from, ask }) => ({
+    subject: 'A case is waiting for your review',
+    text: `${name ? `${name},\n\n` : ''}${from || 'The office'} has put a case in front of `
+      + `you for review.\n\n`
+      + (ask ? `What they have asked: ${ask}\n\n` : '')
+      + `Sign in and it is the only thing on your screen: the file, the records summary, and `
+      + `the box for your estimate and your reasoning. ${link()}\n\n`
+      /* Said plainly, because a reviewer who assumes we are fishing for a
+         number will discount his own, and the whole value of the opinion
+         is that it was formed without knowing what the deal needs. */
+      + `You will not see a price, a death benefit or a rate of return anywhere on that `
+      + `screen. That is deliberate — the opinion is worth having because it was formed `
+      + `without them.\n\n`
+      + `Nothing about the insured is in this message. Sign in to see whose file it is.`,
+  }),
+
+  medical_review_returned: ({ name, who, months, recommendation }) => ({
+    subject: `Medical review returned — ${months} months`,
+    text: `${name ? `${name},\n\n` : ''}${who} has returned the medical review you asked `
+      + `for.\n\n`
+      + `The estimate is ${months} months${recommendation ? `, and the recommendation is `
+        + `"${recommendation}"` : ''}.\n\n`
+      + `His reasoning is on the case under Medical review. If the case had no life `
+      + `expectancy on it, his has been put on it; if it already had one, the case still `
+      + `carries the old number until somebody takes his. ${link()}`,
+  }),
+
+  medical_review_declined: ({ name, who, reason }) => ({
+    subject: 'A medical review was declined',
+    text: `${name ? `${name},\n\n` : ''}${who} is not reviewing the case you sent.\n\n`
+      + `What they said: ${reason}\n\n`
+      + `The case is unchanged and nothing has been written to it. ${link()}`,
   }),
 
   registration_received: ({ name }) => ({

@@ -10,6 +10,7 @@
 
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
 import { fmtRate } from './irr.js';
+import { scrubNames } from './initials.js';
 import { buildWorkbook } from './xlsx-write.js';
 
 /* What this module needs from the application shell.
@@ -192,12 +193,19 @@ function shareBasis(o) {
 
 /* ------------------------- shared furniture -------------------------- */
 
-function letterhead(title, subtitle, asOf) {
+/**
+ * @param strap  the line under the firm's name. Defaults to "Policy
+ *   Portfolio", which is what the internal reports have always carried.
+ *   The investor one-pager passes '' — on a document about one deal it
+ *   was the software describing itself, which told the reader nothing
+ *   they wanted and one thing they did not need.
+ */
+function letterhead(title, subtitle, asOf, strap = 'Policy Portfolio') {
   return `
   <header class="rpt-head">
     <div class="rpt-head-left">
       <div class="rpt-brand"><span class="brand-mark"></span>Poel Capital</div>
-      <div class="rpt-brand-sub">Policy Portfolio</div>
+      ${strap ? `<div class="rpt-brand-sub">${esc(strap)}</div>` : ''}
     </div>
     <div class="rpt-head-right">
       <div class="rpt-title">${esc(title)}</div>
@@ -1510,6 +1518,126 @@ function describeRuns(rows, dob) {
 
 const SCENARIO_LABEL = { '-24': '24 months early', 0: 'At life expectancy', 24: '24 months late' };
 
+const PRODUCT_NAME = {
+  SUL: 'Survivorship universal life', UL: 'Universal life',
+  GUL: 'Guaranteed universal life', IUL: 'Indexed universal life',
+  VUL: 'Variable universal life', WL: 'Whole life', TERM: 'Term life',
+};
+const productName = (t) => PRODUCT_NAME[String(t || '').toUpperCase().replace(/[^A-Z]/g, '')]
+  || String(t || '').trim() || 'Life insurance';
+
+const MONTH_NAME = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
+/** "July 2032" — a month, because a day this cannot know is a precision
+    it should not claim. */
+const monthYear = (iso) => {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(iso || '').slice(0, 10));
+  return m ? `${MONTH_NAME[Number(m[2]) - 1]} ${m[1]}` : '—';
+};
+
+/**
+ * Page one.
+ *
+ * Three figures, and the first of them is the WHOLE commitment — the
+ * purchase price plus every premium to the expected maturity — with the
+ * split written underneath in the same breath.
+ *
+ * The obvious cover leads with the purchase price, and on a deal where
+ * the premiums come to 85% of that price the obvious cover is a lie of
+ * omission set in 34-point type: read quickly it says "$2.2m in, $10m
+ * out" when the real commitment is $4.1m. So the total leads, the grid
+ * below breaks it apart, and the closing line says what happens if the
+ * premiums stop — which is the risk no single number carries.
+ *
+ * The same page the PDF draws, deliberately. Two documents that disagree
+ * about the size of a deal is the failure both files are arranged to
+ * prevent, so both read the same analysis and neither does arithmetic of
+ * its own.
+ */
+function coverBlock(c) {
+  const { o, a, base, scen, f, share, partial, changing, survivorship,
+    bothNames, benefit, price, lives, runningRows } = c;
+  /* Whole dollars on the cover. `fmtExact` is fixed at two decimals,
+     which is right in a table of figures being compared and wrong at
+     34 points, where ".00" is two characters of noise on every line. */
+  const money0 = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? '—'
+    : Number(v).toLocaleString('en-US', { style: 'currency', currency: 'USD',
+      minimumFractionDigits: 0, maximumFractionDigits: 0 }));
+  const scenAt = (m) => (scen || []).find((s) => s.offset_months === m) || null;
+  const late = scenAt(24);
+  const early = scenAt(-24);
+
+  const sub = [
+    `${money0(benefit * f)} death benefit${changing ? ', rising' : ''}`,
+    survivorship ? 'two insureds, paid on the second death'
+      : (o.le_months ? `life expectancy ${o.le_months} months` : ''),
+    partial ? `${share}% participation offered` : '',
+  ].filter(Boolean).join(' · ');
+
+  if (!base) {
+    return `<div class="opp-cover">
+      <h2 class="rpt-h2">${esc(bothNames)}</h2>
+      <div class="opp-sheet-sub">${esc(sub)}</div>
+      <div class="opp-cover-label">Summary of terms</div>
+      <div class="opp-cover-unpriced">This policy has not been priced yet.</div>
+      <p class="opp-cover-caveat">An asking price, a death benefit and a life expectancy are
+        needed before a return can be modelled. The terms entered so far, the medical picture
+        and the premium schedule are below.</p>
+    </div>`;
+  }
+
+  const perYear = Number(base.annual_premium_assumed) * f
+    || (runningRows.length
+      ? runningRows.reduce((s2, r) => s2 + r.amount, 0) * f / runningRows.length : 0);
+  const collect = (base.death_benefit ?? benefit) * f;
+  const headRateNote = c.interest === 'compound' ? 'a year, compounded'
+    : c.interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
+  const swing = [
+    late ? `${fmtRate(late.rate)} two years late` : null,
+    early ? `${fmtRate(early.rate)} two years early` : null,
+  ].filter(Boolean).join(', ');
+
+  const grid = [
+    ['At closing', `${money0(price * f)}${o.expected_close
+      ? `, ${fmtDate(o.expected_close)}` : ''}`],
+    /* From the SCENARIO, not from the posted schedule. A schedule can run
+       past the expected maturity, and a cell headed "to maturity" that
+       counts four extra years does not add up to the total beside it. */
+    ['Premiums to maturity', `${money0(Number(base.premiums_paid) * f)} over ${
+      base.premium_count} year${base.premium_count === 1 ? '' : 's'}`],
+    ['Policy', [productName(o.product_type), o.carrier_name].filter(Boolean).join(', ')],
+    [survivorship ? 'Insureds' : 'Insured', survivorship
+      ? `Two, ${lives.map((l) => `${ageOn(l.dob, o.expected_close) ?? '—'} ${
+        l.gender || ''}`.trim()).join(' and ')}`
+      : `${ageOn(o.insured_dob, o.expected_close) ?? '—'} ${o.insured_gender || ''}`.trim()],
+    ['Expected maturity', `${monthYear(base.matures_on)}, about ${
+      Number(base.years).toFixed(1)} years`],
+    ['If the wait is longer', swing || 'Not modelled'],
+  ];
+
+  const lead = [
+    ['You put in', money0(Number(base.invested) * f),
+      `${money0(price * f)} at closing, then about ${money0(perYear)} a year`],
+    ['You collect', money0(collect), monthYear(base.matures_on)],
+    ['Expected return', c.rateCell(base.rate, base.compound_rate), headRateNote],
+  ];
+
+  return `<div class="opp-cover">
+    <h2 class="rpt-h2">${esc(bothNames)}</h2>
+    <div class="opp-sheet-sub">${esc(sub)}</div>
+    <div class="opp-cover-label">Summary of terms</div>
+    <div class="opp-cover-lead">${lead.map(([k, v, n]) => `<div class="opp-cover-cell">
+      <div class="opp-cover-k">${esc(k)}</div>
+      <div class="opp-cover-v">${v}</div>
+      <div class="opp-cover-n">${esc(n)}</div></div>`).join('')}</div>
+    <div class="opp-cover-grid">${grid.map(([k, v]) => `<div class="opp-cover-gcell">
+      <div class="opp-cover-k">${esc(k)}</div>
+      <div class="opp-cover-gv">${esc(v)}</div></div>`).join('')}</div>
+    <p class="opp-cover-caveat">The premiums are a commitment, not an option: the policy lapses
+      if they stop, and the benefit goes with it. A life expectancy is a median, not a promise.</p>
+  </div>`;
+}
+
 /**
  * @param o    the opportunity, with `premiums` and `analysis`
  * @param opts { share, asOf, showThesis }
@@ -1576,6 +1704,15 @@ export function buildOpportunitySheet(o, opts = {}) {
     const c = String(v || '').trim().replace(/[^\p{L}\p{N}]/gu, '').charAt(0);
     return c ? `${c.toUpperCase()}.` : '';
   };
+  /* The free text, with the insureds' names taken out of it. The
+     numbered fields were never the leak; the investment case is, because
+     somebody types "Gerald is a repeat seller" on a screen where that is
+     allowed and this page is not that screen. */
+  const thesis = scrubNames(o.thesis, o);
+  const impairments = scrubNames(o.impairments, o);
+  const mitigating = scrubNames(o.mitigating, o);
+  const underwriterNote = scrubNames(o.underwriter_note, o);
+
   const name = `${initial(o.insured_first_name)}${initial(o.insured_last_name)}`
     || o.policy_number || '—';
   /* Both lives, initials only, on a survivorship deal. The second name is
@@ -1618,11 +1755,18 @@ export function buildOpportunitySheet(o, opts = {}) {
   <section class="rpt-sheet opp-sheet">
     ${letterhead('Life Settlement Investment Opportunity',
       `${esc(o.carrier_name || '—')}${o.policy_number ? ` · ${esc(o.policy_number)}` : ''}`,
-      opts.asOf || longDate())}
+      opts.asOf || longDate(), 'Overview')}
     <div class="rpt-confidential">Confidential — for qualified investors only. Do not distribute.
       The insured is identified by initials: this sheet carries the medical picture behind the
       life expectancy, and a name is not needed to weigh the deal.</div>
 
+    ${coverBlock({ o, a, base, scen, f, share, partial, changing, survivorship,
+    bothNames, benefit, price, lives, runningRows, interest, rateCell })}
+
+    ${''/* The word that matches the cover's "Overview", so a reader who
+           has turned the page knows which half of the document they are
+           in and that they have not started a different one. */}
+    <div class="opp-detail-mark">Detailed View</div>
     <h2 class="rpt-h2">${esc(bothNames)}</h2>
     <div class="opp-sheet-sub">
       ${fmtExact(benefit)} death benefit${changing ? ', rising' : ''}${
@@ -1737,24 +1881,24 @@ export function buildOpportunitySheet(o, opts = {}) {
       </div>
 
       <div>
-        ${o.impairments ? `<div class="rpt-block avoid-break">
+        ${impairments ? `<div class="rpt-block avoid-break">
           <h3 class="rpt-h3">Medical factors behind the life expectancy</h3>
-          ${bulletList(o.impairments)}
+          ${bulletList(impairments)}
         </div>` : ''}
-        ${o.mitigating ? `<div class="rpt-block avoid-break">
+        ${mitigating ? `<div class="rpt-block avoid-break">
           <h3 class="rpt-h3">Mitigating factors</h3>
-          ${bulletList(o.mitigating)}
+          ${bulletList(mitigating)}
         </div>` : ''}
-        ${o.underwriter_note ? `<div class="rpt-block avoid-break rpt-callout">
+        ${underwriterNote ? `<div class="rpt-block avoid-break rpt-callout">
           <h3 class="rpt-h3">Underwriter assessment</h3>
-          <p class="rpt-para">${esc(o.underwriter_note)}</p>
+          <p class="rpt-para">${esc(underwriterNote)}</p>
         </div>` : ''}
       </div>
     </div>
 
-    ${o.thesis ? `<div class="rpt-block rpt-thesis">
+    ${thesis ? `<div class="rpt-block rpt-thesis">
       <h3 class="rpt-h3">Investment case</h3>
-      ${bulletList(o.thesis)}
+      ${bulletList(thesis)}
     </div>` : ''}
 
     ${(() => {

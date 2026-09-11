@@ -1346,3 +1346,75 @@ CREATE INDEX IF NOT EXISTS idx_le_reports_opportunity ON le_reports (opportunity
 CREATE INDEX IF NOT EXISTS idx_valuations_policy ON valuations (policy_id);
 CREATE INDEX IF NOT EXISTS idx_valuations_opp    ON valuations (opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_valuations_ran    ON valuations (ran_at DESC);
+
+/* ====================================================================
+   Medical review — a doctor's own opinion on a case
+   ====================================================================
+
+   The report service produces a Medical Summary and an estimated life
+   expectancy from the records. It is a good first read and it is not a
+   physician. So a case can be sent to a reviewing doctor, who reads the
+   same file and returns HIS estimate and his reasoning, and both sit on
+   the case side by side.
+
+   Two design decisions worth stating, because they are the whole point.
+
+   FIRST: THE REVIEWER IS BLIND TO THE ECONOMICS. His login reaches this
+   table and nothing else — not the asking price, not the death benefit,
+   not the modelled return, not another case on the book. That is not
+   only a permission. An independent clinical opinion is contaminated the
+   moment the clinician knows the desk needs 36 months for the deal to
+   work, and the value of a second opinion is precisely that it was
+   formed without knowing.
+
+   SECOND: HE SEES THE NAME. Everywhere else in this application an
+   insured is initials, because the reader does not need to know who it
+   is. The reviewing doctor is the exception: he is reading that person's
+   records, every page of which carries the name, and matching a chart to
+   the wrong patient is a clinical error rather than a privacy nicety.
+   Every open is written to the audit log.
+
+   One case may be reviewed more than once — a survivorship deal has two
+   lives and each needs its own opinion — so `life` says which insured
+   this row is about.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS medical_reviews (
+  id              SERIAL PRIMARY KEY,
+
+  -- what it is about: one end or the other, never both, like a valuation
+  policy_id       INTEGER REFERENCES policies(id)      ON DELETE CASCADE,
+  opportunity_id  INTEGER REFERENCES opportunities(id) ON DELETE CASCADE,
+  life            INTEGER NOT NULL DEFAULT 1,      -- 1 or 2 on a survivorship case
+
+  -- the errand
+  reviewer_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  requested_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status          TEXT NOT NULL DEFAULT 'Requested',
+                  -- Requested | Opened | Returned | Declined | Cancelled
+  ask             TEXT NOT NULL DEFAULT '',        -- what the desk wants looked at
+  /* The machine summary that was sent with it. The report service purges
+     its own copy after a day and nothing here writes the PDF down, so
+     this is a pointer that can go stale -- which is correct, and the
+     screen says so rather than pretending the file is still there. */
+  le_report_id    INTEGER REFERENCES le_reports(id) ON DELETE SET NULL,
+
+  opened_at       TIMESTAMPTZ,
+  returned_at     TIMESTAMPTZ,
+
+  -- what comes back
+  le_months       INTEGER,
+  le_basis        TEXT NOT NULL DEFAULT 'median',  -- median | mean
+  confidence      TEXT NOT NULL DEFAULT '',        -- his words, not a rubric
+  findings        TEXT NOT NULL DEFAULT '',        -- his thoughts on the case
+  impairments     TEXT NOT NULL DEFAULT '',
+  mitigating      TEXT NOT NULL DEFAULT '',
+  recommendation  TEXT NOT NULL DEFAULT '',        -- Proceed | Pass | More records
+  adopted_at      TIMESTAMPTZ,                     -- when the desk took his LE
+  adopted_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+
+  CHECK (policy_id IS NULL OR opportunity_id IS NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_medreview_policy ON medical_reviews (policy_id);
+CREATE INDEX IF NOT EXISTS idx_medreview_opp    ON medical_reviews (opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id, status);
