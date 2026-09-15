@@ -8927,12 +8927,25 @@ async function settingsView() {
             <td class="secondary">${esc(u.investor_name || u.fund_codes || '')}${
               u.investor_names ? `<div class="muted" style="font-size:11.5px;margin-top:3px"
                 >+ ${esc(u.investor_names)}</div>` : ''}</td>
-            <td>${u.is_active
-                  ? '<span class="badge inforce"><span class="dot"></span>Active</span>'
-                  : '<span class="badge lapsed"><span class="dot"></span>Suspended</span>'}</td>
+            ${''/* An account that has been invited and has not yet been
+                   used is a different state from an active one, and the
+                   difference matters: an invitation sent to a mistyped
+                   address leaves a row that looks fine and a person who
+                   never heard from us. */}
+            <td>${!u.is_active
+                  ? '<span class="badge lapsed"><span class="dot"></span>Suspended</span>'
+                  : u.must_change_password && !u.last_login_at
+                    ? `<span class="badge"><span class="dot"></span>Invited</span>${
+                      u.invite_expires_at ? '' : `<div class="muted"
+                        style="font-size:11px;margin-top:3px">link expired</div>`}`
+                    : '<span class="badge inforce"><span class="dot"></span>Active</span>'}</td>
             <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-US') : 'never'}</td>
             <td style="white-space:nowrap">
               <button class="btn-sm" data-edit-user="${u.id}">Edit</button>
+              ${u.is_active && u.must_change_password && !u.last_login_at
+                ? `<button class="btn-sm" data-invite-user="${u.id}"
+                     data-email="${esc(u.email)}">${u.invite_expires_at
+                       ? 'Resend invitation' : 'Send a new invitation'}</button>` : ''}
               ${u.id === state.user.id ? '' : `
                 <button class="btn-sm" data-toggle-user="${u.id}" data-active="${u.is_active}"
                   data-email="${esc(u.email)}">${u.is_active ? 'Suspend' : 'Reactivate'}</button>
@@ -9060,6 +9073,28 @@ async function settingsView() {
       document.querySelectorAll('[data-edit-user]').forEach((b) =>
         b.addEventListener('click', () =>
           openUserDialog(users.find((u) => u.id === Number(b.dataset.editUser)), funds, render)));
+      /* One click, from the row, which is what the Add-user dialog
+         promises. It reuses the reset-link route: an invitation and a
+         reset are the same object -- a single-use token that lets
+         somebody set a password -- and the only thing that differs is
+         which of them has never had one yet. */
+      document.querySelectorAll('[data-invite-user]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const btn = b;
+          btn.disabled = true;
+          const was = btn.textContent;
+          btn.textContent = 'Sending…';
+          try {
+            const out = await api(`/users/${btn.dataset.inviteUser}/reset-link`,
+              { method: 'POST' });
+            toast(`Sent to ${out.email} — works once, lasts ${out.expires_in}`);
+            render();
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = was;
+            alert(err.message);
+          }
+        }));
       document.querySelectorAll('[data-toggle-user]').forEach((b) =>
         b.addEventListener('click', async () => {
           const wasActive = b.dataset.active === 'true';
@@ -9104,7 +9139,29 @@ async function settingsView() {
         const dlg = openDialog('Add user', `
           ${inputField('Email *', 'email', '', 'email', 'required')}
           ${inputField('Full name', 'full_name')}
-          ${inputField('Password (10+ characters) *', 'password', '', 'password', 'required minlength=10')}
+          ${''/* No password field, by default and on purpose. An
+                 administrator who invents a password for somebody else
+                 then has to get it to them, and every way of doing that
+                 is worse than a link: read down a telephone, typed into
+                 a chat window, or emailed, which leaves a working
+                 credential in a mailbox for as long as the mailbox
+                 exists. The system makes one nobody sees and sends an
+                 invitation instead. */}
+          <div class="dlg-note">
+            They will be emailed a link to choose their own password. It works once and
+            lasts seven days, and you can send another at any time from their row.
+            <strong>You do not set a password for them</strong> — nobody here ever knows it.
+          </div>
+          <label class="dlg-check" style="margin:12px 0 0">
+            <input type="checkbox" id="setPwSelf">
+            <span>Set a password myself instead — only if they have no working mailbox</span>
+          </label>
+          <div id="pwSelf" style="display:none;margin-top:10px">
+            ${inputField('Password (10+ characters)', 'password', '', 'password',
+    'minlength=10 autocomplete=new-password')}
+            <span class="muted" style="font-size:12px">You will have to tell them what it is,
+              and until they change it you both know it. Prefer the link.</span>
+          </div>
           ${selectField('Role', 'role', 'editor',
             ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'])}
           <div class="field" id="fundPick" style="display:none">
@@ -9153,8 +9210,17 @@ async function settingsView() {
             </div>
           </div>
         `, async (v) => {
-          await api('/users', { method: 'POST', body: v });
-          toast('User created');
+          /* An unticked box leaves an empty string in the form values,
+             and an empty string is what tells the server to invite. Sent
+             as undefined rather than "" only so the request says what it
+             means. */
+          const body = { ...v };
+          if (!$('#setPwSelf', dlg)?.checked || !String(v.password || '').trim())
+            delete body.password;
+          const made = await api('/users', { method: 'POST', body });
+          toast(made?.invited
+            ? `Invitation sent to ${made.invited.email}`
+            : 'User created with the password you set');
         }, 'Create user');
 
         const roleSel = $('select[name=role]', dlg);
@@ -9163,6 +9229,9 @@ async function settingsView() {
           $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
           $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
         };
+        $('#setPwSelf', dlg)?.addEventListener('change', (e) => {
+          $('#pwSelf', dlg).style.display = e.currentTarget.checked ? '' : 'none';
+        });
         $('#medicalNote', dlg).style.display = 'none';
         const syncMed = () => {
           $('#medicalNote', dlg).style.display = roleSel.value === 'medical' ? '' : 'none';

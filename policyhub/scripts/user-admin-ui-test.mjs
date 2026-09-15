@@ -156,6 +156,15 @@ await usersCard().locator('.card-head button').click();      // Add user
 await p.waitForSelector('dialog[open]'); await p.waitForTimeout(300);
 await p.fill('input[name=email]', TEMP);
 await p.fill('input[name=full_name]', 'UI Temp');
+/* Deliberately the by-hand path, not the default.
+   Adding a user now emails an invitation and leaves the account marked
+   Invited until somebody follows the link -- which is the right default
+   and is covered end to end by invite-ui-test. THIS suite is about
+   suspend, reactivate and delete, and it wants an account that is
+   straightforwardly Active from the moment it exists. So it ticks the
+   escape hatch and sets a password, which is exactly what that hatch is
+   for. */
+await p.check('#setPwSelf');
 await p.fill('input[name=password]', scratchPassword('ui-probe'));
 await p.selectOption('select[name=role]', 'viewer');
 await p.click('dialog[open] button[type=submit]');

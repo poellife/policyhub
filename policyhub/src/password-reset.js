@@ -57,7 +57,25 @@ export const hashToken = (token) =>
  * should not end up with two live keys to their account, and the one
  * they will click is the one that just arrived.
  */
-export async function issueReset(userId, { requestedBy = null, origin = '' } = {}) {
+/**
+ * How long an INVITE lasts, as opposed to a reset.
+ *
+ * An hour is right for "I have forgotten my password": the person is at
+ * their desk, they asked a minute ago, and a short window is the whole
+ * point. It is wrong for an invitation. An account opened at six on a
+ * Friday is opened for somebody who will look at their email on Monday,
+ * and a link that died over the weekend turns every new account into a
+ * telephone call.
+ *
+ * Seven days, and the office can send another with one click if it
+ * lapses. The token is still single-use and still hashed at rest; the
+ * only thing that changes is how long the invitation stands open.
+ */
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const INVITE_TTL_WORDS = 'seven days';
+
+export async function issueReset(userId,
+  { requestedBy = null, origin = '', ttlMs = RESET_TTL_MS } = {}) {
   await q(
     `UPDATE password_resets SET used_at = now()
       WHERE user_id = $1 AND used_at IS NULL`, [userId]);
@@ -66,7 +84,8 @@ export async function issueReset(userId, { requestedBy = null, origin = '' } = {
   await q(
     `INSERT INTO password_resets (user_id, token_hash, requested_by, origin, expires_at)
      VALUES ($1, $2, $3, $4, now() + ($5::int * INTERVAL '1 millisecond'))`,
-    [userId, hashToken(token), requestedBy, String(origin).slice(0, 300), RESET_TTL_MS]);
+    [userId, hashToken(token), requestedBy, String(origin).slice(0, 300),
+      Math.max(60000, Math.min(Number(ttlMs) || RESET_TTL_MS, INVITE_TTL_MS))]);
 
   /* Opportunistic prune, roughly one issue in twenty, so the table stays
      small without a scheduled job -- the same arrangement the login

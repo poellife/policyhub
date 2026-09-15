@@ -3,6 +3,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { q, audit } from './db.js';
 import { noteSignIn, clientIp } from './security.js';
+/* Both import only db.js, so there is no cycle back into this file. */
+import { issueReset, INVITE_TTL_MS, INVITE_TTL_WORDS } from './password-reset.js';
+import { sendMail, flushMail, appUrlMissing } from './mail.js';
 
 /**
  * The signing key. A session cookie asserts a user id and role, so anyone
@@ -483,24 +486,68 @@ export async function changePassword(req, res) {
  */
 export const hashPassword = (plain) => bcrypt.hash(String(plain), 12);
 
+/**
+ * Opening an account for somebody.
+ *
+ * NOBODY TYPES A PASSWORD FOR ANYBODY ELSE. The office fills in an email
+ * address and a role; the system makes a password out of 32 random bytes
+ * that no human ever sees, marks the account as needing its own, and
+ * emails an invitation carrying a single-use link. The person follows it
+ * and chooses what they will actually use.
+ *
+ * That is not a convenience. An administrator inventing a password has
+ * to transmit it somehow, and every way of doing that is worse than this
+ * one: read down a telephone, typed into a chat window, or mailed --
+ * which leaves a working credential in a mailbox for as long as the
+ * mailbox exists. The random one is a placeholder that keeps the row
+ * valid until the invitation is used and is not a credential anybody
+ * could use, because nobody knows it.
+ *
+ * A password may still be supplied explicitly, and then this behaves
+ * exactly as it always did. That path exists for the seeder, for the
+ * test suites, and for the genuine case of somebody with no working
+ * mailbox -- and, being explicit, it is visible in the audit line.
+ */
 export async function createUser(req, res) {
   const email = String(req.body.email || '').trim().toLowerCase();
-  const password = String(req.body.password || '');
+  /* Absent, not empty: "" is somebody who cleared the box, and both mean
+     the same thing here, but `given` is what decides which path runs and
+     it should say so plainly. */
+  const given = String(req.body.password || '');
+  const invite = !given;
+  /* 32 bytes of urandom, base64. Long past anything bcrypt's 72-byte
+     input limit would truncate meaningfully, and never shown to anyone:
+     the only way into this account is the link. */
+  const password = invite ? crypto.randomBytes(32).toString('base64') : given;
   const role = ROLES.includes(req.body.role) ? req.body.role : 'viewer';
   // An investor login is meaningless without the investor it belongs to.
   const investorId = role === 'investor' ? parseInt(req.body.investor_id, 10) : null;
   if (role === 'investor' && !Number.isInteger(investorId))
     return res.status(400).json({ error: 'Choose which investor this login belongs to' });
-  if (!email || password.length < 10)
-    return res
-      .status(400)
-      .json({ error: 'Email required and password must be at least 10 characters' });
+  if (!email)
+    return res.status(400).json({ error: 'An email address is required' });
+  if (!invite && given.length < 10)
+    return res.status(400).json({
+      error: 'A password you set yourself must be at least 10 characters. Leave it blank '
+        + 'and they will be emailed a link to choose their own.' });
+  /* Checked BEFORE the row is written. An account created with no way to
+     reach its owner is an account somebody has to go and delete, and the
+     person it was for never hears about it. */
+  if (invite) {
+    const problem = appUrlMissing();
+    if (problem)
+      return res.status(503).json({
+        error: `An invitation cannot be built on this server: ${problem} Set APP_URL, or `
+          + 'give them a password here and tell them yourself.' });
+  }
   const hash = await bcrypt.hash(password, 12);
   try {
     const { rows } = await q(
-      `INSERT INTO users (email, password_hash, full_name, role, investor_id)
-       VALUES ($1,$2,$3,$4,$5) RETURNING id, email, full_name, role, investor_id`,
-      [email, hash, String(req.body.full_name || ''), role, investorId]
+      `INSERT INTO users (email, password_hash, full_name, role, investor_id,
+                          must_change_password)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING id, email, full_name, role, investor_id, must_change_password`,
+      [email, hash, String(req.body.full_name || ''), role, investorId, invite]
     );
     // Portfolio managers carry a list of entities they may work inside.
     if (role === 'manager') {
@@ -518,8 +565,29 @@ export async function createUser(req, res) {
         await q('INSERT INTO user_investors (user_id, investor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
           [rows[0].id, iid]);
     }
-    await audit(req.user.uid, 'user', rows[0].id, 'create', `${email} (${role})`);
-    res.status(201).json(rows[0]);
+    let invited = null;
+    if (invite) {
+      /* After the entity and investor grants above, so the invitation
+         goes out to an account that is already complete -- a manager who
+         follows the link before their entities are attached signs in to
+         an empty book and telephones about it. */
+      const token = await issueReset(rows[0].id, {
+        requestedBy: req.user.uid,
+        origin: `invitation · ${clientIp(req) || 'unknown'}`,
+        ttlMs: INVITE_TTL_MS,
+      });
+      await sendMail('account_invite', {
+        to: email, userId: rows[0].id, name: rows[0].full_name, email,
+        token, lasts: INVITE_TTL_WORDS, who: req.user.name || 'The office', role,
+      });
+      flushMail({ limit: 5 }).catch(() => {});
+      invited = { email, expires_in: INVITE_TTL_WORDS };
+    }
+    await audit(req.user.uid, 'user', rows[0].id, 'create',
+      `${email} (${role}) · ${invite
+        ? 'invited by email to choose their own password'
+        : 'password set by the administrator'}`);
+    res.status(201).json({ ...rows[0], invited });
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'That email already exists' });
     throw e;

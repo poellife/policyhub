@@ -222,14 +222,17 @@ const links = MAIL_KINDS.map((k) => ({ kind: k.kind,
    cannot sign in yet, and a link that lands them on a login screen they will
    be refused by is worse than no link. */
 const NO_LINK = new Set(['registration_received']);
-/* And one deliberately goes deeper than the front door. Every other link
-   is a signpost to something behind a password; a reset link IS the
-   thing, and it cannot work any other way -- the token has to travel in
-   the address. The reasons for the rule below do not apply to it: there
+/* And two deliberately go deeper than the front door. Every other link
+   is a signpost to something behind a password; these two ARE the thing,
+   and they cannot work any other way -- the token has to travel in the
+   address. The reasons for the rule below do not apply to them: there
    is no login screen to be dumped on and nothing is lost by arriving
-   directly. Named here rather than exempted quietly, so the next person
-   to add a deep link has to argue for it too. */
-const DEEP_LINK = new Set(['password_reset']);
+   directly. `account_invite` is the same object as `password_reset`
+   aimed at somebody who has never had a password: it is the whole
+   reason an administrator no longer invents one for them. Named here
+   rather than exempted quietly, so the next person to add a deep link
+   has to argue for it too. */
+const DEEP_LINK = new Set(['password_reset', 'account_invite']);
 check('every message somebody can act on carries a way in',
   links.filter((l) => !NO_LINK.has(l.kind)).every((l) => l.urls.length >= 1),
   links.filter((l) => !NO_LINK.has(l.kind) && !l.urls.length).map((l) => l.kind).join(', '));

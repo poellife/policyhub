@@ -103,6 +103,20 @@ export const MAIL_KINDS = [
      preference about it — by the time somebody can see a tick box for "your
      account has been opened", it has been opened and the message has gone.
      Offering the choice would be theatre, so these are not on the screen. */
+  /* The invitation. Forced and `once` for the same reasons `portal_open`
+     is: by the time anybody could tick a box about it, the account has
+     been opened and the message has gone. It carries a LINK and never a
+     password -- see the note at the top of this file, which is the one
+     rule here that has no exceptions. */
+  /* `once`, not `forced`. It is sent before the recipient has ever seen a
+     preferences screen, so there is nothing to switch it off with and it
+     never appears on one -- the same arrangement `portal_open` and
+     `registration_received` have. `forced` is reserved for the messages
+     that exist because somebody may be under attack. */
+  { kind: 'account_invite', label: 'Your portal account has been opened',
+    who: 'everyone', once: true,
+    note: 'Sent when somebody opens an account for you. Carries a link that works '
+      + 'once, so you choose your own password. Never carries a password.' },
   { kind: 'portal_open', label: 'A portal account has been opened',
     who: 'investor', once: true,
     note: 'Sent to an investor when their login is set up. Never carries the password.' },
@@ -390,6 +404,24 @@ export const TEMPLATES = {
       + `${detail}\n\n`
       + `Every administrator except the one who did it is told, and the export is on the `
       + `activity log, under Settings. ${link()}`,
+  }),
+
+  /* `url` rather than a password, and the difference is the whole point.
+     A temporary password mailed to somebody is a working credential that
+     sits in a mailbox for as long as that mailbox exists, and it opens
+     the account for anyone who reaches it. A token is spent the moment
+     it is used and is worthless afterwards. */
+  account_invite: ({ name, email, token, lasts, who, role }) => ({
+    subject: 'Your Poel Capital portal account is ready',
+    text: `${name ? `${name},\n\n` : ''}${who || 'The office'} has opened an account for `
+      + `you on the Poel Capital portal${role ? `, as ${role}` : ''}.\n\n`
+      + `Choose your password here: ${resetLink(token)}\n\n`
+      + `That link works once and lasts ${lasts || 'seven days'}. After you have used it, `
+      + `sign in at ${link()} with ${email} and the password you chose.\n\n`
+      + `Nobody here has a password for your account and nobody here can read the one you `
+      + `pick. If the link has expired by the time you get to it, ask the office for `
+      + `another — it takes them one click.\n\n`
+      + `If you were not expecting this, tell us and we will close the account.`,
   }),
 
   portal_open: ({ name, email }) => ({

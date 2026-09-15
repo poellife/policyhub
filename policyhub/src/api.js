@@ -29,7 +29,8 @@ import { authenticate, requireRole, login, changePassword,
          createUser, updateUser, deleteUser, resetPassword, clearToken,
          hashPassword, issueToken } from './auth.js';
 import { issueReset, lookupReset, consumeReset, tooManyResets, noteResetRequest,
-         clearResetLocks, pause, RESET_REASON, RESET_TTL_WORDS } from './password-reset.js';
+         clearResetLocks, pause, RESET_REASON, RESET_TTL_MS, RESET_TTL_WORDS,
+         INVITE_TTL_MS, INVITE_TTL_WORDS } from './password-reset.js';
 // A tax number is the one field here that is encrypted rather than merely
 // scoped: see the file for why, and for how the key is chosen.
 import { sealField, openField, digitsOf, maskTaxId } from './secret-field.js';
@@ -1291,6 +1292,15 @@ router.get('/users', authenticate, blockScoped, requireRole('admin'), wrap(async
   const { rows } = await q(
     `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.last_login_at,
             u.investor_id, i.name AS investor_name, u.can_value, u.can_le,
+            /* Who has been invited and has not yet chosen a password.
+               An invitation that quietly went to a mistyped address
+               leaves an account that never gets used and nobody
+               chasing it; this is what puts it on the screen. */
+            u.must_change_password,
+            (SELECT r.expires_at FROM password_resets r
+              WHERE r.user_id = u.id AND r.used_at IS NULL
+                AND r.expires_at > now()
+              ORDER BY r.id DESC LIMIT 1) AS invite_expires_at,
             COALESCE((SELECT string_agg(f.code, ', ' ORDER BY f.code)
                         FROM user_funds uf JOIN funds f ON f.id = uf.fund_id
                        WHERE uf.user_id = u.id), '') AS fund_codes,
@@ -1331,7 +1341,8 @@ router.post('/users/:id/reset-link', authenticate, blockScoped,
   requireRole('admin'), wrap(async (req, res) => {
     const id = int(req.params.id);
     const { rows } = await q(
-      'SELECT id, email, full_name, role, is_active FROM users WHERE id = $1', [id]);
+      `SELECT id, email, full_name, role, is_active, must_change_password, last_login_at
+         FROM users WHERE id = $1`, [id]);
     const user = rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.is_active)
@@ -1344,14 +1355,31 @@ router.post('/users/:id/reset-link', authenticate, blockScoped,
       return res.status(503).json({
         error: `A reset link cannot be built on this server: ${problem}` });
 
-    const token = await issueReset(user.id,
-      { requestedBy: req.user.uid, origin: describeOrigin(req) });
-    await sendMail('password_reset', { to: user.email, userId: user.id,
-      name: user.full_name, email: user.email, token });
+    /* An INVITATION or a RESET, decided from the account rather than
+       from which button was pressed.
+       An account that has been invited and never used has no password to
+       reset -- "use this link and choose a new one" is the wrong sentence
+       to send somebody who has never had one -- and it needs the seven
+       days an invitation gets, not the hour a reset gets. The button on
+       the Users screen says "Resend invitation" for exactly these rows,
+       and it would have quietly downgraded a seven-day invitation to a
+       one-hour link, which is the Friday-evening problem the longer
+       window exists to prevent. */
+    const firstTime = !!user.must_change_password && !user.last_login_at;
+    const token = await issueReset(user.id, {
+      requestedBy: req.user.uid,
+      origin: describeOrigin(req),
+      ttlMs: firstTime ? INVITE_TTL_MS : RESET_TTL_MS,
+    });
+    const lasts = firstTime ? INVITE_TTL_WORDS : RESET_TTL_WORDS;
+    await sendMail(firstTime ? 'account_invite' : 'password_reset', {
+      to: user.email, userId: user.id, name: user.full_name, email: user.email,
+      token, lasts, who: req.user.name || 'The office', role: user.role });
     flushMail({ limit: 5 }).catch(() => {});
     await audit(req.user.uid, 'user', user.id, 'update',
-      `sent a password reset link to ${user.email} · ${describeOrigin(req)}`);
-    res.json({ ok: true, email: user.email, expires_in: RESET_TTL_WORDS });
+      `${firstTime ? 'resent the invitation' : 'sent a password reset link'} to `
+      + `${user.email} · ${describeOrigin(req)}`);
+    res.json({ ok: true, email: user.email, expires_in: lasts, invitation: firstTime });
   }));
 
 // Everything below requires a session AND a fresh read of the account.
