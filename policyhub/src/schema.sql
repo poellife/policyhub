@@ -387,6 +387,31 @@ CREATE TRIGGER trg_maturity_policy
   AFTER INSERT OR UPDATE OF product_type, insured_id, status ON policies
   FOR EACH ROW EXECUTE FUNCTION sync_maturity_self();
 
+/* ====================================================================
+   The carrier's telephone number
+   ====================================================================
+
+   Servicing a policy means telephoning the carrier — about a grace
+   period, a change of ownership form, a statement that has not arrived.
+   The number lived in somebody's contacts or on the last letter, and
+   looking it up was a step between noticing a problem and doing
+   something about it.
+
+   Text, not a validated format. Carrier service lines come with
+   extensions, department names and hours attached ("800-555-0142 x4471,
+   policyholder services, 8-5 CT"), and a field that refuses those in
+   the name of tidiness is a field people stop using.
+
+   ABOVE THE VIEW, DELIBERATELY. `policy_latest` selects policies.*, so
+   it only carries this column if the column exists when the view is
+   built. With the ALTER at the foot of this file the column appeared on
+   the table immediately and in the view one restart later — the field
+   saved, and the screen that reads it showed nothing until the next
+   boot. Which is a bug that fixes itself overnight and is therefore
+   very hard to believe in when somebody reports it.
+   ==================================================================== */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS carrier_phone TEXT NOT NULL DEFAULT '';
+
 -- ---------------------------------------------------------------------
 --  Convenience view: each policy with its most recent value snapshot
 --

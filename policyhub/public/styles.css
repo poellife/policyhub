@@ -1952,3 +1952,9 @@ table.data td.risk-note-cell {
 .med-opinion-sub > span { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
   text-transform: uppercase; color: var(--muted); }
 @media (max-width: 900px) { .med-grid { grid-template-columns: 1fr; } }
+
+/* The carrier's telephone number in the policy header. A link, so it
+   dials from a phone and a desktop softphone, but set as quietly as the
+   rest of the line — it is a reference, not a call to action. */
+.carrier-tel { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--border-strong); }
+.carrier-tel:hover { border-bottom-style: solid; }

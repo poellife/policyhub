@@ -647,6 +647,49 @@ const sexAndAge = (g, dob) => {
 };
 const dash = '<span class="muted">—</span>';
 const dateInput = (d) => (d ? String(d).slice(0, 10) : '');
+
+/**
+ * The dialable part of a telephone number somebody typed.
+ *
+ * Carrier service lines arrive as "800-555-0142 x4471, policyholder
+ * services, 8-5 CT", and stripping that to digits gives
+ * 80055501424471 — which dials the extension as though it were part of
+ * the trunk and reaches nobody. So the string is cut at the first thing
+ * meaning "and then": an extension marker, a comma, a semicolon. What
+ * is left is what a dialler can use.
+ *
+ * Returns '' when too little is left to be a telephone number. A field
+ * that takes free text will sometimes hold "ask Marion", and a `tel:`
+ * link on that fails when pressed — worse than plain text, which at
+ * least reads honestly.
+ */
+function telHref(raw) {
+  /* `\bx\b` does not match the x in "x4471" — x and 4 are both word
+     characters, so there is no boundary between them, and the extension
+     sailed straight through into the dialled number. Matched as an x
+     that is followed by digits instead. */
+  const first = String(raw || '')
+    .split(/\s*(?:,|;|\bextension\b|\bext\.?\b|\bx(?=\s*\d))/i)[0];
+  const digits = first.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '');
+  return digits.replace(/\D/g, '').length >= 7 ? digits : '';
+}
+
+/**
+ * The carrier's number as it appears on the policy header.
+ *
+ * A link when there is something to dial and plain text when there is
+ * not. The VISIBLE text is always what was typed — extension,
+ * department, hours and all — because that is what the person on the
+ * telephone needs; only the href is reduced.
+ */
+const carrierTel = (raw) => {
+  const shown = String(raw || '').trim();
+  if (!shown) return '';
+  const href = telHref(shown);
+  return ` · ${href
+    ? `<a class="carrier-tel" href="tel:${esc(href)}">${esc(shown)}</a>`
+    : `<span class="muted">${esc(shown)}</span>`}`;
+};
 const today = () => new Date().toISOString().slice(0, 10);
 
 function ageFrom(dob, at) {
@@ -2470,8 +2513,12 @@ async function policyView() {
         <h1>${esc(insuredName(p))}${p.insured_dob
           ? ` <span class="h1-dob">${fmtDate(p.insured_dob)}${
               age == null ? '' : ` · ${age}`}</span>` : ''}</h1>
+        ${''/* The number is here because this is the line somebody reads
+               just before picking up the telephone. See `carrierTel` for
+               why the link and the text are not the same string. */}
         <div class="sub">${esc(p.carrier_name)} · Policy ${esc(p.policy_number)}
-          ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}</div>
+          ${p.fund_code ? `· ${esc(p.fund_code)}` : ''} · ${statusBadge(p.status)}${
+  carrierTel(p.carrier_phone)}</div>
       </div>
       <div class="spacer"></div>
       ${shareToggle(p.my_pct)}
@@ -3786,6 +3833,12 @@ async function openPolicyDialog(p = null) {
     <div class="field-row">
       ${inputField('Policy number *', 'policy_number', p?.policy_number, 'text', 'required')}
       ${inputField('Carrier *', 'carrier_name', p?.carrier_name, 'text', 'required')}
+      ${''/* Free text, not a validated telephone number. A carrier's
+             service line comes with an extension, a department and
+             opening hours attached, and a field that refuses those in
+             the name of tidiness is a field people stop using. */}
+      ${inputField('Insurance company phone', 'carrier_phone', p?.carrier_phone,
+    'text', 'placeholder="800-555-0142 x4471"')}
     </div>
     <div class="field-row">
       ${inputField('Insured last name', 'insured_last_name', p?.insured_last)}

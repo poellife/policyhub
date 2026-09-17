@@ -439,7 +439,7 @@ function buildSet(fields, body, start = 1) {
 
 const POLICY_FIELDS = {
   policy_number: str, unique_case_id: str, insured_id: int, fund_id: int,
-  carrier_name: str, plan_name: str, product_type: str,
+  carrier_name: str, carrier_phone: str, plan_name: str, product_type: str,
   issue_date: date, issue_age: int, issue_state: str,
   face_amount: num, owner_account: str, beneficiary: str,
   status: str, status_date: date,
