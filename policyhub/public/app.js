@@ -3133,7 +3133,10 @@ function stepRow(r) {
           ? `Premium${r.amount ? ` · about ${fmtExact(r.amount)}` : ''}` : 'Follow-up'}</div>
         <div class="meta">${fmtDate(r.due_date)} · ${esc(when)}${
           r.note ? ` · ${esc(r.note)}` : ''}${
-          isDone && r.done_by_name ? ` · ${esc(r.done_by_name)}` : ''}</div>
+          isDone && r.done_by_name ? ` · ${esc(r.done_by_name)}` : ''}${
+          ''/* So it is visible that the ledger already has it, and that
+                reopening will take it back out again. */}${
+          isDone && r.paid_txn_id ? ' · <strong>posted to the ledger</strong>' : ''}</div>
       </div>
       ${canEditData() ? `<div style="white-space:nowrap;display:flex;gap:6px">
         <button class="btn-sm" data-step-done="${r.id}" data-to="${isDone ? 'false' : 'true'}"
@@ -3143,6 +3146,75 @@ function stepRow(r) {
       </div>` : ''}
     </div>`;
 }
+
+/**
+ * A premium marked paid, and the ledger entry that goes with it.
+ *
+ * The figure on the calendar is an ESTIMATE — the row says "about" —
+ * because it was read off a carrier statement weeks before the money
+ * moved. What belongs in the ledger is what actually left the bank, and
+ * the two are routinely a few dollars apart. So this asks, with the
+ * estimate filled in: one box to correct, not a form to fill.
+ *
+ * Posting it silently at the estimated figure would put a wrong number
+ * into the return calculation, which is the one thing the ledger exists
+ * to get right. Not posting it at all is what the office was doing
+ * before, and left policies whose IRR was solved off money nobody had
+ * recorded.
+ */
+function openPremiumPaidDialog(p, step) {
+  /* A payment somebody has already keyed in by hand. Not a refusal — a
+     premium really can be paid in two instalments — but it is almost
+     always the same money entered twice, and it should be said before
+     rather than found afterwards. */
+  const already = (p.transactions || []).filter((t) => t.txn_type === 'Premium Payment'
+    && Math.abs(daysBetween(t.txn_date, step.due_date)) <= 45);
+
+  openDialog('Mark the premium paid', `
+    <p style="margin:0 0 14px;font-size:14px">
+      This posts a <strong>Premium Payment</strong> to this policy's ledger, which is what
+      the return is solved from. The figure on the calendar is an estimate — correct it to
+      what actually left the bank.
+    </p>
+    <div class="field-row">
+      ${''/* `money0` is local to the snapshot dialog; this one needs the
+             same "blank stays blank" rule and says so inline rather than
+             reaching for a helper that is not in scope. */}
+      ${moneyField('Amount paid *', 'paid_amount',
+    step.amount === null || step.amount === undefined ? '' : step.amount)}
+      ${inputField('Date paid *', 'paid_on', dateInput(step.due_date), 'date')}
+    </div>
+    ${inputField('Note', 'remarks', `Premium due ${fmtDate(step.due_date)}`)}
+    ${already.length ? `<div class="error-box" style="margin-top:12px">
+      This policy already has ${already.length} premium payment${already.length === 1 ? '' : 's'}
+      within six weeks of this date — ${already.map((t) =>
+    `${fmtExact(t.amount)} on ${fmtDate(t.txn_date)}`).join(', ')}.
+      If one of those is this premium, close this and press <strong>Done</strong>
+      without posting instead.</div>` : ''}
+    <label class="dlg-check" style="margin:12px 0 0">
+      <input type="checkbox" name="post_payment" checked>
+      <span>Post it to the ledger. Untick to mark it done without recording a payment —
+        for a premium somebody has already entered by hand.</span>
+    </label>
+  `, async (v) => {
+    const post = !!v.post_payment;
+    const amount = String(v.paid_amount || '').replace(/,/g, '').trim();
+    if (post && !(Number(amount) > 0))
+      throw new Error('How much was paid? Give the amount, or untick posting to the ledger.');
+    const out = await api(`/policy-reminders/${step.id}`, { method: 'PUT', body: {
+      done: true, post_payment: post,
+      paid_amount: amount, paid_on: v.paid_on, remarks: v.remarks } });
+    toast(out?.posted_payment
+      ? `Marked done · ${fmtExact(out.posted_payment.amount)} posted to the ledger`
+      : 'Marked done');
+    render();
+  }, 'Mark it paid');
+}
+
+/** Whole days between two dates, either way round. */
+const daysBetween = (a, b) => Math.round(
+  (new Date(`${String(a).slice(0, 10)}T00:00:00`)
+    - new Date(`${String(b).slice(0, 10)}T00:00:00`)) / 86400000);
 
 /* ------------------------------ return ------------------------------- */
 
@@ -3509,9 +3581,23 @@ function wireDetailTab(p, values, irrData) {
 
     document.querySelectorAll('[data-step-done]').forEach((b) =>
       b.addEventListener('click', async () => {
-        await api(`/policy-reminders/${b.dataset.stepDone}`,
-          { method: 'PUT', body: { done: b.dataset.to === 'true' } });
-        toast(b.dataset.to === 'true' ? 'Marked done' : 'Reopened');
+        const id = Number(b.dataset.stepDone);
+        const to = b.dataset.to === 'true';
+        /* Compared as numbers on both sides. The handler beside this one
+           compares as strings for the same reason: an id arrives as a
+           number here and as a string from a dataset, and a strict
+           compare between the two silently finds nothing -- which looked
+           exactly like the dialog refusing to open. */
+        const step = (p.reminders || []).find((x) => Number(x.id) === id);
+        /* A premium being marked done is a payment, and a payment belongs
+           in the ledger the return is solved from. A follow-up is not,
+           so it stays one press. */
+        if (to && step?.kind === 'Premium') return openPremiumPaidDialog(p, step);
+        const out = await api(`/policy-reminders/${id}`, { method: 'PUT', body: { done: to } });
+        toast(to ? 'Marked done'
+          : out?.reopened?.removed_txn ? 'Reopened · the payment was taken off the ledger'
+            : out?.reopened?.kept_txn ? 'Reopened · the ledger entry was left, it had been edited'
+              : 'Reopened');
         render();
       }));
 
@@ -4059,14 +4145,23 @@ function openValueDialog(p, existing = null) {
 
     <div class="dlg-section">The next premium, as the statement gives it</div>
     <div class="field-row">
-      ${inputField('Next premium due', 'next_premium_due', '', 'date')}
-      ${moneyField('Amount', 'next_premium_amount', '')}
+      ${''/* Filled from what this snapshot already put on the calendar.
+             It used to come up blank on an edit, which is what made
+             people type it again -- and typing it again used to mint a
+             second identical premium rather than correcting the first. */}
+      ${inputField('Next premium due', 'next_premium_due',
+    dateInput(existing?.next_premium_due), 'date')}
+      ${moneyField('Amount', 'next_premium_amount', money0(existing?.next_premium_amount))}
     </div>
     <span class="muted" style="font-size:12px">
       Optional, and only recorded if you give both. This goes on the policy's servicing
       calendar, which is the only thing the premium forecast and a capital call read —
       entering it here and entering it under <strong>Schedule next step</strong> are the
       same act. Leave it blank if the statement does not say.
+      ${existing?.statement_premium_id ? `<br><br>This snapshot already has one on the
+        calendar. Changing these moves <em>that</em> one rather than adding another;
+        clearing both takes it off. A premium already marked done is left alone.`
+    : ''}
     </span>`;
 
   openDialog(editing ? 'Edit value snapshot' : 'Add value snapshot', body, async (v) => {
@@ -4075,19 +4170,24 @@ function openValueDialog(p, existing = null) {
     if ((due && !amount) || (amount && !due))
       throw new Error('A scheduled premium needs both a date and an amount. '
         + 'Clear both if the statement does not give them.');
-    delete v.next_premium_due; delete v.next_premium_amount;
 
-    if (editing) await api(`/values/${existing.id}`, { method: 'PUT', body: v });
-    else await api(`/policies/${p.id}/values`, { method: 'POST', body: v });
+    /* Sent WITH the snapshot rather than as a second request of its own.
+       The browser could only ever create a reminder, so saving the same
+       statement twice put the same premium on the calendar twice. The
+       server owns it now: it creates, moves or removes the one premium
+       linked to this snapshot, so saving the same thing twice does
+       nothing the second time. */
+    const body2 = { ...v, next_premium_due: due, next_premium_amount: amount };
+    const saved = editing
+      ? await api(`/values/${existing.id}`, { method: 'PUT', body: body2 })
+      : await api(`/policies/${p.id}/values`, { method: 'POST', body: body2 });
 
-    if (due && amount) {
-      await api(`/policies/${p.id}/reminders`, { method: 'POST', body: {
-        kind: 'Premium', due_date: due, amount,
-        note: `Per the carrier statement of ${fmtDate(v.as_of_date)}` } });
-      toast(editing ? 'Snapshot updated · premium scheduled' : 'Snapshot saved · premium scheduled');
-    } else {
-      toast(editing ? 'Snapshot updated' : 'Snapshot saved');
-    }
+    const had = !!existing?.statement_premium_id;
+    toast(saved?.statement_premium
+      ? (editing && had ? 'Snapshot updated · premium restated'
+        : 'Snapshot saved · premium scheduled')
+      : (had ? 'Snapshot updated · premium taken off the calendar'
+        : (editing ? 'Snapshot updated' : 'Snapshot saved')));
   }, editing ? 'Save' : 'Add');
 }
 

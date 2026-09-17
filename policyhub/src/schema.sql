@@ -1418,3 +1418,54 @@ CREATE TABLE IF NOT EXISTS medical_reviews (
 CREATE INDEX IF NOT EXISTS idx_medreview_policy ON medical_reviews (policy_id);
 CREATE INDEX IF NOT EXISTS idx_medreview_opp    ON medical_reviews (opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id, status);
+
+/* ====================================================================
+   A scheduled premium knows which statement put it there
+   ====================================================================
+
+   Entering a snapshot offers "the next premium, as the statement gives
+   it", and what that does is put a row on the servicing calendar. The
+   two were not linked, and everything that went wrong followed from it.
+
+   The browser POSTed a NEW reminder every time the snapshot was saved,
+   because creating one is the only thing it knew how to do. Re-saving
+   the same statement -- which the snapshot itself treats as a correction,
+   ON CONFLICT (policy_id, as_of_date) DO UPDATE -- produced a second
+   identical premium on the calendar, and then a third. And the edit
+   dialog could not show the premium already entered, because nothing on
+   the snapshot pointed at it: the box came up blank, which is what made
+   somebody type it again and mint the duplicate.
+
+   One column fixes both. A reminder that came from a statement says so,
+   the route that owns the snapshot owns the reminder with it, and
+   "record the next premium" becomes idempotent instead of additive.
+
+   ON DELETE SET NULL rather than CASCADE, deliberately: deleting the
+   snapshot a premium was read off does not mean the premium is not due.
+   The calendar entry stays and merely stops claiming a source.
+   ==================================================================== */
+ALTER TABLE policy_reminders ADD COLUMN IF NOT EXISTS from_value_id INTEGER
+  REFERENCES policy_values(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_policy_reminders_from_value
+  ON policy_reminders (from_value_id) WHERE from_value_id IS NOT NULL;
+
+/* ====================================================================
+   A premium marked paid posts itself to the ledger
+   ====================================================================
+
+   Marking a premium done on the servicing calendar and entering the
+   payment in the transaction ledger were two separate acts, and the
+   second one is the one that matters: the ledger is what the return is
+   solved from. Doing the first and forgetting the second leaves a
+   policy whose IRR is computed off money it does not know was spent.
+
+   So Done posts the payment, and this column is the link. It is what
+   stops a second press from posting a second payment, and what lets
+   Reopen take back the one thing it put there.
+
+   ON DELETE SET NULL: deleting the ledger row by hand is a decision
+   somebody made in the ledger, and the calendar entry should forget it
+   rather than disappear with it.
+   ==================================================================== */
+ALTER TABLE policy_reminders ADD COLUMN IF NOT EXISTS paid_txn_id INTEGER
+  REFERENCES transactions(id) ON DELETE SET NULL;

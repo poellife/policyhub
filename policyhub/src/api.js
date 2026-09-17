@@ -1873,7 +1873,14 @@ router.get('/policies/:id', wrap(async (req, res) => {
   // "forbidden" would confirm it exists.
   if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
   const [values, txns, extra, reminders] = await Promise.all([
-    q('SELECT * FROM policy_values WHERE policy_id = $1 ORDER BY as_of_date DESC', [req.params.id]),
+    q(`SELECT v.*,
+              r.id        AS statement_premium_id,
+              r.due_date  AS next_premium_due,
+              r.amount    AS next_premium_amount
+         FROM policy_values v
+         LEFT JOIN policy_reminders r
+           ON r.from_value_id = v.id AND r.done_at IS NULL
+        WHERE v.policy_id = $1 ORDER BY v.as_of_date DESC`, [req.params.id]),
     q('SELECT * FROM transactions WHERE policy_id = $1 ORDER BY txn_date DESC, id DESC', [req.params.id]),
     q(`SELECT pi.id AS link_id, pi.role, pi.notes AS link_notes, i.*
          FROM policy_insureds pi JOIN insureds i ON i.id = pi.insured_id
@@ -2429,13 +2436,68 @@ router.put('/policy-reminders/:id', blockInvestors, canEdit, wrap(async (req, re
   const doneAt = req.body.done === undefined ? r.done_at : (req.body.done ? new Date() : null);
   const doneBy = req.body.done === undefined ? r.done_by : (req.body.done ? req.user.uid : null);
 
+  /* ---- the ledger, which is the half that used to be forgotten ----
+     A premium marked done on the calendar and the payment entered in the
+     ledger were two acts, and the second is the one the return is solved
+     from: doing the first and forgetting the second leaves a policy
+     whose IRR is computed off money it does not know was spent. So Done
+     posts it, once, and Reopen takes back the row it posted.
+
+     The AMOUNT COMES FROM THE CALLER, not from the reminder. The figure
+     on the calendar is an estimate -- the screen says "about" -- and
+     what left the bank is what belongs in a ledger the return is
+     computed from. */
+  let txnId = r.paid_txn_id;
+  let posted = null;
+  let reopened = null;
+  const marking = req.body.done === true && !r.done_at;
+  const unmarking = req.body.done === false && !!r.done_at;
+
+  if (marking && kind === 'Premium' && req.body.post_payment && !txnId) {
+    const paidOn = date(req.body.paid_on) || due;
+    const paidAmount = num(req.body.paid_amount) || amount;
+    if (!paidAmount || paidAmount <= 0)
+      return res.status(400).json({
+        error: 'A payment needs an amount. Give one, or mark it done without posting.' });
+    const { rows: t } = await q(
+      `INSERT INTO transactions (policy_id, txn_date, txn_type, amount, remarks)
+       VALUES ($1,$2,'Premium Payment',$3,$4) RETURNING *`,
+      [r.policy_id, paidOn, paidAmount,
+        str(req.body.remarks) || `Premium due ${String(due).slice(0, 10)}`]);
+    txnId = t[0].id;
+    posted = t[0];
+    await audit(req.user.uid, 'transaction', t[0].id, 'create',
+      `policy ${r.policy_id} · premium payment posted from the servicing calendar`);
+  }
+
+  if (unmarking && txnId) {
+    /* Only the row we wrote, and only if it is still the row we wrote.
+       Somebody who has since corrected the figure has taken ownership of
+       it, and silently deleting their correction because a calendar
+       entry was reopened is not ours to do. */
+    const { rows: t } = await q('SELECT * FROM transactions WHERE id = $1', [txnId]);
+    const untouched = t[0] && t[0].txn_type === 'Premium Payment';
+    if (untouched) {
+      await q('DELETE FROM transactions WHERE id = $1', [txnId]);
+      await audit(req.user.uid, 'transaction', txnId, 'delete',
+        `policy ${r.policy_id} · premium payment withdrawn when the calendar entry was reopened`);
+      reopened = { removed_txn: txnId, amount: t[0].amount, txn_date: t[0].txn_date };
+    } else if (t[0]) {
+      reopened = { kept_txn: txnId };
+    }
+    txnId = null;
+  }
+
   const { rows } = await q(
-    `UPDATE policy_reminders SET due_date=$1, kind=$2, amount=$3, note=$4, done_at=$5, done_by=$6
+    `UPDATE policy_reminders SET due_date=$1, kind=$2, amount=$3, note=$4, done_at=$5, done_by=$6,
+            paid_txn_id=$8
       WHERE id=$7 RETURNING *`,
-    [due, kind, amount, note, doneAt, doneBy, req.params.id]);
+    [due, kind, amount, note, doneAt, doneBy, req.params.id, txnId]);
   await audit(req.user.uid, 'policy_reminder', Number(req.params.id), 'update',
-    req.body.done === undefined ? `${kind} ${due}` : (req.body.done ? 'marked done' : 'reopened'));
-  res.json(rows[0]);
+    req.body.done === undefined ? `${kind} ${due}`
+      : (req.body.done ? `marked done${posted ? ' · payment posted' : ''}`
+        : `reopened${reopened?.removed_txn ? ' · payment withdrawn' : ''}`));
+  res.json({ ...rows[0], posted_payment: posted, reopened });
 }));
 
 router.delete('/policy-reminders/:id', blockInvestors, canEdit, wrap(async (req, res) => {
@@ -2452,6 +2514,75 @@ router.delete('/policy-reminders/:id', blockInvestors, canEdit, wrap(async (req,
  * value snapshots
  * ------------------------------------------------------------------ */
 
+/**
+ * The premium a statement says is next, kept in step with the snapshot.
+ *
+ * The dialog that records a snapshot also offers "the next premium, as
+ * the statement gives it", and what that does is put a row on the
+ * servicing calendar. That used to be a separate POST from the browser,
+ * which could only ever CREATE one — so saving the same statement twice
+ * put the same premium on the calendar twice, and the edit dialog came
+ * up blank because nothing pointed back at what had been entered.
+ *
+ * So the route that owns the snapshot owns the reminder too, and the
+ * operation is a SYNC rather than an insert: at most one statement-born
+ * premium per snapshot, created, moved or removed to match what was
+ * typed. Saving the same thing twice is a no-op, which is the property
+ * that was missing.
+ *
+ * Two things it will not do, both about not destroying somebody's work:
+ *
+ *   - A premium already marked DONE is history. Somebody paid it. It is
+ *     left exactly as it is, and a changed figure starts a new row
+ *     rather than rewriting the record of what was paid.
+ *   - Fields left blank on a snapshot that never had a premium do
+ *     nothing at all. Only clearing a premium that IS linked removes it.
+ */
+async function syncStatementPremium(req, policyId, valueId, body, asOf) {
+  const hasDue = 'next_premium_due' in body;
+  const hasAmount = 'next_premium_amount' in body;
+  if (!hasDue && !hasAmount) return null;      // the caller said nothing about it
+
+  const due = date(body.next_premium_due);
+  const amount = num(body.next_premium_amount);
+  const wanted = due && amount > 0;
+
+  const { rows: linked } = await q(
+    `SELECT * FROM policy_reminders WHERE from_value_id = $1
+      ORDER BY done_at NULLS FIRST, id DESC`, [valueId]);
+  const open = linked.find((r) => !r.done_at) || null;
+
+  if (!wanted) {
+    /* Cleared. Only the outstanding one goes; a premium that was paid
+       stays on the record whatever the snapshot now says. */
+    if (open) {
+      await q('DELETE FROM policy_reminders WHERE id = $1', [open.id]);
+      await audit(req.user.uid, 'policy_reminder', open.id, 'delete',
+        `policy ${policyId} · cleared on the statement it came from`);
+    }
+    return null;
+  }
+
+  const note = `Per the carrier statement of ${String(asOf || '').slice(0, 10)}`;
+  if (open) {
+    const { rows } = await q(
+      `UPDATE policy_reminders SET due_date = $1, amount = $2, note = $3
+        WHERE id = $4 RETURNING *`, [due, amount, note, open.id]);
+    await audit(req.user.uid, 'policy_reminder', open.id, 'update',
+      `policy ${policyId} · restated from the statement of ${String(asOf || '').slice(0, 10)}`);
+    return rows[0];
+  }
+
+  const { rows } = await q(
+    `INSERT INTO policy_reminders (policy_id, due_date, kind, amount, note,
+                                   created_by, from_value_id)
+     VALUES ($1,$2,'Premium',$3,$4,$5,$6) RETURNING *`,
+    [policyId, due, amount, note, req.user.uid, valueId]);
+  await audit(req.user.uid, 'policy_reminder', rows[0].id, 'create',
+    `policy ${policyId} · from the statement of ${String(asOf || '').slice(0, 10)}`);
+  return rows[0];
+}
+
 router.post('/policies/:id/values', blockInvestors, canEdit, inPolicyScope('id'), wrap(async (req, res) => {
   const { cols, vals } = buildSet(VALUE_FIELDS, req.body);
   if (!cols.includes('as_of_date'))
@@ -2466,7 +2597,12 @@ router.post('/policies/:id/values', blockInvestors, canEdit, inPolicyScope('id')
     allVals
   );
   await audit(req.user.uid, 'policy_value', rows[0].id, 'create', `policy ${req.params.id}`);
-  res.status(201).json(rows[0]);
+  /* The premium the statement names, kept in step with the snapshot
+     rather than posted separately by the browser. See the note on
+     `syncStatementPremium` for why that mattered. */
+  const premium = await syncStatementPremium(
+    req, Number(req.params.id), rows[0].id, req.body, rows[0].as_of_date);
+  res.status(201).json({ ...rows[0], statement_premium: premium });
 }));
 
 /**
@@ -2486,7 +2622,17 @@ router.put('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
     return res.status(404).json({ error: 'Snapshot not found' });
 
   const { sets, vals, next } = buildSet(VALUE_FIELDS, req.body);
-  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+  /* The two premium fields are not columns on this table, so a request
+     that only changes them produces no SETs. Refusing it would mean the
+     one edit somebody most often makes -- the statement's next premium,
+     typed wrong -- could not be made on its own. */
+  if (!sets.length) {
+    const only = await syncStatementPremium(
+      req, cur[0].policy_id, cur[0].id, req.body, cur[0].as_of_date);
+    if ('next_premium_due' in req.body || 'next_premium_amount' in req.body)
+      return res.json({ ...cur[0], statement_premium: only });
+    return res.status(400).json({ error: 'No fields supplied' });
+  }
 
   try {
     const { rows } = await q(
@@ -2497,7 +2643,9 @@ router.put('/values/:id', blockInvestors, canEdit, wrap(async (req, res) => {
       `policy ${cur[0].policy_id} · ${moved
         ? `moved ${String(cur[0].as_of_date).slice(0, 10)} → ${String(rows[0].as_of_date).slice(0, 10)}`
         : String(rows[0].as_of_date).slice(0, 10)}`);
-    res.json(rows[0]);
+    const premium = await syncStatementPremium(
+      req, cur[0].policy_id, rows[0].id, req.body, rows[0].as_of_date);
+    res.json({ ...rows[0], statement_premium: premium });
   } catch (e) {
     /* One snapshot per policy per date, which is what makes re-importing a
        statement an update rather than a duplicate. Moving a row onto a date
