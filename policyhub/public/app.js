@@ -4768,6 +4768,11 @@ const wireServicingTabs = () => {
 async function servicingView() {
   if (svcTab === 'optimization' && mayOptimize()) return premiumOptimizationView();
   const mayRaise = !isInvestorUser() && ['admin', 'manager'].includes(state.user.role);
+  /* Deleting one is narrower than raising one, and deliberately so: the
+     route is admin-only, because a call that has gone out and been answered
+     is a record of what was asked and what came in. The button is only
+     offered to the role the server will actually let through. */
+  const mayDeleteCall = state.user.role === 'admin';
   const [svc, funds, calls, dupes] = await Promise.all([
     api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
     loadFunds(),
@@ -4868,7 +4873,10 @@ async function servicingView() {
               ? `<span class="muted"> · ${Math.round(
                   (Number(c.collected) / Number(c.total || 1)) * 100)}% in</span>` : ''}</td>
             <td class="muted">${c.parties}</td>`}
-          <td><button class="btn-sm" data-call="${c.id}">Open</button></td>
+          <td style="white-space:nowrap"><button class="btn-sm" data-call="${c.id}">Open</button>${
+            mayDeleteCall ? `
+            <button class="btn-sm btn-danger" data-del-call="${c.id}" data-title="${
+              esc(c.title || 'Capital call')}" data-total="${c.total}">Delete</button>` : ''}</td>
         </tr>`).join('')}</tbody>
       </table></div>
     </div>` : ''}
@@ -4967,6 +4975,26 @@ async function servicingView() {
         toast(`${folded} duplicate call${folded === 1 ? '' : 's'} folded in`);
         render();
       });
+      /* Deleting one. The confirmation names the call and what it asked for,
+         because "are you sure?" on an unnamed row is how the wrong one goes.
+         If money has already been confirmed against it the server refuses,
+         and it says why far better than a generic failure would -- so its
+         message is shown as it stands rather than reworded here. */
+      document.querySelectorAll('[data-del-call]').forEach((b) =>
+        b.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const asked = Number(b.dataset.total) || 0;
+          if (!confirm(`Delete "${b.dataset.title}"${asked
+            ? `, which asked for ${fmtExact(asked)}` : ''}?\n\n`
+            + 'Every investor line on it goes with it. This cannot be undone. '
+            + 'If you want the record kept, open it and cancel it instead.')) return;
+          b.disabled = true;
+          try {
+            await api(`/capital-calls/${b.dataset.delCall}`, { method: 'DELETE' });
+            toast('Capital call deleted');
+            render();
+          } catch (err) { alert(err.message); b.disabled = false; }
+        }));
       document.querySelectorAll('[data-call]').forEach((b) =>
         b.addEventListener('click', async () => {
           try {
@@ -5608,7 +5636,11 @@ async function opportunityView() {
           ${o.policy_number ? `· Policy ${esc(o.policy_number)}` : ''}
           ${o.product_type ? `· ${esc(o.product_type)}` : ''}
           ${staff && o.fund_code ? `· ${esc(o.fund_code)}` : ''}
-          · ${o.status === 'Open' ? deadlineChip(o) : `<span class="opp-deadline closed">${esc(o.status)}</span>`}</div>
+          · ${o.status === 'Open' ? deadlineChip(o) : `<span class="opp-deadline closed">${esc(o.status)}</span>`}${
+  ''/* Desk-only, and the server agrees: an investor's copy of this deal
+       does not carry the field at all, so there is nothing here to hide. */}${
+  o.documents_url ? ` · <a class="ext-link" href="${esc(o.documents_url)}"
+            target="_blank" rel="noopener noreferrer">Case files <span aria-hidden="true">&#8599;</span></a>` : ''}</div>
       </div>
       <div class="spacer"></div>
       ${interestToggle()}
@@ -6219,6 +6251,13 @@ async function openOpportunityDialog(o) {
       ${inputField('Offer closes on', 'offer_closes_on', dateInput(o?.offer_closes_on), 'date')}
       ${isNew ? '' : selectField('Status', 'status', o?.status || 'Open', OPP_STATUSES)}
     </div>
+    ${inputField('Case files link', 'documents_url', o?.documents_url, 'url',
+      'placeholder="Dropbox, SharePoint or any folder link"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      The folder holding this client's documents. The desk sees it, and so does a doctor
+      you send the case to — he is being asked to read the file. Investors do not: a folder
+      is usually named after the client, and their copy of this deal carries initials only.
+      It travels onto the policy if the deal is funded.</span></div>
     <div class="field"><label>Notes for investors</label>
       <textarea name="notes" rows="3">${esc(o?.notes || '')}</textarea></div>
 
@@ -11430,6 +11469,10 @@ async function medicalCaseView() {
                 <dt>State</dt><dd>${esc(s.state || '—')}</dd>
                 ${s.records_through ? `<dt>Records through</dt>
                   <dd>${fmtDate(s.records_through)}</dd>` : ''}
+                ${s.documents_url ? `<dt>The records</dt>
+                  <dd><a class="ext-link" href="${esc(s.documents_url)}" target="_blank"
+                         rel="noopener noreferrer">Open the folder
+                         <span aria-hidden="true">&#8599;</span></a></dd>` : ''}
               </dl>
               ${s.impairments ? `<h3 class="med-h3">What the file says</h3>
                 <ul class="rpt-bullets">${String(s.impairments).split('\n')

@@ -600,6 +600,22 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_state      TEXT;
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_months  INTEGER;
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_provider TEXT NOT NULL DEFAULT '';
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_date    DATE;
+
+/* Where the case file actually lives.
+ *
+ * The same idea as `policies.documents_url` and deliberately the same
+ * column name: the records for a case sit in a shared folder --
+ * Dropbox, SharePoint, a drive -- long before anything is bought, and
+ * the link to them was being kept in somebody's email. A deal that
+ * becomes a policy carries the link across rather than having it
+ * retyped.
+ *
+ * Only a link is stored. Who may actually open the folder is decided by
+ * the folder's own sharing settings and not by anything here, and the
+ * link is NOT sent to investors: a folder path routinely carries the
+ * client's name, which is the one thing the deal sheet exists to keep
+ * off an investor's screen. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS documents_url TEXT;
 UPDATE opportunities o SET policy_created = TRUE
  WHERE o.policy_id IS NOT NULL AND NOT o.policy_created
    AND EXISTS (SELECT 1 FROM transactions t

@@ -1,80 +1,45 @@
-PolicyHub — build 2026-09-10c
-Minimal update. Paths are relative to the `policyhub` folder of your repo.
+PolicyHub — build 2026-09-18a
+Minimal update, on top of 2026-09-17c. Paths are relative to the
+`policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
+
+FILES IN THIS PACKAGE
+
+  src/api.js        src/schema.sql
+  public/app.js     public/build.js
+
+  If you have not yet deployed 2026-09-17c, deploy that package first —
+  this one assumes public/initials.js and the rest of it are already in.
 
 WHAT THIS ADDS
 
-  A SECOND INSURED on an opportunity, for survivorship policies.
+  A CASE FILES LINK ON AN OPPORTUNITY. Edit a deal and paste the address
+  of the folder that holds that client's documents — Dropbox, SharePoint,
+  a drive, anything. It shows in the line under the deal's name as
+  "Case files", opening in its own tab.
 
-  Tick "Two insureds" on the deal and a second block opens: name, date of
-  birth, sex, state, and that person's OWN life expectancy with its own
-  provider and report date.
+  WHO SEES IT
 
-  The return is modelled on WHICHEVER ESTIMATE RUNS OUT LATER, compared
-  as dates and never as month counts. Each estimate is counted from its
-  own report, so a 72-month report written this year outlasts an 84-month
-  one written two years ago; comparing months would pick the wrong life
-  every time the reports are dated apart, which is most of the time.
+    The desk sees it.
 
-  This is the later of two medians and deliberately NOT a joint life
-  expectancy — a floor on the wait rather than the expectation of it. The
-  screen and both one-pagers say so, and the "24 months late" row is
-  where it gets tested.
+    THE DOCTOR SEES IT. A case sent for medical review carries the
+    folder through to his screen, under "The records", because he is
+    being asked to read the file. He still sees no price, no death
+    benefit and no rate of return.
 
-  On the Sommers file: Gerald 36 months, Judith 71, both written 26
-  August. Hers governs. Priced off his alone the deal reads 83.9%; off
-  the correct life, 31.1%.
+    INVESTORS DO NOT. Not hidden on the page — the server does not send
+    it to them at all. A shared folder is usually named after the
+    client, and keeping that name off an investor's copy of the deal is
+    the whole point of the initials on the sheet.
 
-  DOCUMENT READING now decides whether two LE reports are two opinions on
-  one person or one opinion each on two people, by comparing the names on
-  the certificates. Two different people fills the second insured and
-  ticks the box; two reports on the same person stay a second opinion.
-  When the names cannot be told apart it assumes two opinions, which is
-  the safer way to be wrong.
+  IT TRAVELS ONTO THE POLICY when the deal is funded, so the folder that
+  held the records while it was being priced is still linked once it is
+  owned. Policies already had their own case-files link; this is the
+  same field, filled in for you.
 
-  NOTE: the reading itself happens in the valuation service, not here.
-  This build maps its answer. If that service does not yet pull the name,
-  date of birth, sex, report date and month count off a 21st Services
-  certificate, that is a change there and not in this repo.
+  Only http and https addresses are stored. A bare "dropbox.com/..." is
+  read as https, which is what pasting one means. Who may actually open
+  the folder is still decided by the folder's own sharing settings —
+  pasting a link here grants nobody anything.
 
-FOUR DEFECTS FIXED ALONG THE WAY
-
-  1. schema.sql ran an ALTER above the CREATE TABLE it depended on. Fine
-     on a database that already had the table; the application REFUSED TO
-     START on an empty one. Any new environment would have hit it.
-
-  2. The analysis carried assembled full names to investors, in a payload
-     where every other name is scrubbed to initials.
-
-  3. The de-identifier did not know the new insured2_ columns, so a second
-     insured's name reached investors unmasked. It now gets its own
-     initial rather than sharing the first insured's.
-
-  4. A privacy check read "if the investor holds any policies…" against a
-     fixture where none were allocated, so it passed for a long time
-     without running. It also contradicted its own sibling assertion.
-     Rewritten to test what it means.
-
-FILES
-
-  src/schema.sql               the ALTER moved below its CREATE; the eight
-                               insured2_ columns
-  src/opportunity-analysis.js  lives(), benefitAt-style maturity on the
-                               later of the two, drivingLife()
-  src/api.js                   OPP_FIELDS, the list query, and the
-                               de-identifier
-  src/extract.js               two opinions vs two people
-  src/opportunity-pdf.js       both lives on the PDF one-pager
-  public/app.js                the tick box, the second block, the two-
-                               lives card, the reader opening the block
-  public/reports.js            both lives on the HTML one-pager
-  public/build.js              the build stamp the footer reads
-  scripts/two-lives-test.mjs      NEW — the Sommers file as the fixture
-  scripts/two-lives-ui-test.mjs   NEW
-  scripts/extract-test.mjs        the two-people rule
-  scripts/schedule-test.mjs       the check that was not checking
-
-DEPLOY
-  Copy over, commit, push. Render rebuilds. Hard-refresh; the footer
-  should read 2026-09-10c. The eight new columns apply themselves on
-  boot. No new environment variables. An ordinary one-insured deal
-  behaves exactly as it did.
+NOTHING TO RUN. Copy the files in and redeploy. The new column applies
+itself on boot.

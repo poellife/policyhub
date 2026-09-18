@@ -2999,6 +2999,11 @@ const OPP_FIELDS = {
   insured2_last_name: str, insured2_first_name: str, insured2_dob: date,
   insured2_gender: str, insured2_state: str,
   insured2_le_months: int, insured2_le_provider: str, insured2_le_date: date,
+  /* The shared folder the case file lives in. Validated by `url`, which
+     is the same guard the policy link uses -- only http and https
+     survive, so a stored `javascript:` address cannot be clicked into
+     somebody's session. */
+  documents_url: url,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -3052,6 +3057,12 @@ async function loadOpportunity(req, id) {
     // An investor sees their own line and nothing about anybody else —
     // the same rule the policy cap table follows.
     o.shares = undefined;
+    /* The case-file link is desk-only. A shared folder is named after the
+       client as often as not -- "Sommers, Gerald - 2026" -- so sending the
+       link to an investor would hand over the name that every other field
+       on this page has had scrubbed to initials. Staff keep it; the people
+       the sheet is written for do not get it. */
+    o.documents_url = undefined;
     o.commitments = commits.rows.filter((c) => c.investor_id === me)
       .map((c) => ({ id: c.id, pct: Number(c.pct), status: c.status,
                      requested_at: c.requested_at, notes: c.notes }));
@@ -4825,12 +4836,18 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
     try {
       await client.query('BEGIN');
       const { rows: pol } = await client.query(
+        /* `documents_url` travels with it. The folder that held the
+           medical records while the case was being priced is the same
+           folder that holds them once it is owned, and a link that has
+           to be pasted in a second time is a link that ends up missing
+           from half the book. */
         `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
                                insured_id, fund_id, status, premium_required, premium_mode,
-                               acquisition_date, acquisition_cost, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10) RETURNING id, policy_number`,
+                               acquisition_date, acquisition_cost, notes, documents_url)
+         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10,$11)
+         RETURNING id, policy_number`,
         [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
-         o.annual_premium, acquired, o.asking_price, o.notes]);
+         o.annual_premium, acquired, o.asking_price, o.notes, o.documents_url || null]);
       policyId = pol[0].id;
       policyNumber = pol[0].policy_number;
 
@@ -5962,7 +5979,8 @@ async function reviewSubject(row) {
     const { rows } = await q(
       `SELECT insured_first_name, insured_last_name, insured_dob, insured_gender,
               insured_state, insured2_first_name, insured2_last_name, insured2_dob,
-              insured2_gender, insured2_state, impairments, mitigating, records_through
+              insured2_gender, insured2_state, impairments, mitigating, records_through,
+              documents_url
          FROM opportunities WHERE id = $1`, [row.opportunity_id]);
     const o = rows[0];
     if (!o) return null;
@@ -5980,14 +5998,21 @@ async function reviewSubject(row) {
       impairments: o.impairments || '',
       mitigating: o.mitigating || '',
       records_through: o.records_through || null,
+      /* The folder the records themselves are in. He is being asked to
+         read a file, so the file is what he is given -- the summary on
+         this screen is somebody else's reading of it and no substitute.
+         It carries no price and no rate of return, which is the only
+         thing kept off these screens. */
+      documents_url: o.documents_url || null,
     };
   }
   const { rows } = await q(
-    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state
+    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state, pol.documents_url
        FROM policies pol LEFT JOIN insureds i ON i.id = pol.insured_id
       WHERE pol.id = $1`, [row.policy_id]);
   const i = rows[0];
-  return i ? { ...i, impairments: '', mitigating: '', records_through: null } : null;
+  return i ? { ...i, impairments: '', mitigating: '', records_through: null,
+    documents_url: rows[0].documents_url || null } : null;
 }
 
 /** Everything the reviewer is sent, and nothing else. */
@@ -7054,23 +7079,13 @@ router.get('/servicing', wrap(async (req, res) => {
   const funds = fundScope(req);
   // Same entity filter the dashboard uses, so the two agree when one is set.
   const fund = fundParam(req.query.fund);
-  const { rows } = await q(
-    `SELECT pl.id, pl.policy_number, pl.carrier_name, pl.display_name,
-            pl.insured_first, pl.insured_last, pl.insured_gender,
-            pl.status, pl.premium_mode, pl.next_premium_due, pl.grace_period_days,
-            pl.face_amount, pl.account_value, pl.cash_surrender_value, pl.cost_of_insurance,
-            pl.value_as_of, pl.date_of_last_withdrawal,
-            ${shareOf('pl.id', 1)} AS my_pct,
-            pl.premium_required * (${shareOf('pl.id', 1)} / 100.0) AS premium_required,
-            pl.premium_required AS premium_required_full,
-            (pl.next_premium_due - CURRENT_DATE) AS days_until_due
-       FROM policy_latest pl
-      WHERE pl.status NOT IN ('Lapsed','Sold','Matured')
-        AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))
-        AND ${visibleTo('pl.id', 'pl.fund_id', 1, 2)}
-      ORDER BY pl.next_premium_due NULLS LAST`,
-    [scope, funds, fund]
-  );
+  /* The whole-book query that used to stand here is gone with the
+     derived alerts it fed. It read every in-force policy with its latest
+     snapshot on every load of this screen, to compute months of cover
+     and how stale each statement was — and nothing on the page reads
+     either any more. A query kept for a caller that no longer exists is
+     a page that is slower for no reason. What the screen needs now comes
+     from the servicing calendar, which is queried below. */
 
   /* Investors get dates, not servicing work.
      Lapse risk, stale carrier statements and overdue premiums are things
@@ -7078,42 +7093,21 @@ router.get('/servicing', wrap(async (req, res) => {
      alarm about a policy they hold a fraction of and cannot act on, and the
      only effect is a phone call. They see what is coming and what it costs
      them; the rest is the manager's job. */
+  /* ALERTS ARE SCHEDULED PREMIUMS, AND NOTHING ELSE.
+     This list used to be derived as well as scheduled: months of cover
+     the account value could absorb at the current cost of insurance, and
+     how long since a carrier statement. Both were true and neither was
+     an errand. A book of forty policies raised an alert on most of them
+     every day, none of which asked anybody to do anything, and a list
+     that is red every morning is a list nobody reads — which is how the
+     one row that IS an errand gets lost.
+     What remains is a premium somebody put on the calendar with a date
+     against it. That is a thing a person must do, on a day, or the
+     policy lapses.
+     The coverage figure has not gone anywhere: it is on the policy's own
+     page, beside the account value it is computed from, which is where
+     somebody weighing that policy is already looking. */
   const alerts = [];
-  for (const p of (isInvestor(req) ? [] : rows)) {
-    const name = p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim();
-
-    /* No premium alert is raised from the policy record.
-       A premium that has to be found is one somebody put on the servicing
-       calendar; the carrier date and annual figure on the policy form are
-       reference, not an obligation, and alerting on both meant the same
-       payment appeared twice with two different amounts. The scheduled
-       premiums below raise their own alerts. */
-
-    // Months of coverage the account value can absorb at the current COI.
-    const coi = Number(p.cost_of_insurance) || 0;
-    const av = Number(p.account_value) || 0;
-    if (coi > 0) {
-      const months = av / coi;
-      if (months < 3) {
-        alerts.push({ ...p, insured: name, severity: 'critical',
-          reason: `Account value covers only ${months.toFixed(1)} months of cost of insurance` });
-      } else if (months < 6) {
-        alerts.push({ ...p, insured: name, severity: 'serious',
-          reason: `Account value covers ${months.toFixed(1)} months of cost of insurance` });
-      }
-    }
-
-    // Stale carrier data.
-    if (p.value_as_of) {
-      const days = Math.floor((Date.now() - new Date(p.value_as_of).getTime()) / 86400000);
-      if (days > 120)
-        alerts.push({ ...p, insured: name, severity: 'info',
-          reason: `No value update in ${days} days` });
-    } else {
-      alerts.push({ ...p, insured: name, severity: 'info',
-        reason: 'No value snapshot recorded yet' });
-    }
-  }
 
   /* Scheduled next steps join the calendar as alerts of their own. A note
      written six months ago is only useful if it comes back at you on the day
@@ -7146,6 +7140,11 @@ router.get('/servicing', wrap(async (req, res) => {
     [scope, funds, fund]);
   if (!isInvestor(req)) {
     for (const r of steps.rows) {
+      /* Premiums only. A follow-up is a note somebody wrote to
+         themselves and it is on that policy's own schedule, where they
+         will find it; a premium is money that has to leave a bank
+         account by a date or the policy lapses. */
+      if (r.kind !== 'Premium') continue;
       // The list reaches years out; the alert list is this month and next.
       if (r.days_until_due > 45) continue;
       const name = r.display_name || `${r.insured_first || ''} ${r.insured_last || ''}`.trim();
@@ -7153,13 +7152,17 @@ router.get('/servicing', wrap(async (req, res) => {
       const when = d < 0 ? `${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} overdue`
         : d === 0 ? 'due today'
           : `due in ${d} day${d === 1 ? '' : 's'}`;
-      const what = r.kind === 'Premium'
-        ? `Scheduled premium${r.amount ? ` of about ${Number(r.amount).toLocaleString('en-US',
-            { style: 'currency', currency: 'USD' })}` : ''}`
-        : 'Follow-up';
+      const what = `Scheduled premium${r.amount
+        ? ` of about ${Number(r.amount).toLocaleString('en-US',
+          { style: 'currency', currency: 'USD' })}` : ''}`;
+      /* RED MEANS THE DATE HAS PASSED, and nothing else means red.
+         An amber band for "due in a fortnight" put half the list in a
+         warning colour permanently, and a colour that is always on
+         carries no information. A premium that is merely coming up is
+         information; a premium that is late is a problem. */
       alerts.push({
         ...r, insured: name, scheduled: true,
-        severity: d < 0 ? 'critical' : d <= 14 ? 'warning' : 'info',
+        severity: d < 0 ? 'critical' : 'info',
         reason: `${what} ${when}${r.note ? ` — ${r.note}` : ''}`,
       });
     }
