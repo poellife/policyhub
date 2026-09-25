@@ -1901,6 +1901,7 @@ export function buildOpportunitySheet(o, opts = {}) {
           <table class="rpt-kv">
             <tr><td>Carrier</td><td>${esc(o.carrier_name || '—')}</td></tr>
             <tr><td>Product</td><td>${esc(o.product_type || '—')}</td></tr>
+            ${o.issue_date ? `<tr><td>Policy issued</td><td>${fmtDate(o.issue_date)}</td></tr>` : ''}
             <tr><td>Insured</td><td>${esc(name)}${o.insured_dob
               ? ` · ${ageOn(o.insured_dob, new Date().toISOString())} · ${esc(o.insured_gender || '')}` : ''}</td></tr>
             <tr><td>State</td><td>${esc(o.insured_state || '—')}</td></tr>

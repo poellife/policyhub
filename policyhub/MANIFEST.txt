@@ -1,45 +1,53 @@
-PolicyHub — build 2026-09-18a
+PolicyHub — build 2026-09-25a
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
 FILES IN THIS PACKAGE
 
-  src/api.js        src/schema.sql
-  public/app.js     public/build.js
+  src/api.js     src/schema.sql   src/server.js   src/opportunity-pdf.js
+  public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  If you have not yet deployed 2026-09-17c, deploy that package first —
-  this one assumes public/initials.js and the rest of it are already in.
+  This package also contains everything in 2026-09-18a and 18b, so deploy
+  this instead of either if they are not up yet. It assumes 2026-09-17c —
+  which carried a new file, public/initials.js — is already deployed.
 
 WHAT THIS ADDS
 
-  A CASE FILES LINK ON AN OPPORTUNITY. Edit a deal and paste the address
-  of the folder that holds that client's documents — Dropbox, SharePoint,
-  a drive, anything. It shows in the line under the deal's name as
-  "Case files", opening in its own tab.
+  A MED REVIEW TAB. Every case ever sent to a reviewing doctor, in one
+  list, split into what is still out and what has come back. Each row
+  names the insured and the case, the reviewer, the date it went, his
+  estimate and his call. Opening one shows the whole review: what the
+  office sent, what came back, and the button that puts his estimate
+  on the case.
 
-  WHO SEES IT
+  FILES FOR THE DOCTOR. On a review, "Add a file" uploads the records
+  themselves — PDF, Word, images or a zip, up to 60 MB each. They appear
+  on his screen under "Files sent with this case" and he downloads them
+  from there.
 
-    The desk sees it.
+    They are filed against the REVIEW, not against the case: they do not
+    appear on the Documents tab beside the K-1s, no investor can reach
+    them, and the doctor can only open the ones on a review addressed to
+    him. Taking one back off is one click.
 
-    THE DOCTOR SEES IT. A case sent for medical review carries the
-    folder through to his screen, under "The records", because he is
-    being asked to read the file. He still sees no price, no death
-    benefit and no rate of return.
+  WITHDRAWING A REQUEST NOW REMOVES IT FROM HIS SCREEN ENTIRELY — not
+  greyed out with a badge, gone, with the records that went with it
+  unreachable from that account. The office keeps its own record of
+  having sent it.
 
-    INVESTORS DO NOT. Not hidden on the page — the server does not send
-    it to them at all. A shared folder is usually named after the
-    client, and keeping that name off an investor's copy of the deal is
-    the whole point of the initials on the sheet.
+  THE DOCTOR'S SCREEN IS DOWN TO THREE THINGS: a life expectancy in
+  months, a box for his reasoning, and his call at the bottom (Proceed,
+  Pass, More records needed). One button, and it says "Review complete".
 
-  IT TRAVELS ONTO THE POLICY when the deal is funded, so the folder that
-  held the records while it was being priced is still linked once it is
-  owned. Policies already had their own case-files link; this is the
-  same field, filled in for you.
+    Gone from it: "What you have been asked", which said the same thing
+    on every case; the median-or-mean question; "How sure are you?"; the
+    two impairment lists; "Save a draft" and "I am not reviewing this";
+    and the footnote explaining why he sees no price. The rule that
+    footnote described has not changed — that account is still sent no
+    price, no death benefit and no rate of return.
 
-  Only http and https addresses are stored. A bare "dropbox.com/..." is
-  read as https, which is what pasting one means. Who may actually open
-  the folder is still decided by the folder's own sharing settings —
-  pasting a link here grants nobody anything.
+    Only the estimate is insisted on. A review written on the old longer
+    form keeps everything it recorded; the short form does not erase it.
 
 NOTHING TO RUN. Copy the files in and redeploy. The new column applies
 itself on boot.

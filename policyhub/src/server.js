@@ -8,7 +8,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 
 import { initDb, explainDbError, audit } from './db.js';
-import api, { wrap, storeDocument, previewPremiumStream, storePremiumStream } from './api.js';
+import api, { wrap, storeDocument, storeReviewFile, previewPremiumStream, storePremiumStream } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { readDocuments } from './extract.js';
@@ -200,6 +200,22 @@ const docUpload = multer({
 });
 app.post('/api/documents', authenticate, requireRole('admin', 'editor', 'manager'),
   docUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeDocument));
+
+/* The papers that go to a reviewing doctor. Same shape of upload as a
+   document and the same size limit -- a scanned APS arrives a chapter at
+   a time -- but filed against the review rather than in the cabinet, and
+   who may do it is decided inside `storeReviewFile` with the rest of the
+   medical-review rules. */
+/* Its own limit rather than the cabinet's 15 MB: an attending
+   physician's statement is routinely a scanned hundred pages, and a
+   doctor cannot read what would not upload. */
+const recordFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 60 * 1024 * 1024, files: 1, fields: 8 },
+});
+app.post('/api/medical-reviews/:id/files', authenticate,
+  requireRole('admin', 'editor', 'manager'),
+  recordFileUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeReviewFile));
 
 /* A premium optimization is one workbook at a time, parsed and then filed —
    closer to a document than to an import. It gets the document-sized limit

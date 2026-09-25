@@ -1942,6 +1942,14 @@ table.data td.risk-note-cell {
   color: var(--muted); margin: 18px 0 6px; }
 .med-oneliner { font-size: 13px; line-height: 1.6; margin: 12px 0; }
 .med-grid { align-items: start; }
+/* The papers themselves: a plain list, because that is what it is.
+   Each one is a file somebody has to be able to find again, so the
+   name carries the link and the size sits quietly beside it. */
+.med-files { list-style: none; margin: 4px 0 0; padding: 0; }
+.med-files li { padding: 7px 0; border-bottom: 1px solid var(--border);
+  font-size: 13.5px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.med-files li:last-child { border-bottom: 0; }
+.med-files a { font-weight: 600; }
 /* What came back, on the desk's side. Set as prose rather than as a cell:
    the reasoning is the part worth more than the number. */
 .med-opinion { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 14px; }

@@ -616,6 +616,16 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_date    DATE;
  * client's name, which is the one thing the deal sheet exists to keep
  * off an investor's screen. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS documents_url TEXT;
+
+/* When the carrier issued the contract.
+ *
+ * Policies have carried this since the beginning; a deal being priced
+ * did not, and it is not decoration. It dates the contestability and
+ * suicide clauses, it says how long the premiums quoted in the
+ * illustration have actually been paid, and on a policy sold within a
+ * couple of years of issue it is the first thing a buyer asks about.
+ * Carried onto the policy when the deal is funded. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS issue_date DATE;
 UPDATE opportunities o SET policy_created = TRUE
  WHERE o.policy_id IS NOT NULL AND NOT o.policy_created
    AND EXISTS (SELECT 1 FROM transactions t
@@ -1459,6 +1469,24 @@ CREATE TABLE IF NOT EXISTS medical_reviews (
 CREATE INDEX IF NOT EXISTS idx_medreview_policy ON medical_reviews (policy_id);
 CREATE INDEX IF NOT EXISTS idx_medreview_opp    ON medical_reviews (opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id, status);
+
+/* The papers that went with the errand.
+ *
+ * The desk uploads what the doctor is to read -- the APS, the labs, the
+ * provider's own report -- and they hang off the review rather than off
+ * the case, because the review is what he can see. They live in the same
+ * `documents` table as everything else so there is one cabinet, one
+ * upload path and one set of type rules, and the column is what keeps
+ * them out of the general filing: a chart is not a K-1 and has no
+ * business on the Documents tab.
+ *
+ * ON DELETE CASCADE: withdrawing a review takes the records with it.
+ * Declared here rather than beside the table because `documents` is
+ * created several hundred lines above `medical_reviews`, and a foreign
+ * key cannot point at a table that does not exist yet. */
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS medical_review_id INTEGER
+  REFERENCES medical_reviews(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_documents_medreview ON documents (medical_review_id);
 
 /* ====================================================================
    A scheduled premium knows which statement put it there

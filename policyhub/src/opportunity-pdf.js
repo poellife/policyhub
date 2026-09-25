@@ -715,6 +715,9 @@ export function opportunityPdf(o, opts = {}) {
     kv(doc, [
       ['Carrier', o.carrier_name || '--'],
       ['Product', o.product_type || '--'],
+      /* Only when it is known. A row reading "--" on every deal that has
+         not had it entered teaches the reader to skip the column. */
+      ...(o.issue_date ? [['Policy issued', shortDate(o.issue_date)]] : []),
       /* Both, when there are two. A survivorship deal whose terms name
          one insured invites the reader to price it off one life, which is
          the mistake this whole section exists to prevent. */

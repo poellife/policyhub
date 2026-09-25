@@ -2247,6 +2247,13 @@ router.get('/documents', wrap(async (req, res) => {
   const { rows } = await q(
     `SELECT * FROM document_list d
       WHERE ${scope.sql}
+        ${''/* Papers uploaded for a reviewing doctor are filed against the
+               review, not in the cabinet. They are somebody's medical
+               records; they belong on the case they were sent with and
+               nowhere else. Read off the table rather than the view so
+               that a database which has not yet rebuilt `document_list`
+               still filters them out. */}
+        AND (SELECT dd.medical_review_id FROM documents dd WHERE dd.id = d.id) IS NULL
         AND ($${n + 1} = '' OR d.title ILIKE '%'||$${n + 1}||'%'
              OR d.file_name ILIKE '%'||$${n + 1}||'%'
              OR d.notes ILIKE '%'||$${n + 1}||'%'
@@ -2978,6 +2985,9 @@ const pctText = (n) => {
 
 const OPP_FIELDS = {
   policy_number: str, carrier_name: str, product_type: str, face_amount: num,
+  /* The carrier's issue date. Same column name as on a policy, because it
+     is the same fact and the deal hands it over when it is funded. */
+  issue_date: date,
   insured_last_name: str, insured_first_name: str, insured_dob: date,
   insured_gender: str, insured_state: str,
   le_months: int, le_provider: str, le_date: date,
@@ -3106,7 +3116,7 @@ router.get('/opportunities', wrap(async (req, res) => {
     `SELECT o.id, o.policy_number, o.carrier_name, o.product_type, o.face_amount,
             o.insured_last_name, o.insured_first_name, o.insured_dob, o.insured_gender,
             o.insured_state, o.le_months, o.le_date, o.asking_price, o.annual_premium,
-            o.expected_close, o.offer_closes_on, o.status, o.fund_id, o.notes,
+            o.expected_close, o.offer_closes_on, o.issue_date, o.status, o.fund_id, o.notes,
             /* The list solves the same analysis the detail does, so it has
                to be told the same things. Without this the flag is absent
                here, the benefit schedule goes unread, and the list quotes
@@ -4843,11 +4853,13 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
            from half the book. */
         `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
                                insured_id, fund_id, status, premium_required, premium_mode,
-                               acquisition_date, acquisition_cost, notes, documents_url)
-         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10,$11)
+                               acquisition_date, acquisition_cost, notes, documents_url,
+                               issue_date)
+         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10,$11,$12)
          RETURNING id, policy_number`,
         [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
-         o.annual_premium, acquired, o.asking_price, o.notes, o.documents_url || null]);
+         o.annual_premium, acquired, o.asking_price, o.notes, o.documents_url || null,
+         o.issue_date || null]);
       policyId = pol[0].id;
       policyNumber = pol[0].policy_number;
 
@@ -5959,13 +5971,21 @@ const REVIEW_SELECT = `
          rq.full_name AS requested_by_name,
          ad.full_name AS adopted_by_name,
          o.policy_number AS opportunity_number, o.carrier_name AS opportunity_carrier,
-         p.policy_number AS policy_number
+         p.policy_number AS policy_number,
+         /* Who the case is about, for the register. Staff only ever read
+            this route -- an investor is refused at the door -- so the
+            name is the name rather than initials, which is the whole
+            point of a list somebody has to recognise a case in. */
+         o.insured_last_name, o.insured_first_name,
+         o.insured2_last_name, o.insured2_first_name,
+         i.last_name AS policy_insured_last, i.first_name AS policy_insured_first
     FROM medical_reviews m
     LEFT JOIN users u  ON u.id = m.reviewer_id
     LEFT JOIN users rq ON rq.id = m.requested_by
     LEFT JOIN users ad ON ad.id = m.adopted_by
     LEFT JOIN opportunities o ON o.id = m.opportunity_id
-    LEFT JOIN policies p ON p.id = m.policy_id`;
+    LEFT JOIN policies p ON p.id = m.policy_id
+    LEFT JOIN insureds i ON i.id = p.insured_id`;
 
 /**
  * The insured this review is about, read off whichever case it hangs on.
@@ -6015,6 +6035,22 @@ async function reviewSubject(row) {
     documents_url: rows[0].documents_url || null } : null;
 }
 
+/**
+ * The papers filed against one review.
+ *
+ * Never the bytes -- a listing that carried the content would pull a
+ * hundred megabytes of scanned chart into memory to draw a table of
+ * file names.
+ */
+async function reviewFiles(id) {
+  const { rows } = await q(
+    `SELECT d.id, d.file_name, d.mime_type, d.byte_size, d.created_at,
+            u.full_name AS uploaded_by_name
+       FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.medical_review_id = $1 ORDER BY d.created_at, d.id`, [id]);
+  return rows;
+}
+
 /** Everything the reviewer is sent, and nothing else. */
 async function reviewPacket(row) {
   const subject = await reviewSubject(row);
@@ -6049,6 +6085,10 @@ async function reviewPacket(row) {
     /* The machine's reading, offered as a reading rather than as an
        answer. He may agree with it, and he may not. */
     summary,
+    /* What the desk actually uploaded for him: the records themselves.
+       This is the thing he was asked to read, and everything else on
+       his screen is somebody's summary of it. */
+    files: await reviewFiles(row.id),
     /* A survivorship case has a second person in the same file. Said, so
        he knows which chart he is being asked about, and not who the
        other one is. */
@@ -6056,9 +6096,19 @@ async function reviewPacket(row) {
   };
 }
 
-/** Whose queue is this? A reviewer only ever sees their own. */
+/**
+ * Whose queue is this? A reviewer only ever sees their own.
+ *
+ * And not the withdrawn ones. When the office takes a case back the
+ * doctor should stop seeing it entirely -- not see it greyed out with a
+ * badge saying somebody changed their mind, which is how a chart stays
+ * readable on a screen after the reason for sending it has gone. The
+ * row survives for the office's own record; his queue does not show it,
+ * and `oneReview` below will not open it, so the files attached to it
+ * are unreachable from that account the moment it is withdrawn.
+ */
 const reviewScope = (req) => (isMedical(req)
-  ? { sql: 'm.reviewer_id = $MINE', args: [req.user.uid] }
+  ? { sql: "m.reviewer_id = $MINE AND m.status <> 'Cancelled'", args: [req.user.uid] }
   : { sql: '', args: [] });
 
 /**
@@ -6087,20 +6137,37 @@ router.get('/medical-reviews', blockInvestors, wrap(async (req, res) => {
       if (!(await assertPolicyInScope(req, polId)))
         return res.status(404).json({ error: 'Policy not found' });
       args.push(polId); where.push(`m.policy_id = $${args.length}`);
-    } else {
+    } else if (str(req.query.scope) !== 'all') {
       /* No case named: the desk's own outstanding errands, so a request
          sent last week does not need somebody to remember which deal it
          was on. */
       args.push(req.user.uid);
       where.push(`(m.requested_by = $${args.length} OR m.status = 'Returned')`);
     }
+    /* scope=all is the register -- everything that has ever been sent,
+       whoever sent it. Not filtered in SQL, because what a person may
+       see is decided by the CASE and that question is asked below
+       rather than duplicated into this query. */
   }
   const { rows } = await q(
     `${REVIEW_SELECT} ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY CASE m.status WHEN 'Requested' THEN 0 WHEN 'Opened' THEN 1 ELSE 2 END,
                m.requested_at DESC LIMIT 200`, args);
 
-  if (!isMedical(req)) return res.json(rows);
+  if (!isMedical(req)) {
+    if (str(req.query.scope) !== 'all') return res.json(rows);
+    /* Every row on the register is checked against the case it hangs
+       on. A manager's register shows their own book and an
+       administrator's shows the lot, and neither is arranged by
+       remembering to pass a fund filter. */
+    const out = [];
+    for (const r of rows) {
+      if (r.opportunity_id && !(await oppVisible(req, r.opportunity_id))) continue;
+      if (r.policy_id && !(await assertPolicyInScope(req, r.policy_id))) continue;
+      out.push(r);
+    }
+    return res.json(out);
+  }
   res.json(await Promise.all(rows.map(reviewPacket)));
 }));
 
@@ -6117,7 +6184,11 @@ router.get('/medical-reviews/reviewers', blockInvestors, blockMedical,
 router.get('/medical-reviews/:id', blockInvestors, wrap(async (req, res) => {
   const row = await oneReview(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'That review is not on file' });
-  if (!isMedical(req)) return res.json(row);
+  /* The desk sees the same list of papers the doctor does, so "what did
+     we actually send him?" is answered on the screen rather than from
+     somebody's memory of which PDF they attached. */
+  if (!isMedical(req)) return res.json({ ...row, files: await reviewFiles(row.id),
+    subject: await reviewSubject(row) });
   /* Reading a chart is worth a line in the log even when the person
      reading it is the person we asked to. */
   if (row.status === 'Requested')
@@ -6136,6 +6207,10 @@ async function oneReview(req, id) {
     `${REVIEW_SELECT} WHERE m.id = $1${
       mine.sql ? ` AND ${mine.sql.replace('$MINE', '$2')}` : ''}`,
     [int(id), ...mine.args]);
+  /* A withdrawn request is not on file as far as the reviewer is
+     concerned -- see `reviewScope`. The clause above already does it;
+     this is the same rule said where somebody reading `oneReview`
+     will see it. */
   const row = rows[0];
   if (!row) return null;
   if (isMedical(req)) return row;
@@ -6254,18 +6329,30 @@ router.put('/medical-reviews/:id', wrap(async (req, res) => {
   const months = int(req.body.le_months);
   if (months !== null && (months < 0 || months > 1200))
     return res.status(400).json({ error: 'A life expectancy in months, between 0 and 1200.' });
-  const basis = LE_BASIS.includes(str(req.body.le_basis)) ? str(req.body.le_basis) : 'median';
-  const rec = RECOMMENDATIONS.includes(str(req.body.recommendation))
-    ? str(req.body.recommendation) : '';
+  /* Anything the form does not send is LEFT AS IT WAS rather than
+     blanked. The reviewer's screen was cut back to the two things he was
+     ever asked for -- an estimate and his reasoning -- plus the call at
+     the bottom, and a PUT that wrote empty strings over the rest would
+     erase an older review's detail the first time somebody reopened it. */
+  const keep = (k, current, max = 20000) =>
+    (k in req.body ? str(req.body[k]).slice(0, max) : (current || ''));
+  const basis = 'le_basis' in req.body
+    ? (LE_BASIS.includes(str(req.body.le_basis)) ? str(req.body.le_basis) : 'median')
+    : (row.le_basis || 'median');
+  const rec = 'recommendation' in req.body
+    ? (RECOMMENDATIONS.includes(str(req.body.recommendation))
+      ? str(req.body.recommendation) : '')
+    : (row.recommendation || '');
   /* A draft can be saved without an estimate; returning it needs one, or
-     the desk is told an answer has arrived and finds a blank. */
+     the desk is told an answer has arrived and finds a blank. The
+     reasoning is asked for on the screen and not insisted on here: one
+     button that refuses twice is a button people stop trusting, and a
+     doctor who has written the number has given the office something to
+     telephone him about. */
   const finish = !!req.body.returned;
   if (finish && !months)
     return res.status(400).json({
-      error: 'Enter the life expectancy in months before returning the review.' });
-  if (finish && !str(req.body.findings))
-    return res.status(400).json({
-      error: 'Say something about how you got there — the estimate on its own is not a review.' });
+      error: 'Enter the life expectancy in months before marking the review complete.' });
 
   const { rows } = await q(
     `UPDATE medical_reviews
@@ -6275,9 +6362,9 @@ router.put('/medical-reviews/:id', wrap(async (req, res) => {
             returned_at = CASE WHEN $8 THEN now() ELSE NULL END,
             opened_at = COALESCE(opened_at, now())
       WHERE id = $9 RETURNING *`,
-    [months, basis, str(req.body.confidence).slice(0, 200),
-      str(req.body.findings).slice(0, 20000), str(req.body.impairments).slice(0, 20000),
-      str(req.body.mitigating).slice(0, 20000), rec, finish, row.id]);
+    [months, basis, keep('confidence', row.confidence, 200),
+      keep('findings', row.findings), keep('impairments', row.impairments),
+      keep('mitigating', row.mitigating), rec, finish, row.id]);
 
   await audit(req.user.uid, 'medical_review', row.id, 'update',
     finish ? `returned a review — ${months} months${rec ? `, ${rec}` : ''}`
@@ -6310,6 +6397,96 @@ router.put('/medical-reviews/:id', wrap(async (req, res) => {
   }
   res.json(await reviewPacket(rows[0]));
 }));
+
+/* ------------------------------------------------------------------ *
+ * The papers
+ *
+ * What the desk uploads for the doctor to read. Deliberately hung off
+ * the REVIEW rather than the case: the review is the only thing that
+ * account can see, and a file attached to the case would either be
+ * invisible to him or would open a door onto the case itself.
+ *
+ * Both ends go through `oneReview`, which is the same scope every other
+ * route on this family uses -- a reviewer reaches their own errands and
+ * the desk reaches cases it can already see. Nothing here decides
+ * access on its own.
+ * ------------------------------------------------------------------ */
+
+/** One file, as bytes. Always an attachment, never rendered in place. */
+router.get('/medical-reviews/:id/files/:docId', blockInvestors, wrap(async (req, res) => {
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  const { rows } = await q(
+    `SELECT file_name, mime_type, byte_size, content FROM documents
+      WHERE id = $1 AND medical_review_id = $2`, [int(req.params.docId), row.id]);
+  const doc = rows[0];
+  if (!doc) return res.status(404).json({ error: 'That file is not on this review' });
+
+  /* A chart being opened is worth a line in the log even when the person
+     opening it is the person we sent it to. */
+  await audit(req.user.uid, 'medical_review', row.id, 'read',
+    `opened ${doc.file_name} · ${describeOrigin(req)}`);
+  res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Length', doc.byte_size);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${safeName(doc.file_name).replace(/"/g, '')}"`);
+  res.send(doc.content);
+}));
+
+/** Taking one back off. The desk's, not his: he reads them, he does not file them. */
+router.delete('/medical-reviews/:id/files/:docId', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    const { rows } = await q(
+      `DELETE FROM documents WHERE id = $1 AND medical_review_id = $2
+        RETURNING file_name`, [int(req.params.docId), row.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'That file is not on this review' });
+    await audit(req.user.uid, 'medical_review', row.id, 'update',
+      `removed ${rows[0].file_name} from the review`);
+    res.json({ ok: true });
+  }));
+
+/**
+ * Uploading one.
+ *
+ * Mounted in `server.js` because it needs the multipart reader, and
+ * written here because everything that decides who may do it lives
+ * here. The same type whitelist as the document cabinet: a file
+ * somebody uploaded is a file somebody chose, and neither this nor the
+ * attachment header is load-bearing on its own.
+ */
+export async function storeReviewFile(req, res) {
+  if (isMedical(req))
+    return res.status(403).json({ error: 'Not available on a medical review account' });
+  if (isInvestor(req)) return res.status(403).json({ error: 'Not available' });
+  const row = await oneReview(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'That review is not on file' });
+  if (row.status === 'Cancelled')
+    return res.status(409).json({ error: 'That request was withdrawn.' });
+
+  const file = (req.files?.file || [])[0] || (req.files?.files || [])[0];
+  if (!file) return res.status(400).json({ error: 'Choose a file to upload' });
+  const ext = docExt(file.originalname);
+  if (!DOC_TYPES.has(ext))
+    return res.status(400).json({
+      error: `A .${ext} file cannot be sent. Accepted: ${[...DOC_TYPES.keys()].join(', ')}.` });
+  if (!file.buffer?.length) return res.status(400).json({ error: 'That file is empty' });
+
+  const checksum = createHash('sha256').update(file.buffer).digest('hex');
+  const { rows } = await q(
+    `INSERT INTO documents (title, category, notes, medical_review_id, file_name,
+                            mime_type, byte_size, checksum, content, uploaded_by)
+     VALUES ($1,'Medical','',$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [safeName(file.originalname), row.id, safeName(file.originalname),
+      DOC_TYPES.get(ext), file.buffer.length, checksum, file.buffer, req.user.uid]);
+
+  await audit(req.user.uid, 'medical_review', row.id, 'update',
+    `sent ${safeName(file.originalname)} to the reviewer — ${file.buffer.length} bytes`);
+  res.status(201).json({ id: rows[0].id, files: await reviewFiles(row.id) });
+}
 
 /** Not this one. A reason is required, because "no" without one is not an answer. */
 router.post('/medical-reviews/:id/decline', wrap(async (req, res) => {
