@@ -7,6 +7,10 @@ import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carr
          today, OUTFLOW_TYPES } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
+/* The same initials rule the one-pager and the covering email use. One
+   implementation, so a name cannot leak from one of them and not the
+   others. */
+import { initialsOf } from '../public/initials.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
@@ -452,6 +456,9 @@ const POLICY_FIELDS = {
 const INSURED_FIELDS = {
   first_name: str, last_name: str, display_name: str, dob: date, gender: str,
   state: str, smoker: str, le_months: int, le_provider: str, le_date: date,
+  /* Our own doctor's reading, beside the provider's and never on top of
+     it. Written by a returned medical review; editable here. */
+  internal_le_months: int, internal_le_provider: str, internal_le_date: date,
   date_of_death: date, notes: str,
 };
 
@@ -1922,6 +1929,10 @@ router.get('/policies/:id', wrap(async (req, res) => {
        granted it by name. */
     le_reports: scope === null && req.user?.canLe
       ? await leReportsFor('policy', req.params.id, req) : undefined,
+    /* The reports somebody was SENT, as opposed to the ones this
+       application ran. Same grant, same reason -- see `leDocsFor`. */
+    le_documents: scope === null && req.user?.canLe
+      ? await leDocsFor('policy', req.params.id) : undefined,
     reminders: reminders.rows,
   });
 }));
@@ -2176,6 +2187,11 @@ router.post('/policies/bulk-delete', blockInvestors, requireRole('admin'),
 const DOC_CATEGORIES = [
   'LLC Agreement', 'Subscription Agreement', 'K-1', 'Tax', 'Statement',
   'Policy Document', 'Correspondence', 'Other',
+  /* A provider's life-expectancy report. Filed against the case it
+     belongs to and kept off the general cabinet listing below: it is a
+     medical document, and the Documents tab is where the office
+     browses. */
+  'LE Report',
 ];
 
 /**
@@ -2254,6 +2270,11 @@ router.get('/documents', wrap(async (req, res) => {
                that a database which has not yet rebuilt `document_list`
                still filters them out. */}
         AND (SELECT dd.medical_review_id FROM documents dd WHERE dd.id = d.id) IS NULL
+        ${''/* And a provider's LE report, which belongs on the case it
+               was written about rather than in the cabinet: it is a
+               medical document and this list is where the office
+               browses. */}
+        AND d.category <> 'LE Report'
         AND ($${n + 1} = '' OR d.title ILIKE '%'||$${n + 1}||'%'
              OR d.file_name ILIKE '%'||$${n + 1}||'%'
              OR d.notes ILIKE '%'||$${n + 1}||'%'
@@ -2991,6 +3012,12 @@ const OPP_FIELDS = {
   insured_last_name: str, insured_first_name: str, insured_dob: date,
   insured_gender: str, insured_state: str,
   le_months: int, le_provider: str, le_date: date,
+  /* Our own doctor's reading, held beside the provider's rather than on
+     top of it. Written by a returned medical review; editable here so a
+     wrong one can be corrected or cleared. */
+  internal_le_months: int, internal_le_provider: str, internal_le_date: date,
+  insured2_internal_le_months: int, insured2_internal_le_provider: str,
+  insured2_internal_le_date: date,
   asking_price: num, annual_premium: num, expected_close: date, offer_closes_on: date,
   fund_id: int, status: str, notes: str,
   // The one-pager's narrative. Free text, one bullet per line.
@@ -3049,6 +3076,10 @@ async function loadOpportunity(req, id) {
   o.valuations = scopeId(req) === null ? await valuationsFor('opportunity', id) : undefined;
   o.le_reports = scopeId(req) === null && req.user?.canLe
     ? await leReportsFor('opportunity', id, req) : undefined;
+  /* The provider's own reports, attached to the case. Behind the same
+     grant as the runs beside them: both are readings of a medical file. */
+  o.le_documents = scopeId(req) === null && req.user?.canLe
+    ? await leDocsFor('opportunity', id) : undefined;
   /* Staff only, and not gated on `can_le`: a review is a colleague's
      written opinion on the case, not a run of the report service, and
      whoever works the deal needs to see that one is outstanding even if
@@ -3073,6 +3104,16 @@ async function loadOpportunity(req, id) {
        on this page has had scrubbed to initials. Staff keep it; the people
        the sheet is written for do not get it. */
     o.documents_url = undefined;
+    /* Nor the house's own doctor's reading. The sheet quotes the
+       provider's report, which is the one the price is built on and the
+       one a buyer can ask to see; our internal second opinion is how the
+       desk argues with itself and is not part of what is offered. */
+    o.internal_le_months = undefined;
+    o.internal_le_provider = undefined;
+    o.internal_le_date = undefined;
+    o.insured2_internal_le_months = undefined;
+    o.insured2_internal_le_provider = undefined;
+    o.insured2_internal_le_date = undefined;
     o.commitments = commits.rows.filter((c) => c.investor_id === me)
       .map((c) => ({ id: c.id, pct: Number(c.pct), status: c.status,
                      requested_at: c.requested_at, notes: c.notes }));
@@ -5922,6 +5963,26 @@ export function startLeSweeper() {
 }
 
 /** The reports attached to one record, for its own page. */
+/**
+ * The provider reports attached to a case — 21st, Fasano, ITM.
+ *
+ * Behind the SAME grant as the reports this application runs, and the
+ * argument is the document rather than the cost: a life-expectancy
+ * report is a reading of somebody's medical file, whoever wrote it. An
+ * administrator holds the grant inherently; anybody else holds it
+ * because one handed it over by name.
+ */
+export async function leDocsFor(kind, id) {
+  const col = kind === 'policy' ? 'policy_id' : 'opportunity_id';
+  const { rows } = await q(
+    `SELECT d.id, d.title, d.notes, d.file_name, d.byte_size, d.created_at,
+            u.full_name AS uploaded_by_name
+       FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.category = 'LE Report' AND d.${col} = $1
+      ORDER BY d.created_at DESC`, [id]);
+  return rows;
+}
+
 export async function leReportsFor(kind, id, req = null) {
   const col = kind === 'policy' ? 'r.policy_id' : 'r.opportunity_id';
   /* The panel on a deal follows the same rule as the list. Without this
@@ -5999,7 +6060,8 @@ async function reviewSubject(row) {
     const { rows } = await q(
       `SELECT insured_first_name, insured_last_name, insured_dob, insured_gender,
               insured_state, insured2_first_name, insured2_last_name, insured2_dob,
-              insured2_gender, insured2_state, impairments, mitigating, records_through
+              insured2_gender, insured2_state, impairments, mitigating, records_through,
+              face_amount
          FROM opportunities WHERE id = $1`, [row.opportunity_id]);
     const o = rows[0];
     if (!o) return null;
@@ -6022,14 +6084,21 @@ async function reviewSubject(row) {
          other words -- and this account is arranged not to see it. The
          medical records are shared as their own folder, on the review,
          and that link is added to the packet below. */
+      /* The size of the policy, which the office asked to have on his
+         screen. It is a fact about the contract rather than about the
+         deal: what is still withheld is the PRICE and the RATE OF
+         RETURN, which are what the desk hopes to make, and knowing
+         those is what would bend an opinion. */
+      face_amount: o.face_amount || null,
     };
   }
   const { rows } = await q(
-    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state
+    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state, pol.face_amount
        FROM policies pol LEFT JOIN insureds i ON i.id = pol.insured_id
       WHERE pol.id = $1`, [row.policy_id]);
   const i = rows[0];
-  return i ? { ...i, impairments: '', mitigating: '', records_through: null } : null;
+  return i ? { ...i, impairments: '', mitigating: '', records_through: null,
+    face_amount: i.face_amount || null } : null;
 }
 
 /**
@@ -6240,13 +6309,32 @@ router.post('/medical-reviews', blockInvestors, blockMedical, canEdit,
     if (polId && !(await assertPolicyInScope(req, polId)))
       return res.status(404).json({ error: 'Policy not found' });
 
-    const reviewerId = int(req.body.reviewer_id);
-    const { rows: who } = await q(
-      `SELECT id, full_name, email FROM users
-        WHERE id = $1 AND role = 'medical' AND is_active = TRUE`, [reviewerId]);
-    if (!who[0])
+    /* ONE CASE, SEVERAL DOCTORS.
+     *
+     * Two opinions on the same chart is the ordinary way a difficult
+     * file is handled, and it only means anything if neither doctor
+     * knows what the other said -- which is already true, because each
+     * account reaches its own errands and nothing else. So the desk
+     * names as many reviewers as it likes and each gets their own
+     * review of the same life.
+     *
+     * `reviewer_id` is still accepted on its own, because that is what
+     * every existing caller sends. */
+    const wanted = [...new Set([
+      ...(Array.isArray(req.body.reviewer_ids) ? req.body.reviewer_ids : []),
+      req.body.reviewer_id,
+    ].map((n) => int(n)).filter(Boolean))];
+    if (!wanted.length)
       return res.status(400).json({
         error: 'Choose a reviewing doctor. An administrator opens the account under Users.' });
+    const { rows: whoAll } = await q(
+      `SELECT id, full_name, email FROM users
+        WHERE id = ANY($1) AND role = 'medical' AND is_active = TRUE ORDER BY full_name`,
+      [wanted]);
+    if (whoAll.length !== wanted.length)
+      return res.status(400).json({
+        error: 'One of those is not a reviewing doctor. An administrator opens the account '
+          + 'under Users.' });
 
     const life = int(req.body.life) === 2 ? 2 : 1;
     /* A second life must actually exist before a chart can be asked for.
@@ -6270,39 +6358,64 @@ router.post('/medical-reviews', blockInvestors, blockMedical, canEdit,
         return res.status(400).json({ error: 'That summary is not attached to this case.' });
     }
 
-    /* One open errand per life. Sending twice is almost always a second
-       click rather than a second opinion, and two identical rows in a
-       doctor's queue is how one of them gets answered and the other sits
-       there looking unanswered for a month. */
+    /* One open errand PER DOCTOR per life. Sending the same life to the
+       same reviewer twice is a second click rather than a second
+       opinion, and two identical rows in one queue is how one gets
+       answered and the other sits there looking unanswered for a
+       month. Sending it to a different doctor is exactly the point. */
     const { rows: open } = await q(
-      `SELECT id FROM medical_reviews
+      `SELECT id, reviewer_id FROM medical_reviews
         WHERE life = $1 AND status IN ('Requested','Opened')
+          AND reviewer_id = ANY($4)
           AND (opportunity_id = $2::int OR policy_id = $3::int)`,
-      [life, oppId || null, polId || null]);
-    if (open[0])
+      [life, oppId || null, polId || null, wanted]);
+    if (open.length === whoAll.length)
       return res.status(409).json({
-        error: 'This case is already out for review. Cancel that request first.',
+        error: whoAll.length === 1
+          ? 'That doctor already has this case. Withdraw the request first.'
+          : 'Every one of those doctors already has this case.',
         review_id: open[0].id });
+    const already = new Set(open.map((r) => r.reviewer_id));
+    const sendTo = whoAll.filter((u) => !already.has(u.id));
 
-    const { rows } = await q(
-      `INSERT INTO medical_reviews
-         (opportunity_id, policy_id, life, reviewer_id, requested_by, ask, le_report_id,
-          records_url)
-       VALUES ($1::int,$2::int,$3,$4,$5,$6,$7::int,$8) RETURNING *`,
-      [oppId || null, polId || null, life, reviewerId, req.user.uid,
-        str(req.body.ask).slice(0, 4000), leId || null, url(req.body.records_url)]);
+    const made = [];
+    for (const who of sendTo) {
+      const { rows } = await q(
+        `INSERT INTO medical_reviews
+           (opportunity_id, policy_id, life, reviewer_id, requested_by, ask, le_report_id,
+            records_url)
+         VALUES ($1::int,$2::int,$3,$4,$5,$6,$7::int,$8) RETURNING *`,
+        [oppId || null, polId || null, life, who.id, req.user.uid,
+          str(req.body.ask).slice(0, 4000), leId || null, url(req.body.records_url)]);
+      made.push({ row: rows[0], who });
+    }
+    const rows = made.map((m) => m.row);
 
-    await audit(req.user.uid, 'medical_review', rows[0].id, 'create',
-      `sent ${oppId ? `opportunity ${oppId}` : `policy ${polId}`}${
-        life === 2 ? ' (second life)' : ''} to ${who[0].email} for review`);
-    /* NO NAME IN THE EMAIL, the same rule as everywhere else -- the
-       doctor signs in to see whose file it is. */
-    await sendMail('medical_review_requested', {
-      to: who[0].email, userId: who[0].id, name: who[0].full_name,
-      from: req.user.name || 'the office',
-      ask: str(req.body.ask).slice(0, 400),
-    });
-    res.status(201).json(rows[0]);
+    for (const { row, who } of made)
+      await audit(req.user.uid, 'medical_review', row.id, 'create',
+        `sent ${oppId ? `opportunity ${oppId}` : `policy ${polId}`}${
+          life === 2 ? ' (second life)' : ''} to ${who.email} for review`);
+    /* NO NAME IN THE EMAIL, the same rule as everywhere else. Initials
+       and the size of the policy, which are enough to tell two cases
+       apart in an inbox and identify nobody; he signs in to see whose
+       file it is. */
+    const subj = await reviewSubject(rows[0]);
+    const benefit = Number(subj?.face_amount) > 0
+      ? Number(subj.face_amount).toLocaleString('en-US',
+        { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
+      : '';
+    for (const { row, who } of made)
+      await sendMail('medical_review_requested', {
+        to: who.email, userId: who.id, name: who.full_name,
+        initials: initialsOf(subj?.first_name, subj?.last_name),
+        benefit,
+        /* Each doctor is linked to HIS review, not to the case: the
+           other one's row is not his to open. */
+        reviewId: row.id,
+      });
+    /* One review is returned as itself, so every existing caller reads
+       the same answer it always did; several come back as a list. */
+    res.status(201).json(rows.length === 1 ? rows[0] : { sent: rows.length, reviews: rows });
   }));
 
 /**
@@ -6397,6 +6510,124 @@ router.put('/medical-reviews/:id', wrap(async (req, res) => {
   }
   res.json(await reviewPacket(rows[0]));
 }));
+
+/* ==================================================================== *
+ * A provider's own life-expectancy report, attached to a case
+ *
+ * The panel on a deal lists the reports this application RAN. A case
+ * usually arrives with one or two it did not -- 21st Services, Fasano,
+ * ITM -- and those are the documents somebody asks for six months
+ * later when the question is where the number came from. They had
+ * nowhere to live, so they lived in an email.
+ *
+ * Filed in the same `documents` table as everything else, against the
+ * case, under their own category so they stay off the cabinet listing:
+ * a life-expectancy report is a medical document and the Documents tab
+ * is where the whole office browses.
+ * ==================================================================== */
+
+/** Scope: the case has to be one this person may see. */
+async function leDocCase(req, body) {
+  const oppId = int(body.opportunity_id);
+  const polId = int(body.policy_id);
+  if (!!oppId === !!polId) return { error: 'A report belongs to one case or the other.' };
+  if (oppId && !(await oppVisible(req, oppId))) return { error: 'Opportunity not found' };
+  if (polId && !(await assertPolicyInScope(req, polId))) return { error: 'Policy not found' };
+  return { oppId: oppId || null, polId: polId || null };
+}
+
+router.get('/le-documents', blockInvestors, blockMedical, mayLe, wrap(async (req, res) => {
+  const where = await leDocCase(req, req.query);
+  if (where.error) return res.status(404).json({ error: where.error });
+  const { rows } = await q(
+    `SELECT d.id, d.title, d.notes, d.doc_year, d.file_name, d.mime_type, d.byte_size,
+            d.created_at, u.full_name AS uploaded_by_name
+       FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.category = 'LE Report'
+        AND ($1::int IS NULL OR d.opportunity_id = $1::int)
+        AND ($2::int IS NULL OR d.policy_id = $2::int)
+      ORDER BY d.created_at DESC`, [where.oppId, where.polId]);
+  res.json(rows);
+}));
+
+router.get('/le-documents/:id/download', blockInvestors, blockMedical, mayLe, wrap(async (req, res) => {
+  const { rows } = await q(
+    `SELECT opportunity_id, policy_id, file_name, mime_type, byte_size, content
+       FROM documents WHERE id = $1 AND category = 'LE Report'`, [int(req.params.id)]);
+  const doc = rows[0];
+  if (!doc) return res.status(404).json({ error: 'That report is not on file' });
+  /* Read through the case, so a report cannot be pulled out of a book
+     this person may not see by guessing at a number. */
+  const where = await leDocCase(req, doc);
+  if (where.error) return res.status(404).json({ error: 'That report is not on file' });
+
+  await audit(req.user.uid, 'document', Number(req.params.id), 'read',
+    `${doc.file_name} · ${describeOrigin(req)}`);
+  res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Length', doc.byte_size);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${safeName(doc.file_name).replace(/"/g, '')}"`);
+  res.send(doc.content);
+}));
+
+router.delete('/le-documents/:id', blockInvestors, blockMedical, mayLe, canEdit,
+  wrap(async (req, res) => {
+    const { rows: found } = await q(
+      `SELECT opportunity_id, policy_id, file_name FROM documents
+        WHERE id = $1 AND category = 'LE Report'`, [int(req.params.id)]);
+    if (!found[0]) return res.status(404).json({ error: 'That report is not on file' });
+    const where = await leDocCase(req, found[0]);
+    if (where.error) return res.status(404).json({ error: 'That report is not on file' });
+    await q('DELETE FROM documents WHERE id = $1', [int(req.params.id)]);
+    await audit(req.user.uid, 'document', Number(req.params.id), 'delete',
+      `removed the report ${found[0].file_name}`);
+    res.json({ ok: true });
+  }));
+
+/**
+ * Attaching one.
+ *
+ * Mounted in `server.js` for the multipart reader, decided here with
+ * everything else that says who may do what.
+ */
+export async function storeLeDocument(req, res) {
+  if (isMedical(req) || isInvestor(req))
+    return res.status(403).json({ error: 'Not available on this account' });
+  /* The same grant the rest of this family is behind. Said here rather
+     than as middleware because the upload is mounted in `server.js`, and
+     a rule that lives in only one of two places is a rule that will be
+     forgotten in the other. */
+  if (!req.user?.canLe)
+    return res.status(403).json({
+      error: 'Life-expectancy reports are granted to an account by an administrator.' });
+  const where = await leDocCase(req, req.body);
+  if (where.error) return res.status(404).json({ error: where.error });
+
+  const file = (req.files?.file || [])[0] || (req.files?.files || [])[0];
+  if (!file) return res.status(400).json({ error: 'Choose a file to attach' });
+  const ext = docExt(file.originalname);
+  if (!DOC_TYPES.has(ext))
+    return res.status(400).json({
+      error: `A .${ext} file cannot be attached. Accepted: ${[...DOC_TYPES.keys()].join(', ')}.` });
+  if (!file.buffer?.length) return res.status(400).json({ error: 'That file is empty' });
+
+  const checksum = createHash('sha256').update(file.buffer).digest('hex');
+  const { rows } = await q(
+    `INSERT INTO documents (title, category, notes, opportunity_id, policy_id, file_name,
+                            mime_type, byte_size, checksum, content, uploaded_by)
+     VALUES ($1,'LE Report',$2,$3::int,$4::int,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [str(req.body.title).slice(0, 200) || safeName(file.originalname),
+      str(req.body.notes).slice(0, 2000), where.oppId, where.polId,
+      safeName(file.originalname), DOC_TYPES.get(ext), file.buffer.length,
+      checksum, file.buffer, req.user.uid]);
+
+  await audit(req.user.uid, 'document', rows[0].id, 'create',
+    `attached the report ${safeName(file.originalname)} to ${
+      where.oppId ? `opportunity ${where.oppId}` : `policy ${where.polId}`}`);
+  res.status(201).json({ id: rows[0].id, ok: true });
+}
 
 /* ------------------------------------------------------------------ *
  * The papers
@@ -6540,6 +6771,34 @@ router.put('/medical-reviews/:id/records-url', blockInvestors, blockMedical, can
     res.json({ ...rows[0], files: await reviewFiles(row.id) });
   }));
 
+/**
+ * Taking a review off the record altogether.
+ *
+ * Withdrawing and deleting are different acts and both are wanted.
+ * Withdraw says "we changed our mind": the doctor loses the case at
+ * once, and the office keeps the row saying it was sent. Delete is for
+ * a request that should never have existed -- the wrong case, the wrong
+ * life, a test -- and removes it from the register with the papers that
+ * went with it.
+ *
+ * Administrators only. It destroys a record of a chart having been sent
+ * to a physician, which is exactly the sort of thing a book of record
+ * should not lose on a mis-click.
+ */
+router.delete('/medical-reviews/:id', blockInvestors, blockMedical, requireRole('admin'),
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    /* The uploaded papers go with it -- `documents.medical_review_id`
+       cascades -- which is the point: they are that review's copy of
+       somebody's medical file and have nowhere else to belong. */
+    await q('DELETE FROM medical_reviews WHERE id = $1', [row.id]);
+    await audit(req.user.uid, 'medical_review', Number(req.params.id), 'delete',
+      `deleted the review sent to ${row.reviewer_email || 'a reviewer'}${
+        row.status === 'Returned' ? ' — it had been answered' : ''}`);
+    res.json({ ok: true });
+  }));
+
 /** The desk withdrawing the errand. */
 router.post('/medical-reviews/:id/cancel', blockInvestors, blockMedical, canEdit,
   wrap(async (req, res) => {
@@ -6624,15 +6883,38 @@ async function adoptReview(row, uid) {
      because every caller has the same problem. */
   const at = row.returned_at ? new Date(row.returned_at) : new Date();
   const on = (Number.isNaN(at.getTime()) ? new Date() : at).toISOString().slice(0, 10);
+  /* WHERE IT LANDS, and this is the whole of the rule.
+   *
+   * A case that already carries a life expectancy keeps it. The
+   * provider's report is what the deal was priced off, what was quoted,
+   * and what a buyer on the other side will ask to see; replacing it
+   * with our own doctor's number would destroy the one fact worth
+   * knowing -- that the two disagree, and by how much. So his estimate
+   * is written as the INTERNAL one, beside it.
+   *
+   * A case with no estimate at all has nothing to preserve, so his goes
+   * in the ordinary fields and prices the deal. That is the automatic
+   * path: there is no older number, nothing quoted and nobody shown a
+   * rate built on one. */
+  const existing = await caseHasLe(row);
   if (row.opportunity_id) {
-    const cols = row.life === 2
-      ? ['insured2_le_months', 'insured2_le_provider', 'insured2_le_date']
-      : ['le_months', 'le_provider', 'le_date'];
+    const cols = existing
+      ? (row.life === 2
+        ? ['insured2_internal_le_months', 'insured2_internal_le_provider',
+          'insured2_internal_le_date']
+        : ['internal_le_months', 'internal_le_provider', 'internal_le_date'])
+      : (row.life === 2
+        ? ['insured2_le_months', 'insured2_le_provider', 'insured2_le_date']
+        : ['le_months', 'le_provider', 'le_date']);
     await q(`UPDATE opportunities SET ${cols[0]} = $1, ${cols[1]} = $2, ${cols[2]} = $3
               WHERE id = $4`, [row.le_months, provider, on, row.opportunity_id]);
   } else if (row.policy_id) {
+    const cols = existing
+      ? ['internal_le_months', 'internal_le_provider', 'internal_le_date']
+      : ['le_months', 'le_provider', 'le_date'];
     await q(
-      `UPDATE insureds SET le_months = $1, le_provider = $2, le_date = $3, updated_at = now()
+      `UPDATE insureds SET ${cols[0]} = $1, ${cols[1]} = $2, ${cols[2]} = $3,
+              updated_at = now()
         WHERE id = (SELECT insured_id FROM policies WHERE id = $4)`,
       [row.le_months, provider, on, row.policy_id]);
   }

@@ -1,50 +1,61 @@
-PolicyHub — build 2026-09-25b
+PolicyHub — build 2026-09-25f
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
 FILES IN THIS PACKAGE
 
-  src/api.js     src/schema.sql   src/server.js   src/opportunity-pdf.js
+  src/api.js   src/schema.sql   src/server.js   src/mail.js
+  src/opportunity-pdf.js
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  This is everything in 2026-09-18a, 18b and 25a as well. Deploy it
-  instead of any of those that are not up yet. It assumes 2026-09-17c —
-  which carried a new file, public/initials.js — is already deployed.
+  This is everything since 2026-09-17c — deploy it instead of any of the
+  18a / 18b / 25a–e packages that are not up yet. It assumes 25-09-17c,
+  which carried a new file public/initials.js, is already deployed.
 
-WHAT THIS ADDS
+INTEREST, WHICH IS THE ONE THAT WAS WRONG ON SCREEN
 
-  A SEPARATE RECORDS LINK FOR THE DOCTOR. On a review, "Add the records
-  link" takes a Dropbox address for the medical file — that folder and
-  nothing else. It is the only folder the reviewing doctor is shown.
+  An investor is now quoted COMPOUNDED by default and can switch to
+  simple interest with the control in the page header — the same control
+  the desk has always had. It used to be staff-only, so an investor saw
+  whatever their account had never chosen, which was simple interest,
+  while the office was quoting them an IRR. Their choice is remembered.
 
-    The case folder on the deal is NOT shown to him and never was meant
-    to be: it holds the illustration, the offer and the correspondence,
-    which is the price. An earlier build did pass it through to his
-    screen; that is corrected here.
+  The desk still defaults to simple interest, and accounts that have
+  already chosen keep what they chose.
 
-    The link is also on the "Send for medical review" dialog, so it goes
-    with the case the first time rather than being added afterwards.
+MEDICAL REVIEW
 
-    Sharing the folder with him in Dropbox is still a separate act. The
-    link tells him where to look; it grants nothing.
+  THE EMAIL to a reviewing doctor is now four lines: what happened, the
+  insured's initials, the death benefit, and a link straight to that
+  case. No name, as before. The portal holds the link across the sign-in
+  screen, so he lands on the case rather than on his queue.
 
-  Withdrawing a request takes the link away with everything else — his
-  screen loses the case entirely.
+  THE DEATH BENEFIT is now on his file, as asked. Still absent: the
+  asking price and every rate of return.
 
-  A MED REVIEW TAB (this was build 2026-09-25a). Every case ever sent to
-  a doctor, split into what is still out and what has come back, with
-  the insured, the case, the reviewer, his estimate and his call.
-  Opening one shows the whole review and the button that puts his
-  estimate on the case.
+  A CASE CAN GO TO MORE THAN ONE DOCTOR. Tick as many reviewers as you
+  like; each gets their own review of the same life and neither can see
+  the other's. Sending the same life to the same doctor twice is still
+  refused.
 
-  THE DOCTOR'S SCREEN is a life expectancy in months, a box for his
-  reasoning, his call at the bottom, and one button reading "Review
-  complete". The empty "nothing has been uploaded" and "no records
-  summary" panels are gone — the page shows what is there.
+  HIS ESTIMATE NO LONGER OVERWRITES THE REPORT. Where the case already
+  carries a life expectancy, his lands beside it as the INTERNAL LE —
+  visible on the deal and in the edit form, never sent to investors, and
+  the deal goes on being priced off the provider's report. A case with
+  no estimate at all still takes his automatically; there is nothing to
+  preserve.
 
-  Uploading individual documents onto a review still works, for the odd
-  single file. They are filed against the review, stay off the Documents
-  tab, and no investor can reach them.
+  A REVIEW CAN BE DELETED outright (administrators), which is different
+  from Withdraw: withdraw takes the case back and keeps the record;
+  delete removes the row and the papers with it.
+
+LIFE-EXPECTANCY REPORTS
+
+  "Attach a report…" on the panel takes a provider's PDF — 21st, Fasano,
+  ITM — and files it against the case, with a note. It sits beside the
+  reports this application ran, opens from there, and can be removed.
+  It stays off the Documents tab, is behind the same grant as the runs,
+  and no investor can reach it.
 
 NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
 themselves on boot.

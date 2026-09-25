@@ -8,7 +8,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 
 import { initDb, explainDbError, audit } from './db.js';
-import api, { wrap, storeDocument, storeReviewFile, previewPremiumStream, storePremiumStream } from './api.js';
+import api, { wrap, storeDocument, storeReviewFile, storeLeDocument, previewPremiumStream, storePremiumStream } from './api.js';
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { readDocuments } from './extract.js';
@@ -216,6 +216,12 @@ const recordFileUpload = multer({
 app.post('/api/medical-reviews/:id/files', authenticate,
   requireRole('admin', 'editor', 'manager'),
   recordFileUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeReviewFile));
+
+/* A provider's own life-expectancy report, attached to a case. Same
+   upload as a document; who may do it is decided in `storeLeDocument`
+   with the rest of the case rules. */
+app.post('/api/le-documents', authenticate, requireRole('admin', 'editor', 'manager'),
+  recordFileUpload.fields([{ name: 'file', maxCount: 1 }]), wrap(storeLeDocument));
 
 /* A premium optimization is one workbook at a time, parsed and then filed —
    closer to a document than to an import. It gets the document-sized limit

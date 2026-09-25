@@ -61,8 +61,14 @@ const state = {
   /* How a single return is expressed on the Opportunities screens:
      'simple' | 'compound' | 'both'. A different axis from rateBasis
      above, which is how several returns are combined. See
-     interestToggle below. */
-  interestShown: 'simple',
+     interestToggle below.
+
+     Null until the account's own preference has been read, because the
+     answer differs by who is asking: an investor is quoted COMPOUNDED
+     unless they say otherwise — that is the convention they are used to
+     from every other asset they hold — and the desk works in simple
+     interest, which is how this business talks about a return. */
+  interestShown: null,
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -74,6 +80,10 @@ const state = {
      call stays on the record — it is part of what was asked and withdrawn —
      but it is not work, so it is off the page until somebody asks for it. */
   showCancelledCalls: false,
+  /* Where a link in an email was pointing, held across the login screen
+     so the person arrives at the page they clicked rather than at their
+     home screen. */
+  wanted: null,
   // Which column the Maturities register is ordered by, and which way.
   matSort: { key: 'matured_on', dir: -1 },
   /* Policies ticked for deletion. A Set of ids rather than a flag on each
@@ -105,8 +115,11 @@ async function loadPrefs() {
     state.reportCols = prefs?.report_columns || null;
     applyViewDefault(prefs?.view_defaults || null);
     state.rateBasis = prefs?.rate_basis?.basis === 'simple' ? 'simple' : 'weighted';
+    /* Left null when the account has never chosen, so `interestShown`
+       can answer by who is asking rather than by a value written here
+       before the user is even known. */
     state.interestShown = ['simple', 'compound', 'both']
-      .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : 'simple';
+      .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : null;
   } catch {
     state.policyCols = null;
   }
@@ -481,7 +494,13 @@ const wireRateToggle = () => {
  * ------------------------------------------------------------------- */
 
 const interestShown = () => (['simple', 'compound', 'both']
-  .includes(state.interestShown) ? state.interestShown : 'simple');
+  .includes(state.interestShown)
+  ? state.interestShown
+  /* Nothing chosen yet. An investor gets compounded, which is what an
+     IRR is and what they compare this against; the desk gets simple
+     interest, which is how a life settlement is quoted. Either can
+     switch, and the choice is then theirs and is remembered. */
+  : (isInvestorUser() ? 'compound' : 'simple'));
 
 const INTEREST_WORDS = {
   simple: 'simple interest',
@@ -511,8 +530,17 @@ const interestNote = () => (interestShown() === 'both'
   ? 'simple · compounded'
   : INTEREST_WORDS[interestShown()]);
 
-/** The control. Staff only — an investor is shown one convention. */
-const interestToggle = () => (isInvestorUser() ? '' : `
+/**
+ * The control.
+ *
+ * Shown to investors too. It used to be staff-only, on the reasoning
+ * that one convention is easier to read than two — but the convention
+ * they were given was whatever the account had never chosen, which is
+ * how a sheet ends up saying "simple interest" to somebody the office
+ * had quoted an IRR to. One number, said two ways, is a disagreement;
+ * a switch that says which one you are looking at is not.
+ */
+const interestToggle = () => (`
   <select id="interestShown" class="head-select"
     aria-label="How a return is expressed">
     <option value="simple" ${interestShown() === 'simple' ? 'selected' : ''}
@@ -527,7 +555,7 @@ const interestToggle = () => (isInvestorUser() ? '' : `
 const wireInterestToggle = () => {
   $('#interestShown')?.addEventListener('change', async (e) => {
     state.interestShown = ['simple', 'compound', 'both'].includes(e.target.value)
-      ? e.target.value : 'simple';
+      ? e.target.value : interestShown();
     render();
     /* Saved after the screen has already changed, like the weighting
        control: a setting about how to read a number is not worth a modal
@@ -1577,7 +1605,12 @@ function wireLogin() {
       state.signedOutReason = null;
       noteActivity();
       if (!state.user.must_change_password) await loadPrefs();
-      location.hash = homeHash();
+      /* Back to the page they were sent to, if they were sent to one.
+         Not while a password is still to be set: that screen is the one
+         thing such an account may do, and it goes home afterwards. */
+      const back = state.wanted;
+      state.wanted = null;
+      location.hash = back && !state.user.must_change_password ? back : homeHash();
       await render();
     } catch (err) {
       $('#loginError').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
@@ -2783,7 +2816,8 @@ function overviewTab(p) {
          what the desk's model thinks this policy is worth is not a figure
          they are shown. */}
   ${p.valuations === undefined ? '' : valuationPanel(p.valuations, 'policy', p.id)}
-  ${p.le_reports === undefined ? '' : leReportPanel(p.le_reports, 'policy', p.id)}`;
+  ${p.le_reports === undefined && p.le_documents === undefined
+    ? '' : leReportPanel(p.le_reports, 'policy', p.id, null, p.le_documents)}`;
 }
 
 function openOwnerDialog(p, existing) {
@@ -3519,7 +3553,8 @@ function wireReturnTab(p, d) {
 function wireDetailTab(p, values, irrData) {
   if (detailTab === 'overview') {
     if (p.valuations !== undefined) wireValuationPanel('policy', p.id);
-    if (p.le_reports !== undefined) wireLeReportPanel('policy', p.id);
+    if (p.le_reports !== undefined || p.le_documents !== undefined)
+      wireLeReportPanel('policy', p.id);
     $('#addOwnerBtn')?.addEventListener('click', async () => {
       if (!state.investors.length) state.investors = await api('/investors');
       if (!state.investors.length) {
@@ -5683,7 +5718,18 @@ async function opportunityView() {
     ? `two lives · modelled on ${a.driving_life
       ? `the ${a.driving_life.n === 1 ? 'first' : 'second'}` : 'the later'}`
     : `${o.le_provider ? `${esc(o.le_provider)} · ` : ''}${
-      o.le_date ? `report ${fmtDate(o.le_date)}` : ''}`}</div></div>
+      o.le_date ? `report ${fmtDate(o.le_date)}` : ''}`}</div>
+          ${''/* Our own doctor's reading, where there is one. Beside the
+                 provider's rather than instead of it: the deal is priced
+                 off the report, and the value of a second opinion is in
+                 the gap between them. Staff only. */}
+          ${staff && (o.internal_le_months || o.insured2_internal_le_months)
+            ? `<div class="note" style="margin-top:2px">internal LE ${
+              [o.internal_le_months ? `${o.internal_le_months} mo` : null,
+                a.survivorship && o.insured2_internal_le_months
+                  ? `${o.insured2_internal_le_months} mo` : null]
+                .filter(Boolean).join(' / ')}${o.internal_le_provider
+                ? ` · ${esc(o.internal_le_provider)}` : ''}</div>` : ''}</div>
         <div><div class="label">Insured${a.survivorship ? 's' : ''}</div>
           <div class="value" style="font-size:16px">${ageFrom(o.insured_dob) ?? '—'}${
             o.insured_gender ? ` · ${esc(o.insured_gender)}` : ''}${
@@ -5967,7 +6013,8 @@ async function opportunityView() {
     ${''/* Staff only, and the server decides that rather than this line:
            an investor's copy of the deal arrives without the field at all. */}
     ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}
-    ${o.le_reports === undefined ? '' : leReportPanel(o.le_reports, 'opportunity', o.id, o)}
+    ${o.le_reports === undefined && o.le_documents === undefined
+      ? '' : leReportPanel(o.le_reports, 'opportunity', o.id, o, o.le_documents)}
     ${''/* Not gated on `can_le`: a review is a colleague's written opinion
            on the case, and whoever works the deal needs to see that one is
            outstanding even if they may not spend money running records. */}
@@ -5977,7 +6024,7 @@ async function opportunityView() {
     html,
     after: () => {
       wireInterestToggle();
-      if (o.le_reports !== undefined) {
+      if (o.le_reports !== undefined || o.le_documents !== undefined) {
         wireLeReportPanel('opportunity', o.id);
         $('#leAdoptBtn')?.addEventListener('click', async (e) => {
           const months = Number(e.currentTarget.dataset.months);
@@ -6173,6 +6220,18 @@ async function openOpportunityDialog(o) {
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
       Life expectancy is counted from the report date, not from today — an estimate written
       two years ago has already used two years of itself.</span></div>
+    ${''/* Ours, beside theirs. Filled in by a returned medical review and
+           editable here so a wrong one can be corrected or cleared. It
+           does not price the deal and it is not sent to investors. */}
+    <div class="field-row">
+      ${inputField('Internal LE (months)', 'internal_le_months', o?.internal_le_months, 'number')}
+      ${inputField('Who gave it', 'internal_le_provider', o?.internal_le_provider)}
+      ${inputField('When', 'internal_le_date', dateInput(o?.internal_le_date), 'date')}
+    </div>
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      Our own reading — a reviewing doctor's estimate lands here by itself when the case
+      already has a provider's report. The deal is still priced off the report above, and
+      investors are not shown this.</span></div>
 
     ${''/* The second life on a survivorship contract. Behind a tick box
            rather than always on screen: most deals have one insured, and
@@ -9550,9 +9609,10 @@ async function openUserDialog(u, funds, onSaved) {
     <div class="field" id="medicalNote" style="display:none">
       <div class="dlg-note">
         <strong>A reviewing doctor.</strong> This login opens on one screen: the cases sent
-        to them for review. No policy, no opportunity, no investor, no price, no death
-        benefit and no rate of return — not hidden, absent. A clinical opinion is worth
-        having because it was formed without knowing what the deal needs.
+        to them for review. No policy, no opportunity, no investor, no price and no rate of
+        return — not hidden, absent. A clinical opinion is worth having because it was
+        formed without knowing what the deal stands to make. They do see the size of the
+        policy, which is a fact about the contract rather than about the trade.
         <br><br>
         They <em>do</em> see the insured's name on a case sent to them, because they are
         reading that person's records. Every file they open is recorded against their name.
@@ -11181,7 +11241,7 @@ function medicalPanel(reviews, o) {
           ? `<button class="btn-sm" data-med-adopt="${r.id}"
                data-months="${r.le_months}" data-life="${r.life}"
                data-current="${current || ''}">${differs
-                 ? `Use ${r.le_months} mo instead of ${current}` : 'Put it on the case'}</button>`
+                 ? `Record ${r.le_months} mo as the internal LE` : 'Put it on the case'}</button>`
           : r.status === 'Requested' || r.status === 'Opened'
             ? `<button class="btn-sm" data-med-cancel="${r.id}">Withdraw</button>`
             : '—'}</td>
@@ -11221,8 +11281,8 @@ function medicalPanel(reviews, o) {
           <tbody>${rows.map(line).join('')}</tbody></table></div>`
         : `<div class="empty">Nobody has looked at this case yet.
            <strong>Send for medical review</strong> puts it in a doctor's queue with the
-           records summary attached. He sees the file and nothing else — no price, no death
-           benefit, no rate of return.</div>`}
+           records summary attached. He sees the file and the size of the policy, and
+           nothing else — no price, no rate of return.</div>`}
       ${back.map(opinion).join('')}
       ${live.length ? `<div class="muted" style="font-size:12px;margin-top:10px">
         Out for review since ${fmtDate(live[0].requested_at)}. The estimate lands on this
@@ -11248,12 +11308,21 @@ async function openMedicalReviewDialog(o) {
   const outstanding = (o.medical_reviews || [])
     .filter((r) => ['Requested', 'Opened'].includes(r.status)).map((r) => r.life);
 
-  openDialog(`Send ${oppName(o)} for medical review`, `
-    <div class="field"><label>Reviewing doctor *</label>
-      <select name="reviewer_id" required>
-        ${reviewers.map((r) => `<option value="${r.id}">${esc(r.full_name || r.email)}</option>`)
-          .join('')}
-      </select>
+  const medDlg = openDialog(`Send ${oppName(o)} for medical review`, `
+    ${''/* Tick as many as you like. Two opinions on one chart is the
+           ordinary way a difficult file is handled, and neither doctor
+           can see the other's -- each account reaches its own errands
+           and nothing else -- so the second reading is independent by
+           construction rather than by anybody's discretion. */}
+    <div class="field"><label>Reviewing doctor${reviewers.length > 1 ? 's' : ''} *</label>
+      <div class="pick-list">
+        ${reviewers.map((r, i) => `<label class="dlg-check">
+          <input type="checkbox" name="reviewer_ids" value="${r.id}"
+                 ${reviewers.length === 1 || i === 0 ? 'checked' : ''}>
+          <span>${esc(r.full_name || r.email)}</span></label>`).join('')}
+      </div>
+      ${reviewers.length > 1 ? `<span class="muted" style="font-size:12px">Each one gets the
+        same file and answers on his own; neither sees the other's estimate.</span>` : ''}
     </div>
     ${twoLives ? `<div class="field"><label>Which insured *</label>
       <select name="life">
@@ -11292,19 +11361,27 @@ async function openMedicalReviewDialog(o) {
         placeholder="The 21st estimate is 36 months and the cardiology notes look worse than that to me. Is 36 defensible?"></textarea>
     </div>
     <div class="dlg-note">
-      He will see the insured's name, date of birth, sex, state, whatever is typed in the
-      medical section, and the summary you attach. He will <strong>not</strong> see the
-      asking price, the death benefit, the modelled return, or any other case. His estimate
-      goes onto this deal by itself if it has none; if it already has one, you decide.
+      He will see the insured's name, date of birth, sex, state, the death benefit, whatever
+      is typed in the medical section, and the summary you attach. He will <strong>not</strong>
+      see the asking price, the modelled return, or any other case. His estimate goes onto
+      this deal by itself if it has none; if it already has one it is recorded as the
+      internal LE beside it and the report you priced off stays where it is.
     </div>
   `, async (v) => {
-    await api('/medical-reviews', { method: 'POST', body: {
+    /* Read off the dialog rather than out of `formValues`, which keeps
+       one value per name and would quietly send the last doctor
+       ticked. */
+    const picked = [...medDlg.querySelectorAll('input[name=reviewer_ids]:checked')]
+      .map((b) => Number(b.value));
+    if (!picked.length) throw new Error('Tick at least one reviewing doctor.');
+    const made = await api('/medical-reviews', { method: 'POST', body: {
       opportunity_id: o.id, life: Number(v.life) || 1,
-      reviewer_id: Number(v.reviewer_id), ask: v.ask, records_url: v.records_url,
+      reviewer_ids: picked, ask: v.ask, records_url: v.records_url,
       le_report_id: v.le_report_id ? Number(v.le_report_id) : null } });
-    toast('Sent for review');
+    toast(made?.sent > 1 ? `Sent to ${made.sent} reviewers` : 'Sent for review');
     render();
   }, 'Send it');
+  return medDlg;
 }
 
 /** The buttons in the panel above. */
@@ -11318,10 +11395,12 @@ function wireMedicalPanel(o) {
          "are you sure?" is not a question, it is a speed bump; one that
          says what is about to change is. */
       const what = current
-        ? `Replace the ${current}-month life expectancy on ${
-          life === '2' ? 'the second insured' : 'this deal'} with ${months} months?\n\n`
-          + 'Every figure on the one-pager is priced off it and will move.'
-        : `Put ${months} months on ${life === '2' ? 'the second insured' : 'this deal'}?`;
+        ? `Record his ${months} months as the internal LE on ${
+          life === '2' ? 'the second insured' : 'this deal'}?\n\n`
+          + `The ${current}-month report stays where it is and the deal goes on being `
+          + 'priced off it — the two sit side by side, which is the point of having asked.'
+        : `Put ${months} months on ${life === '2' ? 'the second insured' : 'this deal'}?\n\n`
+          + 'There is no estimate on it yet, so this becomes the one it is priced off.';
       if (!confirm(what)) return;
       try {
         await api(`/medical-reviews/${b.dataset.medAdopt}/adopt`, { method: 'POST' });
@@ -11520,7 +11599,13 @@ async function medReviewDetailView() {
         <div class="spacer"></div>
         <span class="badge ${reviewDone(r) ? 'inforce' : tone}"><span class="dot"></span>${
           reviewDone(r) ? 'Complete' : esc(label)}</span>
-        ${mayEdit && open ? '<button class="btn-danger" id="medWithdraw">Withdraw</button>' : ''}
+        ${mayEdit && open ? '<button id="medWithdraw">Withdraw</button>' : ''}
+        ${''/* Withdraw and delete are different acts. Withdraw says we
+               changed our mind and keeps the row; delete is for a
+               request that should not have existed, and takes the
+               papers with it. Administrators only. */}
+        ${state.user.role === 'admin'
+          ? '<button class="btn-danger" id="medDelete">Delete</button>' : ''}
       </div>
 
       <div class="grid-2 med-grid">
@@ -11591,7 +11676,11 @@ async function medReviewDetailView() {
                     .map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>` : ''}
                 ${mayEdit && reviewDone(r) && r.le_months && !r.adopted_at
                   ? `<button class="primary" id="medAdopt" style="margin-top:14px"
-                       data-months="${r.le_months}">Put ${r.le_months} months on the case</button>`
+                       data-months="${r.le_months}">Put ${r.le_months} months on the case</button>
+                     <div class="muted" style="font-size:12px;margin-top:8px">
+                       A life expectancy already on the case is not replaced. His goes on as
+                       the <strong>internal LE</strong> beside it; only a case with none takes
+                       his as the estimate it is priced off.</div>`
                   : ''}`
                 : `<div class="empty">Nothing has come back yet. He was sent this on ${
                      fmtDate(r.requested_at)}.</div>`}
@@ -11630,6 +11719,18 @@ async function medReviewDetailView() {
         try {
           await api(`/medical-reviews/${r.id}/cancel`, { method: 'POST' });
           toast('Withdrawn');
+          go('#/med-review');
+        } catch (err) { alert(err.message); }
+      });
+      onClick('#medDelete', async () => {
+        if (!confirm(`Delete this review of ${reviewCaseName(r)} altogether?\n\n`
+          + `${(r.files || []).length
+            ? `The ${(r.files || []).length} file(s) sent with it go too. ` : ''}`
+          + 'The register will no longer show that it was sent. This cannot be undone — '
+          + 'to take a case back from the doctor but keep the record, use Withdraw.')) return;
+        try {
+          await api(`/medical-reviews/${r.id}`, { method: 'DELETE' });
+          toast('Deleted');
           go('#/med-review');
         } catch (err) { alert(err.message); }
       });
@@ -11768,6 +11869,13 @@ async function medicalCaseView() {
                   ageFromDob(s.dob)} today` : '—'}</dd>
                 <dt>Sex</dt><dd>${esc(s.gender || '—')}</dd>
                 <dt>State</dt><dd>${esc(s.state || '—')}</dd>
+                ${''/* The size of the contract. A fact about the policy
+                       rather than about the deal: what this account is
+                       still never shown is the PRICE and the RATE OF
+                       RETURN, which are what the office hopes to make
+                       and are the figures that could bend an opinion. */}
+                ${s.face_amount ? `<dt>Death benefit</dt>
+                  <dd>${money(s.face_amount)}</dd>` : ''}
                 ${s.records_through ? `<dt>Records through</dt>
                   <dd>${fmtDate(s.records_through)}</dd>` : ''}
                 ${r.records_url ? `<dt>The records</dt>
@@ -12060,17 +12168,33 @@ async function openLeAttachDialog(id) {
  * Administrators only -- the server withholds the field from everybody
  * else, so its absence is the test.
  */
-function leReportPanel(list, kind, id, record = null) {
+function leReportPanel(list, kind, id, record = null, attached = []) {
   const rows = list || [];
+  const docs = attached || [];
+  const mayRun = list !== undefined;
   return `
     <div class="card" style="margin-top:22px">
       <div class="card-head"><h2>Life-expectancy reports</h2><div class="spacer"></div>
-        <button class="btn-sm" id="leRunBtn">Run one from records…</button></div>
+        ${''/* Two different things, and the button says which. Attaching
+               is a PDF somebody was sent -- 21st, Fasano, ITM -- and
+               running one spends money on the report service, which is
+               why only an account holding that grant is offered it. */}
+        ${canEditData() ? '<button class="btn-sm" id="leAttachBtn">Attach a report…</button>' : ''}
+        ${mayRun ? '<button class="btn-sm" id="leRunBtn">Run one from records…</button>' : ''}</div>
       <div class="card-body">
+        ${docs.length ? `<ul class="med-files" style="margin-bottom:${rows.length ? 14 : 0}px">
+          ${docs.map((d) => `<li>
+            <a href="/api/le-documents/${d.id}/download">${esc(d.title || d.file_name)}</a>
+            <span class="muted"> · ${fmtBytes(d.byte_size)} · attached ${fmtDate(d.created_at)}${
+              d.uploaded_by_name ? ` by ${esc(d.uploaded_by_name)}` : ''}</span>
+            ${d.notes ? `<span class="muted"> · ${esc(d.notes)}</span>` : ''}
+            ${canEditData() ? ` <button class="btn-link" data-le-doc-rm="${d.id}"
+                 data-name="${esc(d.title || d.file_name)}">remove</button>` : ''}
+          </li>`).join('')}</ul>` : ''}
         ${rows.length ? rows.map((r) => leCard(r, { compact: true })).join('')
-    : `<p class="muted" style="margin:0">Nothing run yet. An attending physician's statement
-         dropped here comes back as a medical summary and an estimate, usually in a few
-         minutes.</p>`}
+    : (docs.length ? '' : `<p class="muted" style="margin:0">Nothing here yet. Attach a
+         provider's report, or drop an attending physician's statement in and one comes back
+         as a medical summary and an estimate in a few minutes.</p>`)}
         ${kind === 'opportunity' ? leAdoptRow(record) : ''}
       </div>
     </div>`;
@@ -12079,6 +12203,46 @@ function leReportPanel(list, kind, id, record = null) {
 function wireLeReportPanel(kind, id) {
   wireLeActions();
   wireLeWatchers();
+  onClick('#leAttachBtn', () => {
+    const dlg = openDialog('Attach a life-expectancy report', `
+      <div class="field"><label>The report *</label>
+        <input type="file" name="file" required>
+        <span class="muted" style="font-size:12px">The PDF as the provider sent it — 21st,
+          Fasano, ITM, anybody. It is filed against this case and stays off the Documents
+          tab, where the whole office browses.</span></div>
+      ${inputField('What to call it', 'title', '', 'text',
+        'placeholder="21st Services — 08/26/2026"')}
+      <div class="field"><label>Anything to note</label>
+        <input name="notes" placeholder="Optional — 72 months, median"></div>
+    `, async (v) => {
+      const file = dlg.querySelector('input[type=file]').files?.[0];
+      if (!file) throw new Error('Choose a file to attach.');
+      if (file.size > 60 * 1024 * 1024)
+        throw new Error(`That file is ${fmtBytes(file.size)}. The limit is 60 MB.`);
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append(kind === 'policy' ? 'policy_id' : 'opportunity_id', String(id));
+      fd.append('title', v.title || '');
+      fd.append('notes', v.notes || '');
+      const res = await fetch('/api/le-documents',
+        { method: 'POST', body: fd, credentials: 'same-origin' });
+      if (!res.ok) {
+        let msg = 'Upload failed.';
+        try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+        throw new Error(msg);
+      }
+      toast('Report attached');
+    }, 'Attach it');
+  });
+  document.querySelectorAll('[data-le-doc-rm]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!confirm(`Remove "${b.dataset.name}" from this case?`)) return;
+      try {
+        await api(`/le-documents/${b.dataset.leDocRm}`, { method: 'DELETE' });
+        toast('Removed');
+        render();
+      } catch (err) { alert(err.message); }
+    }));
   $('#leRunBtn')?.addEventListener('click', () => {
     const dlg = openDialog('Run a life-expectancy report', `
       ${leDropZone(kind, id)}
@@ -12455,6 +12619,17 @@ async function render({ soft = false } = {}) {
       wireForgot();
       return;
     }
+    /* Where they were trying to go.
+     *
+     * A link in an email lands here, because the portal needs signing
+     * in. Without this the hash is replaced by the home screen the
+     * moment they do, and the link has cost them a step instead of
+     * saving one -- which is exactly why every other email in this
+     * application points at the front door. `#/medical/12` is the one
+     * that does not, and it only works if we come back to it. */
+    const wanted = location.hash.replace(/^#\/?/, '');
+    state.wanted = wanted && !/^(login|register|forgot|reset)/.test(wanted)
+      ? location.hash : null;
     app.innerHTML = loginView();
     wireLogin();
     return;

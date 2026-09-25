@@ -530,6 +530,35 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS underwriter_note TEXT NOT NUL
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS thesis TEXT NOT NULL DEFAULT '';
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS records_through DATE;
 
+/* OUR OWN doctor's estimate, kept beside the provider's and never on top
+ * of it.
+ *
+ * A reviewing physician's reading is worth having precisely because it
+ * disagrees with the report sometimes, and a case that arrives with a
+ * 21st Services report and then has that report quietly replaced by our
+ * own number loses the thing worth knowing: that the two differ, and by
+ * how much. It also loses the provider's report, which is what a buyer
+ * on the other side of the trade will ask to see.
+ *
+ * So the estimate that comes back from a medical review lands HERE when
+ * the case already carries one. Where the case has none, there is
+ * nothing to preserve and it goes in the ordinary fields, which is what
+ * prices the deal. Nothing in here is ever overwritten by a review. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS internal_le_months   INTEGER;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS internal_le_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS internal_le_date     DATE;
+/* The second life on a survivorship case has its own internal estimate,
+   for the same reason it has its own provider report. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_internal_le_months   INTEGER;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_internal_le_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_internal_le_date     DATE;
+
+/* And the same on a policy already owned, where the estimate hangs off
+   the insured rather than off the deal. */
+ALTER TABLE insureds ADD COLUMN IF NOT EXISTS internal_le_months   INTEGER;
+ALTER TABLE insureds ADD COLUMN IF NOT EXISTS internal_le_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE insureds ADD COLUMN IF NOT EXISTS internal_le_date     DATE;
+
 -- What the carrier says the policy is worth today. Account value is what
 -- keeps the contract alive; cash surrender value is what walking away is
 -- worth, and it is the floor under the price being asked. Both are quoted
@@ -1502,6 +1531,17 @@ ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS records_url TEXT;
 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS medical_review_id INTEGER
   REFERENCES medical_reviews(id) ON DELETE CASCADE;
+
+/* A provider's own life-expectancy report, filed against the deal.
+ *
+ * `documents` could already hang a file off a policy; a deal being
+ * priced had nowhere to put one, and a 21st Services or Fasano report
+ * is exactly the document somebody wants to open six months later when
+ * asked where the number came from. Cascades with the deal, because a
+ * report on a case that no longer exists is a stray medical document. */
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS opportunity_id INTEGER
+  REFERENCES opportunities(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_documents_opportunity ON documents (opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_documents_medreview ON documents (medical_review_id);
 
 /* ====================================================================

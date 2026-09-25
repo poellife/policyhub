@@ -387,6 +387,17 @@ const link = () => APP() || '';
  */
 const resetLink = (token) => `${link()}/#/reset/${encodeURIComponent(String(token || ''))}`;
 
+/**
+ * The second exception, for the same reason as the first.
+ *
+ * A reviewing doctor is sent one thing: a case to read. A link to the
+ * front door makes him sign in and then find it, and there is nothing
+ * else on his screen to find it among -- so the link may as well BE the
+ * case. The portal remembers where he was going across the sign-in
+ * screen, which is what makes this worth doing rather than a trap.
+ */
+const reviewLink = (id) => (id ? `${link()}/#/medical/${encodeURIComponent(String(id))}` : link());
+
 export const TEMPLATES = {
   new_location: ({ name, label, when }) => ({
     subject: 'A sign-in from a place your account has not been used before',
@@ -513,20 +524,22 @@ export const TEMPLATES = {
       + `Asking for a piece is a request, not a commitment — the office confirms it.`,
   }),
 
-  medical_review_requested: ({ name, from, ask }) => ({
-    subject: 'A case is waiting for your review',
-    text: `${name ? `${name},\n\n` : ''}${from || 'The office'} has put a case in front of `
-      + `you for review.\n\n`
-      + (ask ? `What they have asked: ${ask}\n\n` : '')
-      + `Sign in and it is the only thing on your screen: the file, the records summary, and `
-      + `the box for your estimate and your reasoning. ${link()}\n\n`
-      /* Said plainly, because a reviewer who assumes we are fishing for a
-         number will discount his own, and the whole value of the opinion
-         is that it was formed without knowing what the deal needs. */
-      + `You will not see a price, a death benefit or a rate of return anywhere on that `
-      + `screen. That is deliberate — the opinion is worth having because it was formed `
-      + `without them.\n\n`
-      + `Nothing about the insured is in this message. Sign in to see whose file it is.`,
+  /* Four lines: what happened, which case, and the way in.
+   *
+   * It used to explain the arrangement at length -- what he would see,
+   * what he would not, and why. That belonged in the first message ever
+   * sent to a reviewer and reads as padding in the fiftieth.
+   *
+   * The insured is INITIALS and the benefit is a round figure: enough to
+   * tell two cases apart in an inbox, and not a name. Nothing here
+   * identifies a person, which is the rule every other message in this
+   * application follows. */
+  medical_review_requested: ({ name, initials, benefit, reviewId }) => ({
+    subject: 'A new file has been submitted for review',
+    text: `${name ? `${name},\n\n` : ''}A new file has been submitted for your review.\n\n`
+      + `${[initials ? `Insured: ${initials}` : null,
+        benefit ? `Death benefit: ${benefit}` : null].filter(Boolean).join('\n')}\n\n`
+      + `${reviewLink(reviewId)}`,
   }),
 
   medical_review_returned: ({ name, who, months, recommendation }) => ({
