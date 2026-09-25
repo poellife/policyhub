@@ -12192,9 +12192,10 @@ function leReportPanel(list, kind, id, record = null, attached = []) {
                  data-name="${esc(d.title || d.file_name)}">remove</button>` : ''}
           </li>`).join('')}</ul>` : ''}
         ${rows.length ? rows.map((r) => leCard(r, { compact: true })).join('')
-    : (docs.length ? '' : `<p class="muted" style="margin:0">Nothing here yet. Attach a
-         provider's report, or drop an attending physician's statement in and one comes back
-         as a medical summary and an estimate in a few minutes.</p>`)}
+    : (docs.length ? '' : `<p class="muted" style="margin:0">Nothing here yet. Drop a
+         provider's report anywhere on this card to file it, or drop an attending
+         physician's statement into <strong>Run one from records</strong> and one comes
+         back as a medical summary and an estimate in a few minutes.</p>`)}
         ${kind === 'opportunity' ? leAdoptRow(record) : ''}
       </div>
     </div>`;
@@ -12203,37 +12204,12 @@ function leReportPanel(list, kind, id, record = null, attached = []) {
 function wireLeReportPanel(kind, id) {
   wireLeActions();
   wireLeWatchers();
-  onClick('#leAttachBtn', () => {
-    const dlg = openDialog('Attach a life-expectancy report', `
-      <div class="field"><label>The report *</label>
-        <input type="file" name="file" required>
-        <span class="muted" style="font-size:12px">The PDF as the provider sent it — 21st,
-          Fasano, ITM, anybody. It is filed against this case and stays off the Documents
-          tab, where the whole office browses.</span></div>
-      ${inputField('What to call it', 'title', '', 'text',
-        'placeholder="21st Services — 08/26/2026"')}
-      <div class="field"><label>Anything to note</label>
-        <input name="notes" placeholder="Optional — 72 months, median"></div>
-    `, async (v) => {
-      const file = dlg.querySelector('input[type=file]').files?.[0];
-      if (!file) throw new Error('Choose a file to attach.');
-      if (file.size > 60 * 1024 * 1024)
-        throw new Error(`That file is ${fmtBytes(file.size)}. The limit is 60 MB.`);
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append(kind === 'policy' ? 'policy_id' : 'opportunity_id', String(id));
-      fd.append('title', v.title || '');
-      fd.append('notes', v.notes || '');
-      const res = await fetch('/api/le-documents',
-        { method: 'POST', body: fd, credentials: 'same-origin' });
-      if (!res.ok) {
-        let msg = 'Upload failed.';
-        try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-        throw new Error(msg);
-      }
-      toast('Report attached');
-    }, 'Attach it');
-  });
+  onClick('#leAttachBtn', () => openLeDocumentDialog(kind, id));
+  /* And without opening anything: drop a file on the card and it is
+     attached, named after itself. A dialog is for the case where the
+     name or a note matters; most of the time the name on the PDF is
+     what anybody would have typed anyway. */
+  wireLeAttachDrop(kind, id);
   document.querySelectorAll('[data-le-doc-rm]').forEach((b) =>
     b.addEventListener('click', async () => {
       if (!confirm(`Remove "${b.dataset.name}" from this case?`)) return;
@@ -12252,6 +12228,132 @@ function wireLeReportPanel(kind, id) {
         window open until the upload is across; after that the case runs on the service and
         you can close it.</p>`);
     wireLeUpload({ onDone: () => { dlg.close(); dlg.remove(); render(); } });
+  });
+}
+
+/**
+ * Attaching a provider's report — the dialog, and the drop.
+ *
+ * The same POST either way. What differs is how much the person is
+ * asked for: the dialog takes a name and a note, and a file dropped on
+ * the panel takes neither, because the name on a PDF a provider sent is
+ * almost always what somebody would have typed.
+ */
+async function postLeDocument(kind, id, file, { title = '', notes = '' } = {}) {
+  if (!file) throw new Error('Choose a file to attach.');
+  if (file.size > 60 * 1024 * 1024)
+    throw new Error(`That file is ${fmtBytes(file.size)}. The limit is 60 MB.`);
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append(kind === 'policy' ? 'policy_id' : 'opportunity_id', String(id));
+  fd.append('title', title);
+  fd.append('notes', notes);
+  const res = await fetch('/api/le-documents',
+    { method: 'POST', body: fd, credentials: 'same-origin' });
+  if (!res.ok) {
+    let msg = 'Upload failed.';
+    try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+    throw new Error(msg);
+  }
+  return res.json().catch(() => ({}));
+}
+
+function openLeDocumentDialog(kind, id) {
+  const dlg = openDialog('Attach a life-expectancy report', `
+    ${''/* The zone is the control. The file input behind it still exists
+           and still works -- a keyboard, a screen reader and a browser
+           without drag and drop all need it -- it is simply not the
+           thing being looked at. */}
+    <div class="read-drop" id="leDocDrop" tabindex="0" role="button"
+         aria-label="Drop the report here">
+      <div class="read-drop-face">
+        <strong id="leDocName">Drop the report here, or <button type="button"
+          class="btn-link" id="leDocBrowse">choose a file</button></strong>
+        <span>The PDF as the provider sent it — 21st, Fasano, ITM, anybody. It is filed
+          against this case and stays off the Documents tab, where the whole office
+          browses.</span>
+      </div>
+      <input type="file" name="file" id="leDocFile" hidden>
+    </div>
+    ${inputField('What to call it', 'title', '', 'text',
+      'placeholder="21st Services — 08/26/2026"')}
+    <div class="field"><label>Anything to note</label>
+      <input name="notes" placeholder="Optional — 72 months, median"></div>
+  `, async (v) => {
+    await postLeDocument(kind, id, dlg.querySelector('#leDocFile').files?.[0],
+      { title: v.title, notes: v.notes });
+    toast('Report attached');
+  }, 'Attach it');
+
+  const zone = dlg.querySelector('#leDocDrop');
+  const input = dlg.querySelector('#leDocFile');
+  const named = () => {
+    const f = input.files?.[0];
+    dlg.querySelector('#leDocName').innerHTML = f
+      ? `${esc(f.name)} <span class="muted">· ${fmtBytes(f.size)}</span>`
+      : 'Drop the report here, or <button type="button" class="btn-link" id="leDocBrowse">choose a file</button>';
+    /* The title box fills itself in with the file's own name, because
+       that is what somebody types into it. Still theirs to change. */
+    const title = dlg.querySelector('input[name=title]');
+    if (f && !title.value) title.value = f.name.replace(/\.[a-z0-9]+$/i, '');
+  };
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.add('over');
+  }));
+  ['dragleave', 'drop'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.remove('over');
+  }));
+  zone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    /* `DataTransfer` straight onto the input, so the form submits it the
+       way it would a chosen file and there is one path through. */
+    const dt = new DataTransfer();
+    dt.items.add(f);
+    input.files = dt.files;
+    named();
+  });
+  zone.addEventListener('click', (e) => {
+    if (e.target.closest('button') || e.target === zone
+      || e.target.closest('.read-drop-face')) input.click();
+  });
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', named);
+  return dlg;
+}
+
+/** The whole panel as a target: drop a report on it and it is filed. */
+function wireLeAttachDrop(kind, id) {
+  const card = document.querySelector('#leAttachBtn')?.closest('.card');
+  if (!card) return;
+  let busy = false;
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => card.addEventListener(n, (e) => {
+    /* Only for something actually carrying a file. Dragging a selection
+       of text across the page should not light the card up. */
+    if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+    stop(e); card.classList.add('drop-over');
+  }));
+  ['dragleave', 'dragend'].forEach((n) => card.addEventListener(n, (e) => {
+    if (e.target !== card && card.contains(e.relatedTarget)) return;
+    card.classList.remove('drop-over');
+  }));
+  card.addEventListener('drop', async (e) => {
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    stop(e);
+    card.classList.remove('drop-over');
+    if (busy) return;
+    busy = true;
+    try {
+      for (const f of files) await postLeDocument(kind, id, f);
+      toast(files.length === 1 ? 'Report attached'
+        : `${files.length} reports attached`);
+      render();
+    } catch (err) { alert(err.message); busy = false; }
   });
 }
 

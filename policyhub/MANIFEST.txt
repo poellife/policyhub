@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-25f
+PolicyHub — build 2026-09-25g
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -8,54 +8,51 @@ FILES IN THIS PACKAGE
   src/opportunity-pdf.js
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  This is everything since 2026-09-17c — deploy it instead of any of the
-  18a / 18b / 25a–e packages that are not up yet. It assumes 25-09-17c,
-  which carried a new file public/initials.js, is already deployed.
+  Everything since 2026-09-17c is in here — deploy this instead of any
+  earlier package still waiting. It assumes 2026-09-17c, which carried a
+  new file public/initials.js, is already deployed.
 
-INTEREST, WHICH IS THE ONE THAT WAS WRONG ON SCREEN
+NEW IN THIS ONE
 
-  An investor is now quoted COMPOUNDED by default and can switch to
-  simple interest with the control in the page header — the same control
-  the desk has always had. It used to be staff-only, so an investor saw
-  whatever their account had never chosen, which was simple interest,
-  while the office was quoting them an IRR. Their choice is remembered.
+  DROP A REPORT ON THE CARD. A PDF dropped anywhere on the
+  "Life-expectancy reports" panel is filed against the case at once,
+  named after the file. The card outlines itself while a file is over
+  it. "Attach a report…" still opens the dialog when the name or a note
+  matters — and that dialog now takes a dropped file too, and fills the
+  title in from the file name.
 
-  The desk still defaults to simple interest, and accounts that have
-  already chosen keep what they chose.
+EVERYTHING ELSE IN THIS PACKAGE (from 25a–f)
 
-MEDICAL REVIEW
+  INTEREST: investors are quoted COMPOUNDED by default and can switch to
+  simple with the control in the page header. That is the fix for the
+  sheet reading "simple interest" after you had set compounded — the
+  control was staff-only, so their account showed a default it had never
+  been asked about. The desk still defaults to simple.
 
-  THE EMAIL to a reviewing doctor is now four lines: what happened, the
-  insured's initials, the death benefit, and a link straight to that
-  case. No name, as before. The portal holds the link across the sign-in
-  screen, so he lands on the case rather than on his queue.
+  MED REVIEW TAB: every case sent to a doctor, split into what is out
+  and what has come back, with a way into the whole review.
 
-  THE DEATH BENEFIT is now on his file, as asked. Still absent: the
-  asking price and every rate of return.
+  THE EMAIL to a doctor is four lines — what happened, the initials, the
+  death benefit, and a link straight to that case.
 
-  A CASE CAN GO TO MORE THAN ONE DOCTOR. Tick as many reviewers as you
-  like; each gets their own review of the same life and neither can see
-  the other's. Sending the same life to the same doctor twice is still
-  refused.
+  A CASE CAN GO TO SEVERAL DOCTORS. Each gets his own review and neither
+  sees the other's.
 
-  HIS ESTIMATE NO LONGER OVERWRITES THE REPORT. Where the case already
-  carries a life expectancy, his lands beside it as the INTERNAL LE —
-  visible on the deal and in the edit form, never sent to investors, and
-  the deal goes on being priced off the provider's report. A case with
-  no estimate at all still takes his automatically; there is nothing to
-  preserve.
+  HIS ESTIMATE NO LONGER OVERWRITES THE PROVIDER'S REPORT — it lands
+  beside it as the INTERNAL LE, which investors never see.
 
-  A REVIEW CAN BE DELETED outright (administrators), which is different
-  from Withdraw: withdraw takes the case back and keeps the record;
-  delete removes the row and the papers with it.
+  HIS SCREEN is an estimate, his reasoning, his call, and one button
+  reading "Review complete". He sees the death benefit; he still sees no
+  price and no rate of return.
 
-LIFE-EXPECTANCY REPORTS
+  A SEPARATE RECORDS LINK per review, which is the only folder he is
+  shown. The deal's case folder is never sent to him.
 
-  "Attach a report…" on the panel takes a provider's PDF — 21st, Fasano,
-  ITM — and files it against the case, with a note. It sits beside the
-  reports this application ran, opens from there, and can be removed.
-  It stays off the Documents tab, is behind the same grant as the runs,
-  and no investor can reach it.
+  WITHDRAW takes a case off his screen entirely; DELETE removes the
+  review and its papers from the register.
+
+  ATTACHED PROVIDER REPORTS sit on the case beside the runs, off the
+  Documents tab, behind the same grant, invisible to investors.
 
 NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
 themselves on boot.
