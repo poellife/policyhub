@@ -5999,8 +5999,7 @@ async function reviewSubject(row) {
     const { rows } = await q(
       `SELECT insured_first_name, insured_last_name, insured_dob, insured_gender,
               insured_state, insured2_first_name, insured2_last_name, insured2_dob,
-              insured2_gender, insured2_state, impairments, mitigating, records_through,
-              documents_url
+              insured2_gender, insured2_state, impairments, mitigating, records_through
          FROM opportunities WHERE id = $1`, [row.opportunity_id]);
     const o = rows[0];
     if (!o) return null;
@@ -6018,21 +6017,19 @@ async function reviewSubject(row) {
       impairments: o.impairments || '',
       mitigating: o.mitigating || '',
       records_through: o.records_through || null,
-      /* The folder the records themselves are in. He is being asked to
-         read a file, so the file is what he is given -- the summary on
-         this screen is somebody else's reading of it and no substitute.
-         It carries no price and no rate of return, which is the only
-         thing kept off these screens. */
-      documents_url: o.documents_url || null,
+      /* NOT the case's own documents folder. That one holds the
+         illustration, the offer and the correspondence -- the price, in
+         other words -- and this account is arranged not to see it. The
+         medical records are shared as their own folder, on the review,
+         and that link is added to the packet below. */
     };
   }
   const { rows } = await q(
-    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state, pol.documents_url
+    `SELECT i.first_name, i.last_name, i.dob, i.gender, i.state
        FROM policies pol LEFT JOIN insureds i ON i.id = pol.insured_id
       WHERE pol.id = $1`, [row.policy_id]);
   const i = rows[0];
-  return i ? { ...i, impairments: '', mitigating: '', records_through: null,
-    documents_url: rows[0].documents_url || null } : null;
+  return i ? { ...i, impairments: '', mitigating: '', records_through: null } : null;
 }
 
 /**
@@ -6085,9 +6082,11 @@ async function reviewPacket(row) {
     /* The machine's reading, offered as a reading rather than as an
        answer. He may agree with it, and he may not. */
     summary,
-    /* What the desk actually uploaded for him: the records themselves.
-       This is the thing he was asked to read, and everything else on
-       his screen is somebody's summary of it. */
+    /* The records themselves: the folder the office shared for this
+       reading, and anything uploaded onto the review. This is the thing
+       he was asked to read; everything else on his screen is somebody's
+       summary of it. */
+    records_url: row.records_url || null,
     files: await reviewFiles(row.id),
     /* A survivorship case has a second person in the same file. Said, so
        he knows which chart he is being asked about, and not who the
@@ -6287,10 +6286,11 @@ router.post('/medical-reviews', blockInvestors, blockMedical, canEdit,
 
     const { rows } = await q(
       `INSERT INTO medical_reviews
-         (opportunity_id, policy_id, life, reviewer_id, requested_by, ask, le_report_id)
-       VALUES ($1::int,$2::int,$3,$4,$5,$6,$7::int) RETURNING *`,
+         (opportunity_id, policy_id, life, reviewer_id, requested_by, ask, le_report_id,
+          records_url)
+       VALUES ($1::int,$2::int,$3,$4,$5,$6,$7::int,$8) RETURNING *`,
       [oppId || null, polId || null, life, reviewerId, req.user.uid,
-        str(req.body.ask).slice(0, 4000), leId || null]);
+        str(req.body.ask).slice(0, 4000), leId || null, url(req.body.records_url)]);
 
     await audit(req.user.uid, 'medical_review', rows[0].id, 'create',
       `sent ${oppId ? `opportunity ${oppId}` : `policy ${polId}`}${
@@ -6507,6 +6507,38 @@ router.post('/medical-reviews/:id/decline', wrap(async (req, res) => {
       who: req.user.name || 'the reviewing doctor', reason: why });
   res.json({ ok: true });
 }));
+
+/**
+ * The folder the medical records are in, for this review.
+ *
+ * Its own field and its own route, deliberately apart from the case's
+ * own documents link. The deal folder holds the price, the offer and
+ * the correspondence; handing it to a reviewing doctor would show him
+ * everything the arrangement exists to keep from him. So the office
+ * shares a second folder -- the medical file, and nothing else -- and
+ * that is the one address this account is ever given.
+ *
+ * Only a link somebody can click: `url` refuses anything that is not
+ * http or https, so a stored `javascript:` address cannot run in his
+ * session. An empty value takes the link away again.
+ */
+router.put('/medical-reviews/:id/records-url', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    const given = str(req.body.records_url);
+    const link = given ? url(given) : null;
+    if (given && !link)
+      return res.status(400).json({
+        error: 'That does not read as a link. Paste the folder address — it has to start '
+          + 'http:// or https://.' });
+    const { rows } = await q(
+      `UPDATE medical_reviews SET records_url = $1 WHERE id = $2 RETURNING *`,
+      [link, row.id]);
+    await audit(req.user.uid, 'medical_review', row.id, 'update',
+      link ? 'set the records folder for the reviewer' : 'removed the records folder');
+    res.json({ ...rows[0], files: await reviewFiles(row.id) });
+  }));
 
 /** The desk withdrawing the errand. */
 router.post('/medical-reviews/:id/cancel', blockInvestors, blockMedical, canEdit,

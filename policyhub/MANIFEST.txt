@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-25a
+PolicyHub — build 2026-09-25b
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -7,47 +7,44 @@ FILES IN THIS PACKAGE
   src/api.js     src/schema.sql   src/server.js   src/opportunity-pdf.js
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  This package also contains everything in 2026-09-18a and 18b, so deploy
-  this instead of either if they are not up yet. It assumes 2026-09-17c —
+  This is everything in 2026-09-18a, 18b and 25a as well. Deploy it
+  instead of any of those that are not up yet. It assumes 2026-09-17c —
   which carried a new file, public/initials.js — is already deployed.
 
 WHAT THIS ADDS
 
-  A MED REVIEW TAB. Every case ever sent to a reviewing doctor, in one
-  list, split into what is still out and what has come back. Each row
-  names the insured and the case, the reviewer, the date it went, his
-  estimate and his call. Opening one shows the whole review: what the
-  office sent, what came back, and the button that puts his estimate
-  on the case.
+  A SEPARATE RECORDS LINK FOR THE DOCTOR. On a review, "Add the records
+  link" takes a Dropbox address for the medical file — that folder and
+  nothing else. It is the only folder the reviewing doctor is shown.
 
-  FILES FOR THE DOCTOR. On a review, "Add a file" uploads the records
-  themselves — PDF, Word, images or a zip, up to 60 MB each. They appear
-  on his screen under "Files sent with this case" and he downloads them
-  from there.
+    The case folder on the deal is NOT shown to him and never was meant
+    to be: it holds the illustration, the offer and the correspondence,
+    which is the price. An earlier build did pass it through to his
+    screen; that is corrected here.
 
-    They are filed against the REVIEW, not against the case: they do not
-    appear on the Documents tab beside the K-1s, no investor can reach
-    them, and the doctor can only open the ones on a review addressed to
-    him. Taking one back off is one click.
+    The link is also on the "Send for medical review" dialog, so it goes
+    with the case the first time rather than being added afterwards.
 
-  WITHDRAWING A REQUEST NOW REMOVES IT FROM HIS SCREEN ENTIRELY — not
-  greyed out with a badge, gone, with the records that went with it
-  unreachable from that account. The office keeps its own record of
-  having sent it.
+    Sharing the folder with him in Dropbox is still a separate act. The
+    link tells him where to look; it grants nothing.
 
-  THE DOCTOR'S SCREEN IS DOWN TO THREE THINGS: a life expectancy in
-  months, a box for his reasoning, and his call at the bottom (Proceed,
-  Pass, More records needed). One button, and it says "Review complete".
+  Withdrawing a request takes the link away with everything else — his
+  screen loses the case entirely.
 
-    Gone from it: "What you have been asked", which said the same thing
-    on every case; the median-or-mean question; "How sure are you?"; the
-    two impairment lists; "Save a draft" and "I am not reviewing this";
-    and the footnote explaining why he sees no price. The rule that
-    footnote described has not changed — that account is still sent no
-    price, no death benefit and no rate of return.
+  A MED REVIEW TAB (this was build 2026-09-25a). Every case ever sent to
+  a doctor, split into what is still out and what has come back, with
+  the insured, the case, the reviewer, his estimate and his call.
+  Opening one shows the whole review and the button that puts his
+  estimate on the case.
 
-    Only the estimate is insisted on. A review written on the old longer
-    form keeps everything it recorded; the short form does not erase it.
+  THE DOCTOR'S SCREEN is a life expectancy in months, a box for his
+  reasoning, his call at the bottom, and one button reading "Review
+  complete". The empty "nothing has been uploaded" and "no records
+  summary" panels are gone — the page shows what is there.
 
-NOTHING TO RUN. Copy the files in and redeploy. The new column applies
-itself on boot.
+  Uploading individual documents onto a review still works, for the odd
+  single file. They are filed against the review, stay off the Documents
+  tab, and no investor can reach them.
+
+NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
+themselves on boot.

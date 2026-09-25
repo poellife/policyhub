@@ -1484,6 +1484,22 @@ CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id,
  * Declared here rather than beside the table because `documents` is
  * created several hundred lines above `medical_reviews`, and a foreign
  * key cannot point at a table that does not exist yet. */
+/* The folder the records for THIS review are in.
+ *
+ * Its own column and not the case's `documents_url`, which is the
+ * deliberate part. That one is the deal folder: the illustration, the
+ * carrier correspondence, the offer, the paperwork the office works
+ * from. This is the medical file and nothing else, shared with one
+ * doctor for one reading.
+ *
+ * Kept apart because the two folders have different audiences. The deal
+ * folder must never open for a reviewing doctor -- he would be reading
+ * the price he is supposed not to know -- and the medical folder has no
+ * business being handed round the office with the rest of the case. A
+ * single link cannot be both, and one link doing double duty is how the
+ * wrong person ends up inside the wrong folder. */
+ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS records_url TEXT;
+
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS medical_review_id INTEGER
   REFERENCES medical_reviews(id) ON DELETE CASCADE;
 CREATE INDEX IF NOT EXISTS idx_documents_medreview ON documents (medical_review_id);

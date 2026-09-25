@@ -11280,6 +11280,13 @@ async function openMedicalReviewDialog(o) {
         : 'No finished records summary is attached to this case. He will read whatever the '
           + 'file itself says.'}</span>
     </div>
+    ${inputField('Link to the medical records', 'records_url', '', 'url',
+      'placeholder="Dropbox folder shared with the doctor"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      A folder holding the medical file and nothing else — share it with him in Dropbox as
+      well, since this only tells him where to look. <strong>Not</strong> the case folder on
+      the deal: that one holds the illustration, the offer and the correspondence, and he is
+      never shown it.</span></div>
     <div class="field"><label>What you want looked at</label>
       <textarea name="ask" rows="4"
         placeholder="The 21st estimate is 36 months and the cardiology notes look worse than that to me. Is 36 defensible?"></textarea>
@@ -11293,7 +11300,7 @@ async function openMedicalReviewDialog(o) {
   `, async (v) => {
     await api('/medical-reviews', { method: 'POST', body: {
       opportunity_id: o.id, life: Number(v.life) || 1,
-      reviewer_id: Number(v.reviewer_id), ask: v.ask,
+      reviewer_id: Number(v.reviewer_id), ask: v.ask, records_url: v.records_url,
       le_report_id: v.le_report_id ? Number(v.le_report_id) : null } });
     toast('Sent for review');
     render();
@@ -11521,9 +11528,29 @@ async function medReviewDetailView() {
           <div class="card">
             <div class="card-head"><h2>What we sent</h2><div class="spacer"></div>
               ${mayEdit && r.status !== 'Cancelled'
-                ? '<button class="btn-sm" id="medAddFile">Add a file</button>' : ''}</div>
+                ? `<button class="btn-sm" id="medRecordsUrl">${r.records_url
+                    ? 'Change the records link' : 'Add the records link'}</button>
+                   <button class="btn-sm" id="medAddFile">Add a file</button>` : ''}</div>
             <div class="card-body">
-              ${r.ask ? `<p class="med-ask-full">${esc(r.ask)}</p>` : ''}
+              ${''/* The medical folder, which is the ordinary way records
+                     reach him: the office shares a Dropbox folder holding
+                     the medical file and nothing else, and pastes the
+                     address here. The case folder on the deal is NOT
+                     shown to him and is not offered here -- it holds the
+                     price. */}
+              <h3 class="med-h3">The records folder</h3>
+              ${r.records_url
+                ? `<p style="margin:0 0 4px"><a class="ext-link" href="${esc(r.records_url)}"
+                     target="_blank" rel="noopener noreferrer">Open the folder the doctor sees
+                     <span aria-hidden="true">&#8599;</span></a></p>
+                   <span class="muted" style="font-size:12px">He sees this link and no other.
+                     Sharing the folder with him in Dropbox is a separate act — this only
+                     tells him where to look.</span>`
+                : `<p class="muted" style="margin:0">No records folder on this review yet. He
+                   has the medical summary typed on the case and nothing else to read.</p>`}
+              ${r.ask ? `<h3 class="med-h3">What we asked</h3>
+                <p class="med-ask-full">${esc(r.ask)}</p>` : ''}
+              <h3 class="med-h3">Files uploaded here</h3>
               ${(r.files || []).length ? `<ul class="med-files">${r.files.map((f) => `
                 <li><a href="/api/medical-reviews/${r.id}/files/${f.id}">${esc(f.file_name)}</a>
                   <span class="muted"> · ${fmtBytes(f.byte_size)} · ${
@@ -11531,14 +11558,8 @@ async function medReviewDetailView() {
                     ? ` <button class="btn-link" data-med-rm="${f.id}"
                           data-name="${esc(f.file_name)}">remove</button>` : ''}</li>`).join('')}
                 </ul>`
-                : `<div class="empty">No files have been sent. He is reading whatever summary
-                   was attached and nothing else — <strong>Add a file</strong> puts the
-                   records in front of him.</div>`}
-              ${s.documents_url ? `<div class="muted" style="font-size:12px;margin-top:10px">
-                The case folder is linked on the record, and he can open it:
-                <a class="ext-link" href="${esc(s.documents_url)}" target="_blank"
-                   rel="noopener noreferrer">Case files <span aria-hidden="true">&#8599;</span></a>
-                </div>` : ''}
+                : `<p class="muted" style="margin:0">None. Most cases go across as a folder
+                   link above; this is for the odd single document.</p>`}
             </div>
           </div>
         </div>
@@ -11580,6 +11601,19 @@ async function medReviewDetailView() {
       </div>`,
     after: () => {
       onClick('#medAddFile', () => openReviewFileDialog(r.id));
+      onClick('#medRecordsUrl', () => openDialog('The records folder', `
+        ${inputField('Link to the medical records', 'records_url', r.records_url || '', 'url',
+          'placeholder="https://www.dropbox.com/scl/fo/…"')}
+        <div class="dlg-note">
+          This is the only folder the reviewing doctor is shown. Share it with him in Dropbox
+          as well — the link tells him where to look, it does not grant him anything.
+          Clearing the box takes it away again.
+        </div>
+      `, async (v) => {
+        await api(`/medical-reviews/${r.id}/records-url`, { method: 'PUT', body: {
+          records_url: v.records_url } });
+        toast(v.records_url ? 'The doctor can see the folder' : 'Link removed');
+      }, 'Save'));
       document.querySelectorAll('[data-med-rm]').forEach((b) =>
         b.addEventListener('click', async () => {
           if (!confirm(`Take "${b.dataset.name}" back off this review? `
@@ -11736,8 +11770,8 @@ async function medicalCaseView() {
                 <dt>State</dt><dd>${esc(s.state || '—')}</dd>
                 ${s.records_through ? `<dt>Records through</dt>
                   <dd>${fmtDate(s.records_through)}</dd>` : ''}
-                ${s.documents_url ? `<dt>The records</dt>
-                  <dd><a class="ext-link" href="${esc(s.documents_url)}" target="_blank"
+                ${r.records_url ? `<dt>The records</dt>
+                  <dd><a class="ext-link" href="${esc(r.records_url)}" target="_blank"
                          rel="noopener noreferrer">Open the folder
                          <span aria-hidden="true">&#8599;</span></a></dd>` : ''}
               </dl>
@@ -11753,12 +11787,19 @@ async function medicalCaseView() {
               ${''/* The papers themselves. This is the thing he was
                      actually asked to read; everything above it is
                      somebody's summary of it. */}
-              <h3 class="med-h3">Files sent with this case</h3>
-              ${(r.files || []).length ? `<ul class="med-files">${r.files.map((f) => `
+              ${''/* The list appears only when there is something in it.
+                     Most cases arrive as the folder link above, and a
+                     standing paragraph saying nothing has been uploaded
+                     reads as though something is missing when nothing
+                     is. */}
+              ${(r.files || []).length ? `<h3 class="med-h3">Files sent with this case</h3>
+                <ul class="med-files">${r.files.map((f) => `
                 <li><a href="/api/medical-reviews/${r.id}/files/${f.id}">${esc(f.file_name)}</a>
                   <span class="muted"> · ${fmtBytes(f.byte_size)}</span></li>`).join('')}</ul>`
-                : `<p class="muted">Nothing has been uploaded yet. If you were told records
-                   were coming, telephone the office — this is where they appear.</p>`}
+                : ''}
+              ${!r.records_url && !(r.files || []).length
+                ? `<p class="muted">No records have reached this screen yet. If you were told
+                   some were coming, telephone the office.</p>` : ''}
               <div class="muted" style="font-size:12px;margin-top:10px">
                 Sent ${fmtDate(r.requested_at)}${r.requested_by_name
                   ? ` by ${esc(r.requested_by_name)}` : ''}.${r.life === 2
@@ -11797,8 +11838,7 @@ async function medicalCaseView() {
                 The service keeps its copy for a day or so. If it has gone, ask the office
                 to run it again.</div>
             </div>
-          </div>` : `<div class="card"><div class="card-body empty">
-            No records summary was sent with this case.</div></div>`}
+          </div>` : ''}
         </div>
 
         <div>
