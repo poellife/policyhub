@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-25g
+PolicyHub — build 2026-09-25i
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -9,50 +9,50 @@ FILES IN THIS PACKAGE
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
   Everything since 2026-09-17c is in here — deploy this instead of any
-  earlier package still waiting. It assumes 2026-09-17c, which carried a
-  new file public/initials.js, is already deployed.
+  earlier package still waiting. It assumes 2026-09-17c, which carried
+  the new file public/initials.js, is already deployed.
 
 NEW IN THIS ONE
 
-  DROP A REPORT ON THE CARD. A PDF dropped anywhere on the
-  "Life-expectancy reports" panel is filed against the case at once,
-  named after the file. The card outlines itself while a file is over
-  it. "Attach a report…" still opens the dialog when the name or a note
-  matters — and that dialog now takes a dropped file too, and fills the
-  title in from the file name.
+  MEDICAL REVIEW IS ADMINISTRATORS ONLY. The Med Review tab and the
+  panel on a case are gone for managers, editors and viewers — not
+  hidden, absent: the server refuses the whole family to anybody but an
+  administrator and the reviewing doctor, so a route added later is
+  refused too. What a review produces, the life expectancy, is on the
+  deal itself for everybody who needs it.
 
-EVERYTHING ELSE IN THIS PACKAGE (from 25a–f)
+  MORE RECORDS, AFTER THE FIRST LOT. On a review, "Add a link" takes
+  another address — a second folder, a hospital portal, the cardiology
+  somebody had to send separately — with a word about what it is, and
+  there is a drop area on the same card for files. Drop several at once;
+  they go straight to that reviewer. Both appear on his screen under
+  "More records", and either can be taken off again.
 
-  INTEREST: investors are quoted COMPOUNDED by default and can switch to
-  simple with the control in the page header. That is the fix for the
-  sheet reading "simple interest" after you had set compounded — the
-  control was staff-only, so their account showed a default it had never
-  been asked about. The desk still defaults to simple.
+EVERYTHING ELSE IN THIS PACKAGE (25a–h)
 
-  MED REVIEW TAB: every case sent to a doctor, split into what is out
-  and what has come back, with a way into the whole review.
+  Drop a provider's report anywhere on the Life-expectancy reports card
+  to file it against the case.
 
-  THE EMAIL to a doctor is four lines — what happened, the initials, the
-  death benefit, and a link straight to that case.
+  Investors are quoted COMPOUNDED by default with a switch to simple —
+  the fix for the sheet reading "simple interest" after you set
+  compounded.
 
-  A CASE CAN GO TO SEVERAL DOCTORS. Each gets his own review and neither
-  sees the other's.
+  The Med Review tab: every case sent, out or complete, with a way into
+  the whole review.
 
-  HIS ESTIMATE NO LONGER OVERWRITES THE PROVIDER'S REPORT — it lands
-  beside it as the INTERNAL LE, which investors never see.
+  A four-line email to the doctor: initials, death benefit, and a link
+  straight to the case.
 
-  HIS SCREEN is an estimate, his reasoning, his call, and one button
-  reading "Review complete". He sees the death benefit; he still sees no
-  price and no rate of return.
+  A case can go to several doctors; each answers on his own.
 
-  A SEPARATE RECORDS LINK per review, which is the only folder he is
-  shown. The deal's case folder is never sent to him.
+  His estimate lands as the INTERNAL LE beside the provider's report
+  rather than over it. Investors never see it.
 
-  WITHDRAW takes a case off his screen entirely; DELETE removes the
-  review and its papers from the register.
+  His screen: an estimate, his reasoning, his call, one button. He sees
+  the death benefit, never a price or a rate of return.
 
-  ATTACHED PROVIDER REPORTS sit on the case beside the runs, off the
-  Documents tab, behind the same grant, invisible to investors.
+  A records link per review, which is the only folder he is shown.
+  Withdraw takes a case off his screen; Delete removes the review.
 
-NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
-themselves on boot.
+NOTHING TO RUN. Copy the files in and redeploy. The new table and
+columns apply themselves on boot.

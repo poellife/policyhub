@@ -1064,7 +1064,15 @@ const STAFF_NAV = [
 ];
 
 /** Menu entries an administrator has and nobody else does. */
-const ADMIN_ONLY_NAV = ['carry', 'longevity'];
+const ADMIN_ONLY_NAV = ['carry', 'longevity',
+  /* Medical review, both the tab and the panel on a case. Everything in
+     it is clinical: a named person's diagnoses, the records the office
+     shared, a physician's written opinion of how long they have. A
+     portfolio manager runs a book, and that needs the life expectancy —
+     which is on the deal — rather than the chart behind it. The server
+     refuses the whole family to anybody else, so this keeps the menu
+     honest rather than being the lock. */
+  'med-review'];
 
 /* Policy Valuation is not a rank, it is a grant: an administrator has it,
    and anybody else has it only if one gave it to them by name. So the menu
@@ -11215,6 +11223,10 @@ function leCard(r, { compact = false } = {}) {
  * case is a click, and the line above it says what it would change.
  */
 function medicalPanel(reviews, o) {
+  /* Administrators only, and the server agrees: for anybody else the
+     reviews are not in the payload at all, so there is nothing here to
+     hide. */
+  if (reviews === undefined || state.user?.role !== 'admin') return '';
   const rows = reviews || [];
   const live = rows.filter((r) => ['Requested', 'Opened'].includes(r.status));
   const back = rows.filter((r) => r.status === 'Returned');
@@ -11500,6 +11512,14 @@ const reviewCaseHref = (r) => (r.opportunity_id
 const reviewDone = (r) => r.status === 'Returned';
 
 async function medReviewView() {
+  /* Refused here as well as absent from the menu. The server is the
+     lock; somebody who followed a stale link deserves a sentence rather
+     than a failed request. */
+  if (state.user?.role !== 'admin')
+    return { html: `<div class="page-head"><div><h1>Med Review</h1></div></div>
+      <div class="card"><div class="card-body empty">Medical review is open to
+        administrators and to the reviewing doctor. What a review produces — the life
+        expectancy — is on the deal itself.</div></div>` };
   if (state.params.id) return medReviewDetailView();
   /* `scope=all` is the register rather than the desk's own errands: a
      review sent by a colleague who is on holiday is exactly the one
@@ -11615,6 +11635,7 @@ async function medReviewDetailView() {
               ${mayEdit && r.status !== 'Cancelled'
                 ? `<button class="btn-sm" id="medRecordsUrl">${r.records_url
                     ? 'Change the records link' : 'Add the records link'}</button>
+                   <button class="btn-sm" id="medAddLink">Add a link</button>
                    <button class="btn-sm" id="medAddFile">Add a file</button>` : ''}</div>
             <div class="card-body">
               ${''/* The medical folder, which is the ordinary way records
@@ -11633,6 +11654,23 @@ async function medReviewDetailView() {
                      tells him where to look.</span>`
                 : `<p class="muted" style="margin:0">No records folder on this review yet. He
                    has the medical summary typed on the case and nothing else to read.</p>`}
+              ${''/* Everything that arrived afterwards. A case does not go
+                     across in one piece: the hospital sends two hundred
+                     more pages, a second report turns up, the cardiology
+                     is on somebody else's portal. It goes here rather
+                     than into an email about the email. */}
+              ${(r.links || []).length ? `<h3 class="med-h3">More records</h3>
+                <ul class="med-files">${r.links.map((l) => `<li>
+                  <a class="ext-link" href="${esc(l.url)}" target="_blank"
+                     rel="noopener noreferrer">${esc(l.label || l.url)}
+                     <span aria-hidden="true">&#8599;</span></a>
+                  <span class="muted"> · added ${fmtDate(l.created_at)}${l.added_by_name
+                    ? ` by ${esc(l.added_by_name)}` : ''}</span>
+                  ${mayEdit && r.status !== 'Cancelled'
+                    ? ` <button class="btn-link" data-med-link-rm="${l.id}"
+                          data-name="${esc(l.label || l.url)}">remove</button>` : ''}
+                </li>`).join('')}</ul>` : ''}
+
               ${r.ask ? `<h3 class="med-h3">What we asked</h3>
                 <p class="med-ask-full">${esc(r.ask)}</p>` : ''}
               <h3 class="med-h3">Files uploaded here</h3>
@@ -11643,8 +11681,19 @@ async function medReviewDetailView() {
                     ? ` <button class="btn-link" data-med-rm="${f.id}"
                           data-name="${esc(f.file_name)}">remove</button>` : ''}</li>`).join('')}
                 </ul>`
-                : `<p class="muted" style="margin:0">None. Most cases go across as a folder
-                   link above; this is for the odd single document.</p>`}
+                : `<p class="muted" style="margin:0">None yet.</p>`}
+              ${mayEdit && r.status !== 'Cancelled' ? `
+                <div class="read-drop" id="medDrop" tabindex="0" role="button"
+                     style="margin:14px 0 0" aria-label="Drop more records here">
+                  <div class="read-drop-face">
+                    <strong id="medDropName">Drop more records here, or <button type="button"
+                      class="btn-link" id="medDropBrowse">choose files</button></strong>
+                    <span>Anything that turns up after the first lot — more pages, a second
+                      provider's report, a scan. It goes straight to this reviewer and
+                      nowhere else. Up to 60 MB each.</span>
+                  </div>
+                  <input type="file" id="medDropFiles" multiple hidden>
+                </div>` : ''}
             </div>
           </div>
         </div>
@@ -11690,6 +11739,32 @@ async function medReviewDetailView() {
       </div>`,
     after: () => {
       onClick('#medAddFile', () => openReviewFileDialog(r.id));
+      onClick('#medAddLink', () => openDialog('Another records link', `
+        ${inputField('The link *', 'url', '', 'url',
+          'required placeholder="https://www.dropbox.com/scl/fo/…"')}
+        ${inputField('What it is', 'label', '', 'text',
+          'placeholder="Cardiology, from the hospital portal"')}
+        <div class="dlg-note">
+          It sits under <strong>More records</strong> on his screen, beside the folder. He
+          still has to be given access wherever it lives — the link says where to look, it
+          does not grant anything.
+        </div>
+      `, async (v) => {
+        await api(`/medical-reviews/${r.id}/links`, { method: 'POST', body: {
+          url: v.url, label: v.label } });
+        toast('He can see it');
+      }, 'Add it'));
+      document.querySelectorAll('[data-med-link-rm]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          if (!confirm(`Take "${b.dataset.name}" off this review?`)) return;
+          try {
+            await api(`/medical-reviews/${r.id}/links/${b.dataset.medLinkRm}`,
+              { method: 'DELETE' });
+            toast('Removed');
+            render();
+          } catch (err) { alert(err.message); }
+        }));
+      wireReviewDrop(r.id);
       onClick('#medRecordsUrl', () => openDialog('The records folder', `
         ${inputField('Link to the medical records', 'records_url', r.records_url || '', 'url',
           'placeholder="https://www.dropbox.com/scl/fo/…"')}
@@ -11743,6 +11818,67 @@ async function medReviewDetailView() {
       });
     },
   };
+}
+
+/**
+ * Dropping more records onto a review.
+ *
+ * Several at once, because what arrives late arrives in a batch: the
+ * hospital sends the rest of the chart as eleven PDFs and nobody should
+ * have to open a dialog eleven times.
+ */
+function wireReviewDrop(reviewId) {
+  const zone = $('#medDrop');
+  if (!zone) return;
+  const input = $('#medDropFiles');
+  let busy = false;
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.add('over');
+  }));
+  ['dragleave', 'drop'].forEach((n) => zone.addEventListener(n, (e) => {
+    stop(e); zone.classList.remove('over');
+  }));
+  zone.addEventListener('drop', (e) => send([...(e.dataTransfer?.files || [])]));
+  zone.addEventListener('click', (e) => {
+    if (e.target.closest('button') || e.target === zone
+      || e.target.closest('.read-drop-face')) input.click();
+  });
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', () => send([...input.files]));
+
+  async function send(files) {
+    if (busy || !files.length) return;
+    busy = true;
+    const say = (msg) => { const el = $('#medDropName'); if (el) el.textContent = msg; };
+    try {
+      let n = 0;
+      for (const f of files) {
+        say(`Sending ${f.name}${files.length > 1 ? ` (${n + 1} of ${files.length})` : ''}…`);
+        if (f.size > 60 * 1024 * 1024)
+          throw new Error(`${f.name} is ${fmtBytes(f.size)}. The limit is 60 MB each.`);
+        const fd = new FormData();
+        fd.append('file', f);
+        const res = await fetch(`/api/medical-reviews/${reviewId}/files`,
+          { method: 'POST', body: fd, credentials: 'same-origin' });
+        if (!res.ok) {
+          let msg = 'Upload failed.';
+          try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+          throw new Error(msg);
+        }
+        n += 1;
+      }
+      toast(n === 1 ? 'Sent to the reviewer' : `${n} files sent to the reviewer`);
+      render();
+    } catch (err) {
+      alert(err.message);
+      busy = false;
+      say('Drop more records here');
+      render();
+    }
+  }
 }
 
 /** Putting a file in front of the doctor. One at a time, like the cabinet. */
@@ -11882,6 +12018,10 @@ async function medicalCaseView() {
                   <dd><a class="ext-link" href="${esc(r.records_url)}" target="_blank"
                          rel="noopener noreferrer">Open the folder
                          <span aria-hidden="true">&#8599;</span></a></dd>` : ''}
+              ${(r.links || []).length ? `<dt>More records</dt>
+                  <dd>${r.links.map((l) => `<a class="ext-link" href="${esc(l.url)}"
+                         target="_blank" rel="noopener noreferrer">${esc(l.label || 'Another folder')}
+                         <span aria-hidden="true">&#8599;</span></a>`).join('<br>')}</dd>` : ''}
               </dl>
               ${s.impairments ? `<h3 class="med-h3">What the file says</h3>
                 <ul class="rpt-bullets">${String(s.impairments).split('\n')
@@ -11905,7 +12045,7 @@ async function medicalCaseView() {
                 <li><a href="/api/medical-reviews/${r.id}/files/${f.id}">${esc(f.file_name)}</a>
                   <span class="muted"> · ${fmtBytes(f.byte_size)}</span></li>`).join('')}</ul>`
                 : ''}
-              ${!r.records_url && !(r.files || []).length
+              ${!r.records_url && !(r.files || []).length && !(r.links || []).length
                 ? `<p class="muted">No records have reached this screen yet. If you were told
                    some were coming, telephone the office.</p>` : ''}
               <div class="muted" style="font-size:12px;margin-top:10px">

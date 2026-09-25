@@ -1529,6 +1529,27 @@ CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id,
  * wrong person ends up inside the wrong folder. */
 ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS records_url TEXT;
 
+/* More records, arriving after the first lot.
+ *
+ * A case does not go across in one piece. The office shares a folder,
+ * the doctor reads it, and then the hospital sends two hundred more
+ * pages, or a second provider's report turns up, or the cardiology is
+ * in a different drive. `records_url` holds the first folder; this
+ * holds everything that follows, each with a word about what it is.
+ *
+ * Links rather than only files because that is how records actually
+ * move between offices -- a shared folder, not an attachment -- and a
+ * place that takes only uploads sends people back to email. */
+CREATE TABLE IF NOT EXISTS medical_review_links (
+  id          SERIAL PRIMARY KEY,
+  review_id   INTEGER NOT NULL REFERENCES medical_reviews(id) ON DELETE CASCADE,
+  url         TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  added_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_medreview_links ON medical_review_links (review_id);
+
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS medical_review_id INTEGER
   REFERENCES medical_reviews(id) ON DELETE CASCADE;
 

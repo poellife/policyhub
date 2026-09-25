@@ -1441,6 +1441,28 @@ const blockMedical = (req, res, next) => (isMedical(req)
   ? res.status(403).json({ error: 'Not available on a medical review account' })
   : next());
 
+/**
+ * Medical review is the administrators' and the doctor's, and nobody
+ * else's.
+ *
+ * Everything in this family carries clinical material: an insured's
+ * name against a diagnosis, the records the office shared, a
+ * physician's written opinion of how long somebody has. A portfolio
+ * manager runs a book — that work needs the life expectancy, which is
+ * on the deal, and not the chart behind it.
+ *
+ * Enforced here rather than route by route, for the same reason the
+ * reviewer's allowlist is: a route added next month is covered by
+ * default, and the one it was forgotten on would be the one carrying a
+ * diagnosis.
+ */
+router.use((req, res, next) => {
+  if (!/^\/medical-reviews(\/|$)/.test(req.path)) return next();
+  if (isMedical(req) || req.user?.role === 'admin') return next();
+  return res.status(403).json({
+    error: 'Medical review is open to administrators and to the reviewing doctor.' });
+});
+
 /* ------------------------------------------------------------------ *
  * de-identification for investors
  * ------------------------------------------------------------------ */
@@ -3080,11 +3102,11 @@ async function loadOpportunity(req, id) {
      grant as the runs beside them: both are readings of a medical file. */
   o.le_documents = scopeId(req) === null && req.user?.canLe
     ? await leDocsFor('opportunity', id) : undefined;
-  /* Staff only, and not gated on `can_le`: a review is a colleague's
-     written opinion on the case, not a run of the report service, and
-     whoever works the deal needs to see that one is outstanding even if
-     they cannot spend money on records themselves. */
-  o.medical_reviews = scopeId(req) === null
+  /* Administrators only, like the rest of the family. A review is a
+     physician's written opinion about a named person's health; running
+     a book does not require reading one, and the life expectancy it
+     produces is on the deal itself for everybody who needs it. */
+  o.medical_reviews = scopeId(req) === null && req.user?.role === 'admin'
     ? await medicalReviewsFor('opportunity', id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
@@ -6108,6 +6130,15 @@ async function reviewSubject(row) {
  * hundred megabytes of scanned chart into memory to draw a table of
  * file names.
  */
+/** The extra records links on one review, in the order they arrived. */
+async function reviewLinks(id) {
+  const { rows } = await q(
+    `SELECT l.id, l.url, l.label, l.created_at, u.full_name AS added_by_name
+       FROM medical_review_links l LEFT JOIN users u ON u.id = l.added_by
+      WHERE l.review_id = $1 ORDER BY l.created_at, l.id`, [id]);
+  return rows;
+}
+
 async function reviewFiles(id) {
   const { rows } = await q(
     `SELECT d.id, d.file_name, d.mime_type, d.byte_size, d.created_at,
@@ -6156,6 +6187,9 @@ async function reviewPacket(row) {
        he was asked to read; everything else on his screen is somebody's
        summary of it. */
     records_url: row.records_url || null,
+    /* Whatever arrived afterwards: a second folder, a hospital's own
+       portal, the cardiology somebody had to send separately. */
+    links: await reviewLinks(row.id),
     files: await reviewFiles(row.id),
     /* A survivorship case has a second person in the same file. Said, so
        he knows which chart he is being asked about, and not who the
@@ -6256,7 +6290,7 @@ router.get('/medical-reviews/:id', blockInvestors, wrap(async (req, res) => {
      we actually send him?" is answered on the screen rather than from
      somebody's memory of which PDF they attached. */
   if (!isMedical(req)) return res.json({ ...row, files: await reviewFiles(row.id),
-    subject: await reviewSubject(row) });
+    links: await reviewLinks(row.id), subject: await reviewSubject(row) });
   /* Reading a chart is worth a line in the log even when the person
      reading it is the person we asked to. */
   if (row.status === 'Requested')
@@ -6665,6 +6699,46 @@ router.get('/medical-reviews/:id/files/:docId', blockInvestors, wrap(async (req,
     `attachment; filename="${safeName(doc.file_name).replace(/"/g, '')}"`);
   res.send(doc.content);
 }));
+
+/**
+ * More records, after the first lot.
+ *
+ * The same `url` guard as everywhere else -- http and https only, so a
+ * stored `javascript:` address cannot run in his session -- and a label
+ * beside it, because "the cardiology, from the hospital's portal" is
+ * the difference between a second link and a mystery.
+ */
+router.post('/medical-reviews/:id/links', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    if (row.status === 'Cancelled')
+      return res.status(409).json({ error: 'That request was withdrawn.' });
+    const link = url(req.body.url);
+    if (!link)
+      return res.status(400).json({
+        error: 'That does not read as a link. Paste the address — it has to start http:// '
+          + 'or https://.' });
+    await q(
+      `INSERT INTO medical_review_links (review_id, url, label, added_by)
+       VALUES ($1,$2,$3,$4)`,
+      [row.id, link, str(req.body.label).slice(0, 200), req.user.uid]);
+    await audit(req.user.uid, 'medical_review', row.id, 'update',
+      'added another records link for the reviewer');
+    res.status(201).json({ links: await reviewLinks(row.id) });
+  }));
+
+router.delete('/medical-reviews/:id/links/:linkId', blockInvestors, blockMedical, canEdit,
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    const { rows } = await q(
+      `DELETE FROM medical_review_links WHERE id = $1 AND review_id = $2 RETURNING url`,
+      [int(req.params.linkId), row.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'That link is not on this review' });
+    await audit(req.user.uid, 'medical_review', row.id, 'update', 'removed a records link');
+    res.json({ ok: true, links: await reviewLinks(row.id) });
+  }));
 
 /** Taking one back off. The desk's, not his: he reads them, he does not file them. */
 router.delete('/medical-reviews/:id/files/:docId', blockInvestors, blockMedical, canEdit,
