@@ -7401,6 +7401,31 @@ function maturityColumns(m, investorView) {
       cls: 'num', value: (r) => r.compound_rate,
       cell: (r) => `<span class="muted" title="Internal rate of return on the same dated cash flows">${
         fmtRate(r.compound_rate)}</span>` }]),
+    /* What the house takes on this case, and what the investors are left
+       with. Two columns rather than one, because "20%" and "$482,000"
+       answer different questions and the second is the one anybody
+       argues about.
+
+       Absent on an investor's own register: their figures are already
+       net of it, and the deduction is between them and the operating
+       agreement rather than a line on their statement. */
+    ...(investorView ? [] : [
+      { key: 'commission', header: 'Commission', cls: 'num',
+        value: (r) => Number(r.commission) || 0,
+        cell: (r) => {
+          const pct = r.commission_pct == null ? null : Number(r.commission_pct);
+          const eff = Number(r.effective_pct) || 0;
+          const amount = Number(r.commission) || 0;
+          return `${amount ? fmtExact(amount) : dash}
+            <div class="secondary">${eff ? `${fmtNum(eff)}% of profit` : 'none'}${
+              pct != null ? ' · on this case' : ''}</div>`;
+        } },
+      { key: 'net_rate', header: 'Net to investors · simple', cls: 'num',
+        value: (r) => r.net_rate,
+        cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
+          fmtRate(r.net_rate)}</span>
+          <div class="secondary">${fmtRate(r.net_compound_rate)} compounded</div>` },
+    ]),
   ];
 }
 
@@ -7683,12 +7708,19 @@ async function maturitiesView() {
           ${matCols.map((c) => `<th class="sortable ${c.cls || ''}" data-mat-key="${c.key}">${
             c.header}${state.matSort.key === c.key
               ? `<span class="arrow">${state.matSort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`).join('')}
-          ${canEditData() ? '<th></th>' : ''}
+          <th></th>
         </tr></thead>
         <tbody>${rows.map((r) => `<tr class="clickable" data-id="${r.id}">${
           matCols.map((c) => `<td class="${c.cls || ''}">${c.cell(r)}</td>`).join('')}${
-          canEditData() ? `<td><button class="btn-sm" data-proceeds="${r.id}"
-            >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button></td>` : ''}
+          `<td style="white-space:nowrap">${''/* Anybody who can see the row can
+              take the sheet: an investor's is their own share, net, and
+              without the commission on it. */}
+            <a class="btn-sm" href="/api/policies/${r.id}/maturity.pdf"
+               title="A one-page summary of this case">Sheet</a>${
+            canEditData() ? ` <button class="btn-sm" data-proceeds="${r.id}"
+              >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button>` : ''}${
+            isAdminUser() ? ` <button class="btn-sm" data-commission="${r.id}"
+              >Commission</button>` : ''}</td>`}
         </tr>`).join('')}</tbody>
         <tfoot><tr>${(() => {
           /* Built from the same column list as the head, so a column added to
@@ -7697,6 +7729,7 @@ async function maturitiesView() {
             total_death_benefit: t.total_death_benefit, total_invested: t.total_invested,
             total_proceeds: t.total_proceeds, gain,
             rate: bookRate(m.portfolio),
+            commission: rows.reduce((x, r) => x + (Number(r.commission) || 0), 0),
           };
           const first = matCols.findIndex((c) => c.total || c.key === 'gain'
             || c.key === 'rate');
@@ -7705,10 +7738,18 @@ async function maturitiesView() {
               ${rows.length === 1 ? 'policy' : 'policies'}</td>`;
             if (i < first) return '';
             if (c.key === 'rate') return `<td class="num">${fmtRate(totals.rate)}</td>`;
+            /* The commission column totals as money; the net-rate column
+               has no meaningful total — a book rate is not the sum of
+               per-policy rates — so it stays blank rather than lying. */
+            if (c.key === 'commission')
+              return `<td class="num">${fmtExact(totals.commission)}</td>`;
+            if (c.key === 'net_rate') return '<td></td>';
             const v = totals[c.total || c.key];
             return v === null || v === undefined
               ? '<td></td>' : `<td class="num">${fmtExact(v)}</td>`;
-          }).join('') + (canEditData() ? '<td></td>' : '');
+            /* The actions column is always there now — everybody can take
+               the sheet — so the foot always closes with its blank. */
+          }).join('') + '<td></td>';
         })()}</tr></tfoot>
       </table></div>
     </div>
@@ -7746,6 +7787,11 @@ async function maturitiesView() {
       document.querySelectorAll('[data-proceeds]').forEach((b) =>
         b.addEventListener('click', () =>
           openProceedsDialog(rows.find((r) => r.id === Number(b.dataset.proceeds)))));
+      document.querySelectorAll('[data-commission]').forEach((b) =>
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          openCommissionDialog(rows.find((r) => r.id === Number(b.dataset.commission)));
+        }));
       document.querySelectorAll('th[data-mat-key]').forEach((th) =>
         th.addEventListener('click', () => {
           const key = th.dataset.matKey;
@@ -7801,6 +7847,66 @@ function openProceedsDialog(r) {
     } });
     toast(v.proceeds_amount === '' ? 'Claim marked outstanding' : 'Proceeds recorded');
   }, 'Save');
+}
+
+/**
+ * The commission on one matured policy.
+ *
+ * Administrators only. It is a percentage of the PROFIT — everything
+ * that came back less everything that went in, premiums included — and
+ * the dialog says what that comes to in money before it is saved,
+ * because a percentage of a number nobody has in front of them is how
+ * these get typed wrong.
+ */
+function openCommissionDialog(r) {
+  if (!r) return;
+  const profit = Number(r.gross_profit) || 0;
+  const standing = Number(r.effective_pct) || 0;
+  const own = r.commission_pct == null ? '' : String(Number(r.commission_pct));
+  const dlg = openDialog(`Commission — ${r.policy_number}`, `
+    <div class="field"><span class="muted" style="font-size:12px">
+      ${esc(r.carrier_name || '')} · matured ${fmtDate(r.matured_on)} ·
+      profit on this case ${fmtExact(profit)}${r.proceeds_amount == null
+        ? ' <strong>(the claim is still outstanding, so this is what it would be)</strong>' : ''}
+    </span></div>
+    <div class="field-row">
+      <div class="field"><label>Commission, % of the profit</label>
+        <input type="number" name="commission_pct" min="0" max="100" step="0.01"
+          value="${esc(own)}" placeholder="${fmtNum(standing)}">
+        <span class="muted" id="commWorks" style="font-size:12px"></span></div>
+      <div class="field"></div>
+    </div>
+    <div class="dlg-note">
+      Taken off the profit after costs — the purchase price and every premium are
+      already out — and never off the gross. A policy that lost money owes nothing.
+      <br><br>
+      Leave it <strong>empty</strong> and the owner entity's own rate stands${
+        standing ? `, which on this policy is ${fmtNum(standing)}%` : ''}. Enter
+      <strong>0</strong> to charge nothing on this case in particular. Whatever is set
+      here comes off the final payment, so the investors' return on this policy moves
+      with it.
+    </div>
+  `, async (v) => {
+    await api(`/policies/${r.id}/commission`, { method: 'PUT', body: {
+      commission_pct: v.commission_pct === '' ? null : v.commission_pct } });
+    toast(v.commission_pct === '' ? 'The entity’s rate stands' : 'Commission saved');
+  }, 'Save');
+
+  /* Said in money as it is typed. The percentage is the input; the
+     figure underneath is the thing being decided. */
+  const box = dlg.querySelector('input[name=commission_pct]');
+  const works = dlg.querySelector('#commWorks');
+  const say = () => {
+    const pct = box.value === '' ? standing : Number(box.value);
+    const amount = profit > 0 && Number.isFinite(pct) ? profit * (pct / 100) : 0;
+    works.innerHTML = profit <= 0
+      ? 'No profit on this case, so nothing is charged.'
+      : `${fmtExact(amount)} of ${fmtExact(profit)}${box.value === ''
+        ? ' — the entity’s rate' : ''} · investors keep ${fmtExact(profit - amount)}`;
+  };
+  box.addEventListener('input', say);
+  say();
+  return dlg;
 }
 
 /* ----------------------------- insureds ------------------------------ */

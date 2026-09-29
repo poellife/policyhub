@@ -14,6 +14,7 @@ import { initialsOf } from '../public/initials.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
+import { maturityPdf } from './maturity-pdf.js';
 import { opportunityEmail } from './opportunity-email.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
@@ -159,12 +160,18 @@ const shareOf = (policyCol, paramIndex) =>
    of an operating agreement and not every entity has one — some books are
    managed for a fee instead — so the rate belongs to the entity. A policy in
    no entity has no agreement to charge under and carries none. */
-const carryRate = (fundCol = 'pl.fund_id') =>
-  `COALESCE((SELECT fx.carry_pct FROM funds fx WHERE fx.id = ${fundCol}), 0)`;
+/* The policy's own commission first, then the entity's standing rate.
+   A commission set on a case is the exception that overrides the
+   agreement, and 0 on a policy is a real answer -- "nothing on this
+   one" -- which is why the fallback is COALESCE on NULL rather than on
+   a falsy value. */
+const carryRate = (fundCol = 'pl.fund_id', policyCol = 'pl.id') =>
+  `COALESCE((SELECT px.commission_pct FROM policies px WHERE px.id = ${policyCol}),
+            (SELECT fx.carry_pct FROM funds fx WHERE fx.id = ${fundCol}), 0)`;
 
-const afterCarry = (gross, basis, scopeParam, fundCol = 'pl.fund_id') => `
+const afterCarry = (gross, basis, scopeParam, fundCol = 'pl.fund_id', policyCol = 'pl.id') => `
   CASE WHEN $${scopeParam}::int IS NULL THEN (${gross})
-       ELSE (${gross}) - (${carryRate(fundCol)} / 100.0)
+       ELSE (${gross}) - (${carryRate(fundCol, policyCol)} / 100.0)
             * GREATEST(0, COALESCE(${gross}, 0) - COALESCE(${basis}, 0))
   END`;
 
@@ -7512,6 +7519,11 @@ router.get('/maturities', wrap(async (req, res) => {
               pl.proceeds_received_on,
               pl.face_amount, ${netBenefit}       AS death_benefit,
               pl.total_invested, pl.total_acquisition, pl.total_premiums,
+              /* Staff only, and absent rather than nulled for an investor:
+                 what the house takes is not on their register, and their
+                 figures above are already net of it. */
+              CASE WHEN $1::int IS NULL THEN pl.commission_pct END AS commission_pct,
+              CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
               ${shareOf('pl.id', 1)}              AS my_pct,
               (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
                                                    AS lives_count
@@ -7534,10 +7546,35 @@ router.get('/maturities', wrap(async (req, res) => {
 
   // Return on each matured policy, and one rate across all of them together.
   const { policies, byPolicy } = await portfolioFlows(req, { onlyMatured: true, fund });
-  const withReturn = rows.rows.map((r) => {
-    const a = analyzeFlows(byPolicy.get(r.id) || []);
+  const withReturn = rows.rows.map((row) => {
+    /* Absent rather than null on an investor's register. The SQL can
+       only blank the column, and a key called `commission_pct` sitting
+       in their payload — even empty — is the arrangement announcing
+       itself on the one screen it has no business on. */
+    const r = { ...row };
+    if (scope !== null) { delete r.commission_pct; delete r.effective_pct; }
+    const flows = byPolicy.get(r.id) || [];
+    const a = analyzeFlows(flows);
+    /* For staff these flows are GROSS -- `portfolioFlows` only nets an
+       investor's -- so the investor's own answer has to be solved here.
+       Solved rather than estimated: the commission comes off the final
+       inflow, on its own date, which is what the rate is sensitive to.
+       A percentage subtracted from the gross rate would be a different
+       number and a wrong one. */
+    const pct = scope === null ? Number(row.effective_pct) || 0 : 0;
+    const net = pct ? analyzeFlows(flowsAfterCarry(flows, pct)) : a;
     return { ...r, rate: a.rate, rate_days: a.days, rate_short: a.short_period,
              rate_ambiguous: a.ambiguous, multiple: a.multiple,
+             ...(scope === null ? {
+               commission: pct ? carryOn(a.returned, a.invested, pct) : 0,
+               gross_profit: a.profit,
+               /* What the investor is left with, and the rate they see.
+                  Equal to the gross pair when nothing is charged, which
+                  is the honest answer rather than a blank. */
+               net_profit: a.profit - (pct ? carryOn(a.returned, a.invested, pct) : 0),
+               net_rate: net.rate,
+               net_compound_rate: net.compound_rate,
+             } : {}),
              /* Both, always. Simple interest is the headline because it is
                 what the office quotes; the compounded rate is what an
                 investor comparing this against a bond will reach for, and
@@ -7608,6 +7645,168 @@ router.get('/maturities', wrap(async (req, res) => {
     scopedToInvestor: scope !== null,
   });
 }));
+
+/**
+ * The maturity one-pager: what a closed case looks like on one sheet.
+ *
+ * Assembled here and drawn in `maturity-pdf.js`, from this policy's own
+ * ledger rather than from anything a screen posted — so the paper and
+ * the register cannot drift.
+ *
+ * An investor may take their own: the figures are their share and
+ * already net of the managing partner's, and the commission itself is
+ * left off, which is exactly how every other screen treats it.
+ */
+router.get('/policies/:id/maturity.pdf', inPolicyScope('id'), wrap(async (req, res) => {
+  const scope = scopeId(req);
+  const { rows } = await q(
+    `SELECT pl.*, ${carryRate()} AS carry_pct, ${shareOf('pl.id', 1)} AS my_pct,
+            /* terminalFlow reads a column called "benefit", and a
+               SELECT of pl.* has no such column -- without this the
+               claim never enters the flows and a paid case reads as a
+               total loss. */
+            COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
+            i.first_name, i.last_name, i.dob, i.date_of_death,
+            i.le_months, i.le_provider
+       FROM policy_latest pl
+       LEFT JOIN insureds i ON i.id = pl.insured_id
+      WHERE pl.id = $2`, [scope, req.params.id]);
+  const p = rows[0];
+  if (!p) return res.status(404).json({ error: 'Policy not found' });
+  if (p.status !== 'Matured')
+    return res.status(400).json({
+      error: 'This sheet is for a matured policy. Record the date of death first.' });
+
+  const { rows: txns } = await q(
+    `SELECT txn_date, txn_type, amount, remarks FROM transactions
+      WHERE policy_id = $1 ORDER BY txn_date, id`, [req.params.id]);
+
+  const factor = scope === null ? 1 : (Number(p.my_pct) || 0) / 100;
+  const asOf = today();
+  const base = ledgerFlows(txns, factor);
+  const lastOut = base.reduce((d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
+  const terminal = terminalFlow(p, asOf, lastOut);
+  const gross = terminal ? [...base, { ...terminal, amount: terminal.amount * factor }] : base;
+
+  /* The commission, and therefore the two pairs of rates. For staff the
+     flows are gross and the net pair is solved here; an investor's are
+     already net and the "gross" pair is not theirs to see. */
+  const pct = Number(p.carry_pct) || 0;
+  const g = analyzeFlows(gross);
+  const netFlows = pct ? flowsAfterCarry(gross, pct) : gross;
+  const n = pct ? analyzeFlows(netFlows) : g;
+  const commission = scope === null && pct ? carryOn(g.returned, g.invested, pct) : 0;
+
+  const sum = (types) => txns
+    .filter((t) => types.includes(t.txn_type))
+    .reduce((x, t) => x + Number(t.amount || 0) * factor, 0);
+  const premiumCount = txns.filter((t) => t.txn_type === 'Premium Payment').length;
+  const acquired = txns.find((t) => t.txn_type === 'Acquisition Cost')?.txn_date
+    || p.acquisition_date || null;
+
+  const ageAt = (dob, on) => {
+    if (!dob || !on) return null;
+    const b = new Date(`${String(dob).slice(0, 10)}T00:00:00Z`);
+    const d = new Date(`${String(on).slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(b.getTime()) || Number.isNaN(d.getTime())) return null;
+    let age = d.getUTCFullYear() - b.getUTCFullYear();
+    if (d.getUTCMonth() < b.getUTCMonth()
+      || (d.getUTCMonth() === b.getUTCMonth() && d.getUTCDate() < b.getUTCDate())) age -= 1;
+    return age >= 0 && age < 130 ? age : null;
+  };
+
+  const name = String(p.display_name
+    || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'The insured');
+
+  const sheet = {
+    policy_number: p.policy_number,
+    carrier_name: p.carrier_name,
+    product_type: p.product_type,
+    fund_code: scope === null ? p.fund_code : null,
+    /* The name on the office's copy; initials on an investor's, the same
+       rule the deal sheet follows. */
+    insured: scope === null ? name
+      : `${initialsOf(p.first_name, p.last_name) || 'The insured'}`,
+    for_investor: scope !== null,
+    my_pct: Number(p.my_pct) || 0,
+    acquired_on: acquired,
+    matured_on: p.matured_on,
+    proceeds_received_on: p.proceeds_received_on,
+    settled: p.proceeds_amount != null,
+    days: g.days,
+    age_at_death: ageAt(p.dob, p.matured_on),
+    le_months: p.le_months || null,
+    acquisition_cost: sum(['Acquisition Cost']),
+    premiums_paid: sum(['Premium Payment']),
+    premium_count: premiumCount,
+    other_costs: sum(['Fee', 'Servicing', 'Commission']),
+    other_income: sum(['Withdrawal']),
+    total_invested: g.invested,
+    death_benefit: Number(p.death_benefit || p.face_amount || 0) * factor
+      - (scope === null ? 0 : carryOn(
+        Number(p.death_benefit || p.face_amount || 0) * factor, g.invested, pct)),
+    proceeds_amount: p.proceeds_amount == null ? null
+      : Number(p.proceeds_amount) * factor
+        - (scope === null ? 0
+          : carryOn(Number(p.proceeds_amount) * factor, g.invested, pct)),
+    returned: (scope === null ? g : n).returned,
+    gross_profit: g.profit,
+    commission,
+    commission_pct: commission ? pct : 0,
+    net_profit: g.profit - commission,
+    multiple: (scope === null ? g : n).multiple,
+    /* The office's copy carries both pairs; an investor's carries one,
+       which is theirs. */
+    rate: scope === null ? g.rate : null,
+    compound_rate: scope === null ? g.compound_rate : null,
+    net_rate: scope === null ? n.rate : g.rate,
+    net_compound_rate: scope === null ? n.compound_rate : g.compound_rate,
+    flows: (scope === null ? gross : netFlows).map((f) => ({
+      date: f.date,
+      what: f.label || (Number(f.amount) < 0 ? 'Paid out' : 'Received'),
+      amount: f.amount,
+    })),
+    as_of: asOf,
+    prepared_by: req.user?.name || null,
+  };
+
+  await audit(req.user.uid, 'policy', Number(req.params.id), 'read',
+    `downloaded the maturity summary · ${describeOrigin(req)}`);
+  const slug = String(p.policy_number || `policy-${p.id}`)
+    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${slug}-maturity.pdf"`);
+  res.send(maturityPdf(sheet));
+}));
+
+/**
+ * The commission on one policy.
+ *
+ * A percentage of the profit after costs, charged on this case instead
+ * of the entity's standing rate. Administrators only: it decides what
+ * the investors on that policy are paid, and it is not a servicing
+ * detail.
+ *
+ * An empty value CLEARS it, which is not the same as zero. Cleared
+ * means "the entity's agreement stands"; zero means "nothing is charged
+ * on this one", and a book of record has to be able to say both.
+ */
+router.put('/policies/:id/commission', blockInvestors, blockMedical, requireRole('admin'),
+  inPolicyScope('id'), wrap(async (req, res) => {
+    const given = req.body.commission_pct;
+    const clear = given === null || given === undefined || String(given).trim() === '';
+    const pct = clear ? null : num(given);
+    if (!clear && (pct === null || pct < 0 || pct > 100))
+      return res.status(400).json({ error: 'A commission between 0 and 100 per cent.' });
+    const { rows } = await q(
+      `UPDATE policies SET commission_pct = $1::numeric, updated_at = now()
+        WHERE id = $2 RETURNING policy_number, commission_pct`, [pct, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
+    await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
+      clear ? `${rows[0].policy_number} · commission cleared — the entity's rate stands`
+        : `${rows[0].policy_number} · commission set to ${pct}% of the profit`);
+    res.json(rows[0]);
+  }));
 
 /** Record (or clear) what the carrier actually paid on a matured policy. */
 router.put('/policies/:id/proceeds', canEdit, inPolicyScope('id'), wrap(async (req, res) => {

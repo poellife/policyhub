@@ -277,6 +277,28 @@ CREATE INDEX IF NOT EXISTS idx_policies_matured ON policies (matured_on);
 -- ---------------------------------------------------------------------
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
 
+/* The commission on THIS policy, as a percentage of the profit after
+ * costs.
+ *
+ * The entity already carries a rate — `funds.carry_pct` — and that is
+ * the standing arrangement. This is the exception: a case brought in on
+ * different terms, a fee agreed for one trade. Null means there is no
+ * exception and the entity's rate stands, which is why it is nullable
+ * rather than defaulted to zero: zero is a deliberate "no commission on
+ * this one", and it must be possible to say that.
+ *
+ * The arithmetic is the same either way and lives in one place
+ * (`carryOn` in public/irr.js): profit is everything that came back
+ * less everything that went in, premiums included, and the percentage
+ * is taken off that, never off the gross. A policy that lost money owes
+ * nothing.
+ *
+ * ABOVE THE VIEW, DELIBERATELY. `policy_latest` selects policies.*, and
+ * a column added below it reaches the table at once and the view only
+ * on the next restart — which is a bug that fixes itself overnight and
+ * is therefore very hard to believe in. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
+
 -- The rule, as a function, so the trigger and any report agree by construction.
 CREATE OR REPLACE FUNCTION policy_maturity_date(p_id INTEGER)
 RETURNS DATE LANGUAGE sql STABLE AS $$
