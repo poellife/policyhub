@@ -7522,6 +7522,11 @@ router.get('/maturities', wrap(async (req, res) => {
               /* Staff only, and absent rather than nulled for an investor:
                  what the house takes is not on their register, and their
                  figures above are already net of it. */
+              /* Administrators only — see the strip below. Selected for
+                 every staff caller and removed in JS rather than
+                 branched on here, because the role is not a query
+                 parameter and a second SQL path is a second thing to
+                 keep right. */
               CASE WHEN $1::int IS NULL THEN pl.commission_pct END AS commission_pct,
               CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
               CASE WHEN $1::int IS NULL THEN pl.sheet_show_ledger END
@@ -7547,14 +7552,18 @@ router.get('/maturities', wrap(async (req, res) => {
   ]);
 
   // Return on each matured policy, and one rate across all of them together.
+  const admin = req.user?.role === 'admin';
   const { policies, byPolicy } = await portfolioFlows(req, { onlyMatured: true, fund });
   const withReturn = rows.rows.map((row) => {
-    /* Absent rather than null on an investor's register. The SQL can
-       only blank the column, and a key called `commission_pct` sitting
-       in their payload — even empty — is the arrangement announcing
-       itself on the one screen it has no business on. */
+    /* WHAT THE HOUSE TAKES IS THE ADMINISTRATORS'.
+       Absent rather than null, and absent for a manager as much as for
+       an investor: a portfolio manager runs a book, and what the firm
+       earns out of it is not part of that work. A key called
+       `commission_pct` sitting in the payload — even empty — is the
+       arrangement announcing itself on a screen it has no business
+       on. */
     const r = { ...row };
-    if (scope !== null) {
+    if (!admin) {
       delete r.commission_pct; delete r.effective_pct; delete r.sheet_show_ledger;
     }
     const flows = byPolicy.get(r.id) || [];
@@ -7565,11 +7574,11 @@ router.get('/maturities', wrap(async (req, res) => {
        inflow, on its own date, which is what the rate is sensitive to.
        A percentage subtracted from the gross rate would be a different
        number and a wrong one. */
-    const pct = scope === null ? Number(row.effective_pct) || 0 : 0;
+    const pct = admin ? Number(row.effective_pct) || 0 : 0;
     const net = pct ? analyzeFlows(flowsAfterCarry(flows, pct)) : a;
     return { ...r, rate: a.rate, rate_days: a.days, rate_short: a.short_period,
              rate_ambiguous: a.ambiguous, multiple: a.multiple,
-             ...(scope === null ? {
+             ...(admin ? {
                commission: pct ? carryOn(a.returned, a.invested, pct) : 0,
                gross_profit: a.profit,
                /* What the investor is left with, and the rate they see.

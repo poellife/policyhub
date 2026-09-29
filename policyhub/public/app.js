@@ -7476,10 +7476,11 @@ function maturityColumns(m, investorView) {
        answer different questions and the second is the one anybody
        argues about.
 
-       Absent on an investor's own register: their figures are already
-       net of it, and the deduction is between them and the operating
-       agreement rather than a line on their statement. */
-    ...(investorView ? [] : [
+       ADMINISTRATORS ONLY, and the server agrees — for anybody else the
+       figures are not in the payload at all. An investor's own register
+       is already net of the deduction, and a manager runs a book
+       without needing to read what the firm earns out of it. */
+    ...(isAdminUser() ? [
       { key: 'commission', header: 'Commission', cls: 'num',
         value: (r) => Number(r.commission) || 0,
         cell: (r) => {
@@ -7498,7 +7499,7 @@ function maturityColumns(m, investorView) {
         cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
           fmtRate(r.net_compound_rate)}</span>${showSimpleToo()
           ? `<div class="secondary">${fmtRate(r.net_rate)} simple</div>` : ''}` },
-    ]),
+    ] : []),
   ];
 }
 

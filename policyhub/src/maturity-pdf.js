@@ -235,28 +235,38 @@ export function maturityPdf(m) {
   if (m.show_flows && (m.flows || []).length) {
     doc.space(8);
     rule(doc);
-    label(doc, 'The cash, as it moved');
+    label(doc, 'Transactions');
     const cols = [
       { x: 0, w: 90, head: 'Date' },
       { x: 95, w: 250, head: 'What' },
       { x: WIDTH - 120, w: 120, head: 'Amount', align: 'right' },
     ];
-    doc.reserve(2);
-    for (const c of cols) at(doc, c.head, c.x,
-      { style: 'sansBold', size: 6.5, align: c.align || 'left', width: c.w });
-    doc.y -= 11;
-    rule(doc, { gray: 0.85, gap: 2 });
-    for (const f of m.flows.slice(0, 26)) {
-      doc.reserve(1);
+    const head = () => {
+      doc.reserve(2);
+      for (const c of cols) at(doc, c.head, c.x,
+        { style: 'sansBold', size: 6.5, align: c.align || 'left', width: c.w });
+      doc.y -= 11;
+      rule(doc, { gray: 0.85, gap: 2 });
+    };
+    head();
+    /* EVERY ENTRY.
+     *
+     * This used to stop at twenty-six and print "N earlier entries are
+     * not shown", which was wrong twice over: the box above it says
+     * "list every transaction", and the ones being dropped were the
+     * LATEST, not the earliest -- `slice(0, 26)` keeps the oldest. A
+     * schedule that silently omits the most recent premiums is worse
+     * than no schedule.
+     *
+     * It runs onto a second page when it has to, with the column heads
+     * repeated, which is the difference between a table that survives
+     * a page fold and one that does not. */
+    for (const f of m.flows) {
+      if (doc.y - 14 < MARGIN) { doc.newPage(); head(); }
       at(doc, shortDate(f.date), 0, { size: 8.5 });
       at(doc, String(f.what || '').slice(0, 60), 95, { size: 8.5 });
       at(doc, money(f.amount), WIDTH - 120, { size: 8.5, align: 'right', width: 120 });
       doc.y -= 12;
-    }
-    if (m.flows.length > 26) {
-      doc.reserve(1);
-      note(doc, `${m.flows.length - 26} earlier entries are not shown · the ledger on `
-        + 'the policy carries them all', { style: 'italic', gap: 0 });
     }
   }
 

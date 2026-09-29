@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-29g
+PolicyHub — build 2026-09-29i
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -11,40 +11,41 @@ FILES IN THIS PACKAGE
   src/maturity-pdf.js is new — copy it in, or the maturity sheet will
   not load. Everything since 2026-09-17c is in here.
 
-THE MATURITY ONE-PAGER, AS IT NOW READS
+THE TRUNCATED LEDGER — A REAL BUG, NOW FIXED
 
-  The case and its dates · what it cost · what came back · the profit
-  and the multiple · ONE rate, the compounded IRR · and the ledger if
-  the box for it is ticked.
+  The transaction table stopped at 26 rows and printed "N earlier
+  entries are not shown". It was wrong twice: the box above it says
+  "list every transaction", and the entries being dropped were the
+  LATEST, not the earliest — it kept the first 26. On a case with more
+  than 26 entries the sheet was quietly leaving off the last premiums
+  before the claim.
 
-  Gone from it in this build: the footer line ("Prepared … by …") and
-  the simple-interest figure. Simple interest is still solved on the
-  same flows and is on the Maturities register beside the compounded
-  one; the sheet gives a reader one rate so there is nothing to choose
-  between.
+  Every entry is listed now, running onto a second page with the column
+  headings repeated. The section is called TRANSACTIONS.
 
-  Still true from the last build: every figure on the page is GROSS.
-  The commission and the return after it are read in the portal, on the
-  register, by the administrators who set the rate.
+ALSO IN THIS BUILD
+
+  The footer line ("Prepared … by …") is off the sheet, and so is the
+  simple-interest figure — the page gives one rate, the compounded IRR.
+  Simple interest is still solved and is on the register.
+
+  THE COMMISSION IS ADMINISTRATORS' ONLY, properly: a manager's
+  maturities payload no longer carries the commission figures at all,
+  and the two columns are gone from their register. It was hidden from
+  investors but reachable by a manager.
 
 EVERYTHING ELSE, AS BEFORE
 
+  The one-pager is gross throughout; the commission and the
+  after-commission return are read on the Maturities register.
+
   Compounded is the default on the dashboard, the policy return tiles
-  and the Maturities register, with a "Show simple interest" box in the
-  page header.
+  and the register, with a "Show simple interest" box in the header.
 
   The report weighting bug is fixed: a document asked for equal-weighted
-  now foots with the equal-weighted figure.
-
-  A commission per maturity, administrators only, with the
-  after-commission return solved from the cash flows.
-
-  On a matured policy the policy page offers the One-pager instead of
-  "Offer to investors".
+  foots with the equal-weighted figure.
 
   Medical review is administrators only, with its own tab, files and
-  links for the reviewing doctor, and the internal LE beside the
-  provider's report.
+  links for the reviewing doctor, and the internal LE.
 
-NOTHING TO RUN. Copy the files in and redeploy. The schema changes apply
-themselves on boot.
+NOTHING TO RUN. Copy the files in and redeploy.
