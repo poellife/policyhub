@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Torah Helper — Admin</title>
+<style>
+:root{--ground:#0E1524;--card:#182238;--card2:#1F2B45;--ink:#F0F3FA;--ink2:#B7C0D3;--line:#2D3A57;--accent:#F0C458;--good:#4CC57F;--bad:#F0655A}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.45 system-ui,Segoe UI,Rubik,sans-serif;padding:24px}
+.wrap{max-width:1100px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--ink2);margin:0 0 18px;font-size:13px}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;border:1px solid var(--line)}
+input,button,textarea,select{font:inherit;border-radius:9px;border:1px solid var(--line)}
+input,textarea{background:var(--card2);color:var(--ink);padding:9px 12px}
+textarea{line-height:1.5}
+input::placeholder,textarea::placeholder{color:var(--ink3,#8792ab)}
+button{background:var(--card2);color:var(--ink);padding:8px 13px;cursor:pointer;font-weight:600}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#1A1200;border-color:var(--accent)}
+button.danger{color:var(--bad)}
+button.good{color:var(--good)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--ink2);font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 18px}
+.kpi b{display:block;font-size:22px}
+.kpi span{color:var(--ink2);font-size:12px}
+.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11.5px;font-weight:700}
+.pill.on{background:rgba(76,197,127,.15);color:var(--good)}
+.pill.off{background:rgba(240,101,90,.15);color:var(--bad)}
+.mono{font-family:ui-monospace,monospace;font-size:12.5px;color:var(--ink2)}
+.err{color:var(--bad);margin-top:8px;min-height:18px}
+small{color:var(--ink2)}
+.child{display:inline-block;background:var(--card2);border-radius:7px;padding:1px 8px;margin:1px 3px 1px 0;font-size:12.5px}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+@media (max-width:700px){
+  body{padding:10px;font-size:14px}
+  .card{padding:12px;border-radius:12px}
+  h1{font-size:19px}
+  .kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .kpi{padding:10px 12px}.kpi b{font-size:19px}
+  table{font-size:12.5px}
+  th,td{padding:8px 6px}
+  button{padding:10px 12px;margin:2px 0}
+  input,select{max-width:100%}
+  #rtype{width:100%;margin-bottom:8px}
+  td button{display:block;width:100%;text-align:left}
+  img[alt="My Torah Helper"]{height:64px!important}
+}
+.atabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
+.atab{background:var(--card2,#1b2338);border:1px solid var(--line,#2a3350);color:var(--ink,#e7ecf7);
+  border-radius:11px;padding:9px 14px;font:inherit;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px}
+.atab.on{background:var(--accent,#F0C458);border-color:var(--accent,#F0C458);color:#1a1200}
+.tabbadge{background:#E05252;color:#fff;border-radius:99px;padding:1px 7px;font-size:12px;font-weight:800}
+.atab.on .tabbadge{background:#1a1200;color:var(--accent,#F0C458)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <img src="/logo.png" alt="My Torah Helper" style="height:84px;width:auto;margin-bottom:8px"><h1>Master Admin</h1>
+  <p class="sub">Owner's view of every family. The key is the ADMIN_KEY environment variable on the server.</p>
+
+  <div class="card" id="login">
+    <b>Admin key</b><br><br>
+    <input id="key" type="password" placeholder="Enter admin key" style="width:280px" onkeydown="if(event.key==='Enter')unlock()">
+    <button class="primary" onclick="unlock()">Unlock</button>
+    <div class="err" id="loginerr"></div>
+  </div>
+
+  <div id="panel" hidden>
+    <div class="atabs">
+      <button class="atab" data-tab="overview" onclick="showTab('overview')">📊 Overview</button>
+      <button class="atab" data-tab="families" onclick="showTab('families')">👪 Families</button>
+      <button class="atab" data-tab="feedback" onclick="showTab('feedback')">💬 Feedback <span class="tabbadge" id="fbbadge" hidden></span></button>
+      <button class="atab" data-tab="reports" onclick="showTab('reports')">📑 Reports</button>
+      <button class="atab" data-tab="write" onclick="showTab('write')">📣 Write to families</button>
+      <button class="atab" data-tab="voice" onclick="showTab('voice')">🎧 Standard voice</button>
+    </div>
+    <section class="apane" id="pane-overview" hidden>
+    <div class="kpis" id="kpis"></div>
+    <div class="card tablewrap" id="usagecard">
+      <b>📊 Usage — who's using what, for how long</b> <span class="mono" id="usagemeta"></span>
+      <div class="kpis" id="ukpis" style="margin:12px 0"></div>
+      <div class="sub" style="margin:4px 0 8px">Click any column heading to sort.</div>
+      <table id="tblu"><thead></thead><tbody></tbody></table>
+      <div class="err" id="usageerr"></div>
+    </div>
+    </section>
+    <section class="apane" id="pane-families" hidden>
+    <div class="card tablewrap">
+      <table id="tbl"><thead><tr>
+        <th>Email</th><th>Family code</th><th>Children</th><th>Points (per child)</th><th>Rounds</th><th>Recordings</th><th>Last active</th><th>Signed up</th><th>Status</th><th>Actions</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="err" id="panelerr"></div>
+    </div>
+    <div class="card"><small><b>Notes:</b> "Reset password" sets a new password and signs the family out of all devices — tell them the new one, and they can change nothing themselves (no email reset exists). "Deactivate" blocks email sign-in immediately; devices already signed in keep working until they sign out, and the raw family code still works (deactivation gates the account login, not the data). New signups show "awaiting approval" — they cannot sign in until you press Approve. Legacy code-only families (no account) appear in the family list below the accounts if they have no email attached. <b>Homework</b> is off for every family until you switch it on here — it lets that family photograph a mishnayos or chumash sheet and turn it into practice, and nobody else can even see the button.</small></div>
+    <div class="card" id="copyrec">
+      <b>🎙 Copy recordings between families — and into the standard voice</b><br>
+      <small class="sub">Recorded words belong to a family code, so a family that starts again — or a second test account — begins with nothing. This copies every word one family has recorded into another; the originals stay where they are.<br>
+      <b>To give every new family a voice from day one:</b> record the whole word list on any account of your own, then copy that account into <b>🏠 The standard voice</b>. Every family that has not recorded a word hears it, so the kriah games work the moment they sign up, and their own recordings replace it word by word as they make them.</small>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:12px">
+        <label>From<br><select id="cpfrom"></select></label>
+        <label>To<br><select id="cpto"></select></label>
+        <label style="display:flex;align-items:center;gap:6px;padding-bottom:8px">
+          <input type="checkbox" id="cpover"> replace words the second family already recorded</label>
+        <button class="primary" onclick="copyRecordings()">Copy</button>
+      </div>
+      <div id="cpout" class="sub" style="margin-top:10px"></div>
+      <div class="err" id="cperr"></div>
+    </div>
+    <div class="card tablewrap" id="orphans" hidden>
+      <b>Families without an account (code-only)</b><br>
+      <small class="sub">A code that nobody has signed up behind — an early family from before accounts, or a parent who set the app up on one device and stopped there. <b>Turn it into a family</b> puts an ordinary account in front of it: same code, same child, not a minute of practice lost, and from then on they sign in by email like everyone else. None of these count in the numbers above.</small><br><br>
+      <table id="tbl2"><thead><tr><th>Family code / child doc</th><th>Points</th><th>Rounds</th><th>Last active</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card tablewrap" id="demos" hidden>
+      <b>🎬 Demo families</b> <span id="democount" class="mono"></span><br>
+      <small class="sub">Every time somebody opens the demo link they get a fresh DEMO- code already filled with four weeks of invented practice. These are visitors, not children — they are left out of the overview, the usage figures and every report. Delete them whenever you like.</small><br><br>
+      <table id="tbl2b"><thead><tr><th>Demo code</th><th>Points</th><th>Rounds</th><th>Opened</th><th></th></tr></thead><tbody></tbody></table>
+      <div style="margin-top:10px"><button class="danger" onclick="wipeDemos()">🗑 Delete every demo family</button> <span id="demowipe" class="sub"></span></div>
+    </div>
+    <div class="card" id="claimcard">
+      <b>👪 Turn a family code into a real family</b><br>
+      <small class="sub">For a family that only ever had a code — an early family from before accounts, or a parent who set the app up on one device and never signed up. Type the code (or press the button beside one in the list above) and it becomes an ordinary family: <b>same code, same child, not a minute of practice lost</b>, and from then on they sign in by email like everyone else. Leave the password blank and one is made for you — shown here once, and emailed to the parent with how to sign in.</small>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <input id="clcode" class="mono" placeholder="FAMILY-CODE" style="min-width:150px">
+        <input id="clemail" placeholder="parent@example.com" style="min-width:190px">
+        <input id="clfirst" placeholder="First name" style="min-width:120px">
+        <input id="cllast" placeholder="Last name" style="min-width:120px">
+        <input id="clphone" placeholder="Phone (optional)" style="min-width:130px">
+        <input id="clchild" placeholder="Child's name" style="min-width:130px">
+        <input id="clpw" placeholder="Password (optional)" style="min-width:150px">
+        <button class="primary" onclick="claimFamily()">Make it a family</button>
+        <button onclick="claimClear()">Clear</button>
+      </div>
+      <div id="clout" class="sub" style="margin-top:10px"></div>
+      <div class="err" id="clerr"></div>
+    </div>
+    </section>
+    <section class="apane" id="pane-feedback" hidden>
+    <div class="card tablewrap" id="fbcard">
+      <b>💬 Beta-family feedback</b> <span id="fbcount" class="mono"></span><br>
+      <div style="margin:10px 0" id="fbfilters"></div>
+      <table id="tbl3"><thead><tr><th>When</th><th>Family</th><th>Category</th><th>Feedback</th><th>Where</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      <div id="fbempty" class="sub" style="margin-top:8px" hidden>No feedback yet — it will show up here the moment a family sends a note from Parental Controls.</div>
+      <div class="err" id="fberr"></div>
+    </div>
+    </section>
+    <section class="apane" id="pane-reports" hidden>
+    <div class="card" id="reportcard">
+      <b>📑 Pull a report</b><br><br>
+      <select id="rtype" style="background:var(--card2);color:var(--ink);padding:9px 12px;border-radius:9px;border:1px solid var(--line)">
+        <option value="overview">Family overview — minutes, subjects & exercises per child</option>
+        <option value="daily">Daily minutes — one row per child per day</option>
+        <option value="subjects">By subject — Kriah / Siddur / Tehillim / Chumash / Mishnayos / Gemara</option>
+        <option value="exercises">By exercise — Read & Listen / Speedway / Time Trial / Rashi / Sheet</option>
+        <option value="engagement">Engagement — who's active, cooling or idle</option>
+        <option value="signups">Signups — every account with contact info</option>
+      </select>
+      last <input id="rdays" type="number" value="30" min="1" max="365" style="width:70px"> days
+      <button class="primary" onclick="pullReport(false)">View</button>
+      <button onclick="pullReport(true)">⬇ Download CSV</button>
+      <div class="tablewrap" style="margin-top:12px"><table id="tblr"><thead></thead><tbody></tbody></table></div>
+      <div class="sub" id="rempty" hidden>No rows for this report yet.</div>
+      <div class="err" id="rerr"></div>
+    </div>
+    </section>
+    <section class="apane" id="pane-write" hidden>
+    <div class="card" id="bcastcard">
+      <b>📣 Send an update to every family</b>
+      <div class="sub" style="margin:6px 0 10px">One letter to everyone with an email on file. Write <span class="mono">{name}</span> and each family sees their own first name. Send yourself a test first — it goes out one message at a time, and you get a count back.</div>
+      <div class="sub" id="bcastwho" style="margin-bottom:8px">Counting families…</div>
+      <input id="bcsubj" style="width:100%;margin-bottom:8px" placeholder="Subject line — e.g. What's new this week in My Torah Helper">
+      <textarea id="bcbody" rows="9" style="width:100%;font:inherit" placeholder="Hi {name},&#10;&#10;Here's what changed this week…"></textarea>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="bctest" onclick="bcSend(true)">Send a test to me</button>
+        <input id="bcconfirm" style="width:150px" placeholder="type SEND">
+        <button class="primary" id="bcgo" onclick="bcSend(false)">Send to everyone</button>
+        <span class="sub" id="bcstatus"></span>
+      </div>
+      <div class="err" id="bcerr"></div>
+    </div>
+    </section>
+    <section class="apane" id="pane-voice" hidden>
+    <div class="card">
+      <b>🎧 The standard voice</b>
+      <div class="sub" style="margin:6px 0 10px">One set of readings — every kriah word and every Rashi letter — that any family who has not recorded that word yet will hear. <b>It is applied on its own:</b> every family already signed up, and every family that joins from now on, falls back to it word by word, so the kriah games, the 🔊 button and Read &amp; Listen work from the moment they sign up. Nothing has to be pushed to anyone. When a parent records a word in their own voice, theirs takes over for their family — one word at a time, and only for them.</div>
+      <div class="sub" id="voicewho" style="margin-bottom:6px">Counting families…</div>
+      <div class="card" style="background:var(--card2);margin:10px 0 0">
+        <b>🔑 Recorder login</b>
+        <div class="sub" style="margin:5px 0 8px">Hire someone to read the words and give them this, not your admin key. It opens the recording page below and nothing else — no families, no feedback, no reports, and no family's own recordings. Withdraw it the moment they are finished.</div>
+        <div id="reckeybox" class="sub">…</div>
+        <div class="toolbar" style="margin-top:9px;flex-wrap:wrap">
+          <button class="primary" onclick="recKeyMake()" id="reckeybtn">Create a recorder login</button>
+          <button onclick="recKeyOff()" id="reckeyoff" hidden>Withdraw it</button>
+        </div>
+        <div class="err" id="reckeyerr"></div>
+      </div>
+      <div class="sub" style="color:var(--ink3)">Read each one the way you want a child to hear it. Space bar records and stops; arrow keys move on. The Robot Ear's "compare to your recording" is never judged against this voice — only against a child's own parent.</div>
+    </div>
+    <iframe id="hvframe" src="/housevoice.html?embed=1" allow="microphone" title="Record the standard voice"
+      style="width:100%;height:1500px;border:0;border-radius:16px;background:transparent"></iframe>
+    </section>
+    <button onclick="localStorage.removeItem('mth.adminkey');location.reload()">Lock panel</button>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+/* One long page meant scrolling past four things to reach the fifth. Everything
+   stays in the DOM (the renderers write into it either way) — only one pane is
+   shown at a time, and the choice is remembered. */
+const ATABS=['overview','families','feedback','reports','write','voice'];
+function showTab(k){
+  if(!ATABS.includes(k)) k='overview';
+  try{ localStorage.setItem('mth.admintab', k); }catch(e){}
+  for(const t of ATABS){
+    const pane=document.getElementById('pane-'+t); if(pane) pane.hidden = (t!==k);
+    const btn=document.querySelector('.atab[data-tab="'+t+'"]'); if(btn) btn.classList.toggle('on', t===k);
+  }
+  window.scrollTo(0,0);
+}
+function initTabs(){ let k='overview'; try{ k=localStorage.getItem('mth.admintab')||'overview'; }catch(e){} showTab(k); }
+function key(){ return localStorage.getItem('mth.adminkey')||''; }
+async function api(path, body){
+  const r=await fetch(path, body?{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Key':key()},body:JSON.stringify(body)}:{headers:{'X-Admin-Key':key()}});
+  let j={}; try{ j=await r.json(); }catch(e){}
+  /* a refusal can carry more than a sentence — an offer of another way round it */
+  if(!r.ok){ const e=new Error(j.error||('server '+r.status)); Object.assign(e, j); throw e; }
+  return j;
+}
+function unlock(){ localStorage.setItem('mth.adminkey', $('key').value.trim()); loadAll().catch(e=>{ $('loginerr').textContent=e.message; localStorage.removeItem('mth.adminkey'); }); }
+function fmt(t){ return t?new Date(t).toLocaleString():'—'; }
+function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function loadAll(){
+  const d=await api('/api/admin/overview');
+  $('login').hidden=true; $('panel').hidden=false;
+  const famBy={}; for(const f of d.families) famBy[f.code]=famBy[f.code]||f;
+  const recBy={}; for(const r of d.recordings) recBy[r.family]=r.n;
+  const famDocs=code=>d.families.filter(f=>f.code===code||f.code.startsWith(code+'-C'));
+  const claimed=new Set();
+  /* our own test accounts are kept out of every number here — they are still in
+     the table below, marked, and one tap puts them back into the counts */
+  const testCodes=new Set(d.users.filter(u=>u.test===true).map(u=>String(u.code||'').toUpperCase()));
+  const isTestCode=c=>testCodes.has(String(c||'').toUpperCase().replace(/-C\d+$/,''));
+  const realUsers=d.users.filter(u=>u.test!==true);
+  /* a DEMO- code is somebody who opened the demo link — it arrives pre-filled with
+     four weeks of invented practice, so it never belongs in a count of real work */
+  const isDemoCode=c=>/^DEMO-/i.test(String(c||''));
+  const realFams=d.families.filter(f=>!isTestCode(f.code) && !isDemoCode(f.code));
+  let totRounds=0; for(const f of realFams) totRounds+=Number(f.rounds||0);
+  const demoCount=d.families.filter(f=>isDemoCode(f.code)).length;
+  const realRecs=d.recordings.filter(r=>!isTestCode(r.family) && !isDemoCode(r.family) && String(r.family).toUpperCase()!=='HOUSEVOICE');
+  $('kpis').innerHTML=`<div class="kpi"><b>${realUsers.length}</b><span>accounts</span></div><div class="kpi"><b>${realFams.length}</b><span>child profiles</span></div><div class="kpi"><b>${totRounds}</b><span>rounds played</span></div><div class="kpi"><b>${realRecs.reduce((a,r)=>a+r.n,0)}</b><span>recordings</span></div>`
+    + (demoCount?`<div class="kpi" style="opacity:.6"><b>${demoCount}</b><span>demo opens · left out</span></div>`:'')
+    + (testCodes.size?`<div class="kpi" style="opacity:.7"><b>${testCodes.size}</b><span>test account${testCodes.size===1?'':'s'} left out</span></div>`:'');
+  const tb=$('tbl').querySelector('tbody'); tb.innerHTML='';
+  for(const u of d.users){
+    const children=typeof u.children==='string'?JSON.parse(u.children):(u.children||[]);
+    const docs=famDocs(u.code); docs.forEach(f=>claimed.add(f.code));
+    const last=docs.map(f=>f.updated).sort().pop();
+    const pts=docs.map(f=>{ const cid=f.code===u.code?'c1':f.code.slice(u.code.length+1).toLowerCase(); const c=children.find(x=>x.id===cid); return `${esc(c?c.name:cid)}: ${f.points??0}`; }).join('<br>')||'—';
+    const active=u.active!==false;
+    const pending=u.approved===false;
+    const bill=typeof u.billing==='string'?(u.billing?JSON.parse(u.billing):{}):(u.billing||{});
+    const free=u.exempt!==false;
+    const hw=u.homework===true;   // homework uploads: off for everyone until switched on here
+    const isTest=u.test===true;   // one of ours: still works, simply does not count
+    const fu=u.free_until||u.freeUntil;
+    const fuLabel=fu?(new Date(fu)>new Date()?'free until '+new Date(fu).toLocaleDateString():'free year ended'):'free';
+    const billPill=free?`<span class="pill" style="background:rgba(122,162,247,.15);color:#7aa2f7">${fuLabel}</span>`:bill.status==='active'?'<span class="pill on">paying</span>':bill.status?'<span class="pill off">'+esc(bill.status)+'</span>':'<span class="pill off">no card</span>';
+    const tr=document.createElement('tr');
+    const pname=[u.first_name||u.first,u.last_name||u.last].filter(Boolean).join(' ');
+    tr.innerHTML=`<td>${pname?'<b>'+esc(pname)+'</b><br>':''}${esc(u.username)}${u.phone?'<br><span class="mono">📞 '+esc(u.phone)+'</span>':''}</td><td class="mono">${esc(u.code)}</td>
+      <td>${children.map(c=>`<span class="child">${esc(c.name)}</span>`).join('')||'—'}</td>
+      <td>${pts}</td><td>${docs.reduce((a,f)=>a+Number(f.rounds||0),0)}</td><td>${recBy[u.code]||0}</td>
+      <td>${fmt(last)}</td><td>${fmt(u.created)}</td>
+      <td>${pending?'<span class="pill" style="background:rgba(240,196,88,.18);color:var(--accent)">awaiting approval</span> ':''}${isTest?'<span class="pill" style="background:rgba(122,162,247,.15);color:#7aa2f7">🧪 test — not counted</span> ':''}<span class="pill ${active?'on':'off'}">${active?'active':'deactivated'}</span> ${billPill}</td>
+      <td>${pending?`<button class="primary" onclick="approveUser('${esc(u.username)}')">✅ Approve</button> `:''}<button onclick="resetPw('${esc(u.username)}')">Reset password</button>
+          <button class="${active?'danger':'good'}" onclick="setActive('${esc(u.username)}',${!active})">${active?'Deactivate':'Reactivate'}</button>
+          <button onclick="clearPin('${esc(u.username)}')">Clear parent PIN</button>
+          <button onclick="setExempt('${esc(u.username)}',${free?'false':'true'})">${free?'Require payment':'Give free access'}</button>
+          <button class="${hw?'good':''}" onclick="setHomework('${esc(u.username)}',${hw?'false':'true'})" title="Let this family photograph homework sheets and turn them into practice">${hw?'📸 Homework ON':'📸 Homework off'}</button>
+          <button class="${isTest?'good':''}" onclick="setTest('${esc(u.username)}',${isTest?'false':'true'})" title="Mark one of your own accounts so its data stays out of the overview, the usage figures and every report">${isTest?'🧪 Test account':'🧪 Mark as test'}</button>
+          <button class="danger" onclick="deleteFamily('${esc(u.username)}','${esc(u.code)}')">🗑 Delete family</button></td>`;
+    tb.appendChild(tr);
+  }
+  /* a DEMO- code is a visitor who opened the demo link, not a family — it is
+     seeded with four weeks of invented practice, so it is kept well away from
+     the real ones and out of every number on this page */
+  const unclaimed=d.families.filter(f=>!claimed.has(f.code));
+  const demoFams=unclaimed.filter(f=>/^DEMO-/i.test(f.code));
+  const realOrphans=unclaimed.filter(f=>!/^DEMO-/i.test(f.code));
+  $('orphans').hidden=!realOrphans.length;
+  const tb2=$('tbl2').querySelector('tbody'); tb2.innerHTML='';
+  for(const f of realOrphans){ const base=f.code.replace(/-C\d+$/,''); const tr=document.createElement('tr');
+    tr.innerHTML=`<td class="mono">${esc(f.code)}</td><td>${f.points??0}</td><td>${f.rounds||0}</td><td>${fmt(f.updated)}</td>
+      <td><button class="primary" onclick="claimOpen('${esc(base)}','${esc(f.child||'')}')">👪 Turn it into a family</button>
+      <button class="danger" onclick="deleteFamily('','${esc(base)}')">🗑 Delete</button></td>`; tb2.appendChild(tr); }
+  $('demos').hidden=!demoFams.length;
+  $('democount').textContent=demoFams.length?demoFams.length+' opened':'';
+  const tb2b=$('tbl2b').querySelector('tbody'); tb2b.innerHTML='';
+  for(const f of demoFams){ const tr=document.createElement('tr');
+    tr.innerHTML=`<td class="mono">${esc(f.code)}</td><td>${f.points??0}</td><td>${f.rounds||0}</td><td>${fmt(f.updated)}</td>
+      <td><button class="danger" onclick="deleteFamily('','${esc(f.code.replace(/-C\d+$/,''))}')">🗑 Delete</button></td>`; tb2b.appendChild(tr); }
+  window.__DEMOS=demoFams.map(f=>f.code.replace(/-C\d+$/,''));
+  fillCopy(d, recBy);
+  voiceStatus(d, recBy);
+}
+/* Who is actually leaning on the standard voice right now. Nothing is pushed to
+   anyone — a family simply falls back to it for any word they have not recorded —
+   so this is the honest way to show that it is in use. */
+/* The login the owner hands to a recorder: made here, shown here, withdrawn here. */
+async function loadRecKey(){
+  const box=$('reckeybox'); if(!box) return;
+  try{
+    const r=await fetch('/api/admin/recorder-key',{headers:{'X-Admin-Key':key()}});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||r.status);
+    const link=location.origin+'/housevoice.html';
+    if(j.key){
+      box.innerHTML=`Give them this page — <a href="${link}" target="_blank" rel="noopener">${link}</a> — and this key:<br>
+        <code class="mono" style="font-size:15px;user-select:all">${esc(j.key)}</code>
+        ${j.fromEnv?'<br><small>(set in the server environment — change it there)</small>':''}`;
+      $('reckeybtn').textContent='Make a new one'; $('reckeybtn').disabled=!!j.fromEnv;
+      $('reckeyoff').hidden=!!j.fromEnv;
+    } else {
+      box.innerHTML='<b>No recorder login yet.</b> Nobody but you can add to the standard voice.';
+      $('reckeybtn').textContent='Create a recorder login'; $('reckeybtn').disabled=false; $('reckeyoff').hidden=true;
+    }
+  }catch(e){ box.textContent=''; $('reckeyerr').textContent=e.message; }
+}
+async function recKeyMake(){
+  if($('reckeyoff').hidden===false && !confirm('Make a new key?\n\nThe old one stops working straight away — anyone using it will have to be given the new one.')) return;
+  $('reckeyerr').textContent='';
+  try{ await api('/api/admin/recorder-key',{}); loadRecKey(); }
+  catch(e){ $('reckeyerr').textContent=e.message; }
+}
+async function recKeyOff(){
+  if(!confirm('Withdraw the recorder login?\n\nWhoever has it can no longer add to the standard voice. Everything already recorded stays.')) return;
+  $('reckeyerr').textContent='';
+  try{ await api('/api/admin/recorder-key',{off:true}); loadRecKey(); }
+  catch(e){ $('reckeyerr').textContent=e.message; }
+}
+function voiceStatus(d, recBy){
+  const el=$('voicewho'); if(!el) return;
+  const codes=new Set(); for(const u of d.users){ const c=String(u.code||'').toUpperCase(); if(c) codes.add(c); }
+  const none=[...codes].filter(c=>!(recBy[c]>0)).length;
+  const house=recBy['HOUSEVOICE']||0;
+  el.innerHTML = house
+    ? `<b>${house}</b> recorded in the standard voice · <b>${none}</b> of ${codes.size} famil${codes.size===1?'y':'ies'} ${none===1?'has':'have'} recorded nothing of their own, so ${none===1?'it is':'they are'} hearing this voice today.`
+    : `<b>Nothing recorded here yet.</b> Until there is, a family that has not recorded has no voice to fall back on and the kriah games stay locked for them.`;
+}
+/* Every family code we know of, with how many words it has recorded, so the two
+   ends of a copy are picked from a list rather than typed from memory. */
+function fillCopy(d, recBy){
+  const seen={'HOUSEVOICE':1}, opts=[];
+  /* the house voice is a family code like any other — it is simply the one every
+     family falls back to until they have recorded a word themselves */
+  opts.push({code:'HOUSEVOICE', label:`🏠 The standard voice — every family · ${recBy['HOUSEVOICE']||0} words`, n:recBy['HOUSEVOICE']||0});
+  for(const u of d.users){ const c=String(u.code||'').toUpperCase(); if(!c||seen[c]) continue; seen[c]=1;
+    const name=[u.first_name||u.first,u.last_name||u.last].filter(Boolean).join(' ')||u.username;
+    opts.push({code:c, label:`${name} · ${c} · ${recBy[c]||0} words`, n:recBy[c]||0}); }
+  for(const f of d.families){ const c=String(f.code||'').toUpperCase().replace(/-C\d+$/,''); if(!c||seen[c]) continue; seen[c]=1;
+    opts.push({code:c, label:`${c} (no account) · ${recBy[c]||0} words`, n:recBy[c]||0}); }
+  const from=$('cpfrom'), to=$('cpto');
+  const keepF=from.value, keepT=to.value;
+  const withRec=opts.slice().sort((a,b)=>b.n-a.n);
+  from.innerHTML=withRec.map(o=>`<option value="${esc(o.code)}"${o.n?'':' disabled'}>${esc(o.label)}</option>`).join('');
+  to.innerHTML=opts.map(o=>`<option value="${esc(o.code)}">${esc(o.label)}</option>`).join('');
+  if(keepF) from.value=keepF; if(keepT) to.value=keepT;
+}
+async function copyRecordings(){
+  const from=$('cpfrom').value, to=$('cpto').value, overwrite=$('cpover').checked;
+  $('cperr').textContent=''; $('cpout').textContent='';
+  if(!from||!to){ $('cperr').textContent='Pick both families.'; return; }
+  if(from===to){ $('cperr').textContent='Those are the same family.'; return; }
+  const house = to==='HOUSEVOICE';
+  if(!confirm((house?'Put '+from+'\'s recordings into THE STANDARD VOICE?\n\nEvery family that has not recorded a word will hear this voice.\n\n':'Copy every recording from '+from+' into '+to+'?')
+    +(overwrite?'\nWords already in '+(house?'the standard voice':to)+' WILL be replaced.':'\nWords already in '+(house?'the standard voice':to)+' are left alone.'))) return;
+  try{
+    const r=await api('/api/admin/copy-recordings',{from,to,overwrite});
+    $('cpout').textContent=`✅ ${r.copied} word${r.copied===1?'':'s'} copied into ${to}`
+      + (r.skipped?` · ${r.skipped} left alone (already recorded there)`:'')
+      + (r.missing?` · ${r.missing} could not be read`:'')
+      + ` · ${to} now has ${r.total}. The family sees them within a few seconds.`;
+    loadAll();
+  }catch(e){ $('cperr').textContent=e.message; }
+}
+async function deleteFamily(username, code){
+  const who=username||code;
+  const typed=prompt('⚠️ PERMANENTLY delete '+who+'?\n\nThis erases the account, every child\u2019s progress, and all voice recordings for family '+code+'. It CANNOT be undone.\n\nType DELETE to confirm:');
+  if(typed===null) return;
+  if(String(typed).trim().toUpperCase()!=='DELETE'){ alert('Not deleted — you must type DELETE exactly.'); return; }
+  try{
+    const r=await api('/api/admin/delete-family',{username,code,confirm:'DELETE'});
+    alert('Deleted: '+r.deleted.families+' child profile(s), '+r.deleted.recordings+' recording(s)'+(r.deleted.user?', 1 account':'')+'.');
+    loadAll();
+  }catch(e){ $('panelerr').textContent=e.message; alert('Delete failed: '+e.message); }
+}
+/* A demo family is a visitor, and there can be a great many of them. Clearing
+   them out one at a time is a chore nobody would do, so they go together. */
+async function wipeDemos(){
+  const list=(window.__DEMOS||[]).filter((c,i,a)=>a.indexOf(c)===i);
+  if(!list.length) return;
+  const typed=prompt('Delete all '+list.length+' demo families?\n\nThese are people who opened the demo link — nothing a real family did is touched.\n\nType DELETE to confirm:');
+  if(typed===null) return;
+  if(String(typed).trim().toUpperCase()!=='DELETE'){ alert('Nothing deleted — you must type DELETE exactly.'); return; }
+  const out=$('demowipe'); let n=0, bad=0;
+  for(const code of list){ out.textContent='deleting '+(n+bad+1)+' of '+list.length+'…';
+    try{ await api('/api/admin/delete-family',{code,confirm:'DELETE'}); n++; }catch(e){ bad++; } }
+  out.textContent=n+' demo famil'+(n===1?'y':'ies')+' deleted'+(bad?', '+bad+' could not be':'')+'.';
+  loadAll();
+}
+/* Putting an account in front of a code-only family. Nothing about the family
+   itself moves: it keeps its code, its child and every minute already learnt. */
+function claimClear(){
+  for(const id of ['clcode','clemail','clfirst','cllast','clphone','clchild','clpw']) $(id).value='';
+  $('clout').textContent=''; $('clerr').textContent='';
+}
+function claimOpen(code, child){
+  $('clcode').value=code; $('clchild').value=child||'';
+  $('clemail').value=''; $('clfirst').value=''; $('cllast').value=''; $('clphone').value=''; $('clpw').value='';
+  $('clout').textContent=''; $('clerr').textContent='';
+  $('claimcard').scrollIntoView({behavior:'smooth',block:'center'});
+  setTimeout(()=>$('clemail').focus(),300);
+}
+async function claimFamily(takeover){
+  const code=$('clcode').value.trim().toUpperCase(), username=$('clemail').value.trim();
+  if(!code || !username){ $('clerr').textContent='A family code and an email address, at least.'; return; }
+  $('clerr').textContent=''; $('clout').textContent='working…';
+  try{
+    const r=await api('/api/admin/claim-family',{ code, username,
+      firstName:$('clfirst').value.trim(), lastName:$('cllast').value.trim(),
+      phone:$('clphone').value.trim(), child:$('clchild').value.trim(),
+      password:$('clpw').value, takeover:takeover===true });
+    if(r.already){ $('clout').innerHTML='Nothing to do — <b>'+esc(username)+'</b> already opens <b>'+esc(code)+'</b>.'; return; }
+    if(r.moved){
+      $('clout').innerHTML='✅ <b>'+esc(username)+'</b> now opens <b>'+esc(code)+'</b>'
+        + (r.children>1?' with '+r.children+' children':'')
+        + '.<br>They sign in with the same password as before — nothing about their account changed.'
+        + (r.fromHadData
+            ? '<br>Their old code <b class="mono">'+esc(r.from)+'</b> is untouched and still in the code-only list, if this turns out to be the wrong way round.'
+            : '<br>The code they signed up with, <b class="mono">'+esc(r.from)+'</b>, had nothing on it — nothing was lost.');
+      loadAll(); return;
+    }
+    $('clout').innerHTML='✅ <b>'+esc(code)+'</b> is now a family under <b>'+esc(username)+'</b>'
+      + (r.children>1?' with '+r.children+' children':'')
+      + (r.founding?' — free for a year':'')
+      + (r.password?'<br>Password: <b class="mono">'+esc(r.password)+'</b> — it has been emailed to them, but write it down now; it is not shown again.':'')
+      + '<br>Everything the child had already done is exactly where it was.';
+    loadAll();
+  }catch(e){
+    $('clout').textContent='';
+    /* the parent signed up already and their practice is on an older code — that is
+       not a dead end, it is the commonest reason to be on this form at all */
+    if(e.canTakeover){
+      const ex=e.existing||{};
+      $('clerr').innerHTML='';
+      $('clout').innerHTML='<b>'+esc(username)+'</b> already has an account'+(ex.name?' ('+esc(ex.name)+')':'')
+        + ', opening <b class="mono">'+esc(ex.code||'—')+'</b>.'
+        + '<br>Move that account onto <b class="mono">'+esc(code)+'</b> instead? They keep their password, their billing and their free year; they simply open the family with the practice in it. <b class="mono">'+esc(ex.code||'')+'</b> is left where it is.'
+        + '<br><br><button class="primary" onclick="claimFamily(true)">Move them onto '+esc(code)+'</button> <button onclick="claimClear()">Leave it</button>';
+      return;
+    }
+    $('clerr').textContent=e.message;
+  }
+}
+async function resetPw(u){
+  const pw=prompt('New password for '+u+' (6+ characters):'); if(pw===null) return;
+  try{ await api('/api/admin/reset-password',{username:u,newPassword:pw}); alert('Password reset. They are signed out of all devices — tell them the new password.'); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function setExempt(u,ex){
+  try{ await api('/api/admin/exempt',{username:u,exempt:ex}); loadAll(); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function setTest(u,on){
+  try{ await api('/api/admin/test-flag',{username:u,on});
+    loadAll(); loadUsage(); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function setHomework(u,on){
+  try{ await api('/api/admin/homework-flag',{username:u,on});
+    alert(on?('Homework uploads are ON for '+u+'.'):('Homework uploads are off for '+u+'.')); loadAll(); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function approveUser(u){
+  try{ await api('/api/admin/approve',{username:u}); alert('Approved — '+u+' can now sign in.'); loadAll(); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function clearPin(u){
+  if(!confirm('Clear the parent PIN for '+u+'? The parent view will open without a PIN until they set a new one.')) return;
+  try{ const r=await api('/api/admin/clear-pin',{username:u}); alert('PIN cleared on '+r.cleared+' child profile(s). Their devices pick it up within a few seconds.'); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+async function setActive(u,active){
+  if(!active && !confirm('Deactivate '+u+'? They will not be able to sign in until reactivated.')) return;
+  try{ await api('/api/admin/active',{username:u,active}); loadAll(); }
+  catch(e){ $('panelerr').textContent=e.message; }
+}
+const FBCATS={bug:'🐞 Something broke',confusing:'❓ Confusing',idea:'💡 Idea',love:'❤️ Love it',other:'💬 Other'};
+const FBSTATUSES=['new','seen','planned','done'];
+let FB=[], fbFilter='all';
+async function loadFeedback(){
+  try{
+    const d=await api('/api/admin/feedback'); FB=d.items||[]; renderFeedback();
+  }catch(e){ $('fberr').textContent='Feedback list unavailable: '+e.message; }
+}
+function renderFeedback(){
+  const counts={all:FB.length}; for(const s of FBSTATUSES) counts[s]=FB.filter(x=>x.status===s).length;
+  $('fbcount').textContent=FB.length?`· ${counts.new} new of ${FB.length}`:'';
+  const badge=$('fbbadge'); if(badge){ badge.textContent=counts.new||''; badge.hidden=!counts.new; }
+  $('fbfilters').innerHTML=['all',...FBSTATUSES].map(s=>`<button class="${fbFilter===s?'primary':''}" style="margin-right:6px" onclick="fbFilter='${s}';renderFeedback()">${s==='all'?'All':s} (${counts[s]||0})</button>`).join('');
+  const rows=FB.filter(x=>fbFilter==='all'||x.status===fbFilter);
+  $('fbempty').hidden=!!rows.length;
+  const tb=$('tbl3').querySelector('tbody'); tb.innerHTML='';
+  for(const f of rows){
+    const tr=document.createElement('tr');
+    const pill=f.status==='new'?'<span class="pill" style="background:rgba(240,196,88,.18);color:var(--accent)">new</span>':f.status==='done'?'<span class="pill on">done</span>':`<span class="pill" style="background:rgba(122,162,247,.15);color:#7aa2f7">${esc(f.status)}</span>`;
+    tr.innerHTML=`<td style="white-space:nowrap">${fmt(f.created)}</td>
+      <td>${esc(f.username||'')}<br><span class="mono">${esc(f.code||'')}</span></td>
+      <td style="white-space:nowrap">${FBCATS[f.cat]||esc(f.cat||'')}</td>
+      <td style="max-width:380px;white-space:pre-wrap">${esc(f.text)}</td>
+      <td><small>${esc(f.page||'')}<br>${esc(f.version||'')}</small></td>
+      <td>${pill}</td>
+      <td style="white-space:nowrap">${f.username?`<button class="primary" onclick="fbReplyOpen(${f.id})">✉ ${fbThread(f).length?'Reply again':'Reply'}</button> `:''}${FBSTATUSES.filter(s=>s!==f.status).map(s=>`<button onclick="setFbStatus(${f.id},'${s}')">${s}</button>`).join(' ')}</td>`;
+    tb.appendChild(tr);
+    const thread = fbThread(f);
+    if(thread.length){
+      const rr=document.createElement('tr');
+      rr.innerHTML=`<td></td><td colspan="6" style="padding-top:0">${thread.map((r,i)=>`
+        <div class="sub" style="border-left:3px solid var(--accent,#F0C458);padding:6px 12px;white-space:pre-wrap;margin-bottom:6px">
+          <b>You replied${thread.length>1?' ('+(i+1)+' of '+thread.length+')':''}</b> ${r.at?'· '+fmt(r.at):''}<br>${esc(r.text)}</div>`).join('')}</td>`;
+      tb.appendChild(rr);
+    }
+    if(fbOpen===f.id){
+      const cr=document.createElement('tr');
+      cr.innerHTML=`<td></td><td colspan="6" style="padding-top:0">
+        <div style="border:1px solid var(--line,#2a3350);border-radius:10px;padding:12px;max-width:640px">
+          <div class="sub" style="margin-bottom:8px">To <b>${esc(f.username||'')}</b> · from the My Torah Helper address · their reply comes back to you${fbThread(f).length?` · <b>${fbThread(f).length} already sent</b> — this one is added to the thread, nothing is overwritten`:''}</div>
+          <input id="fbsubj" style="width:100%;margin-bottom:8px" value="${esc(fbSubject(f))}">
+          <textarea id="fbbody" rows="7" style="width:100%;font:inherit" placeholder="Write your reply…">${esc(fbDraft(f))}</textarea>
+          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="primary" id="fbsend" onclick="fbSend(${f.id})">Send</button>
+            <button onclick="fbOpen=null;renderFeedback()">Cancel</button>
+            <span class="sub" id="fbstatus"></span>
+          </div>
+        </div></td>`;
+      tb.appendChild(cr);
+    }
+  }
+}
+let fbOpen=null;
+/* A note is a conversation. Older rows only ever kept the last answer, so the
+   thread falls back to that one when there is no list. */
+function fbThread(f){
+  if(Array.isArray(f.replies) && f.replies.length) return f.replies;
+  if(f.reply) return [{text:f.reply, at:f.replied}];
+  return [];
+}
+function fbSubject(f){
+  const cat={bug:'the problem you reported',confusing:'your note',idea:'your idea',love:'your note',other:'your note'}[f.cat]||'your note';
+  const s='Re: '+cat+' — My Torah Helper';
+  return fbThread(f).length ? s : s;
+}
+function fbDraft(f){
+  const name=(f.username||'').split('@')[0].replace(/[._-]+/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+  if(fbThread(f).length) return 'Hi'+(name?' '+name:'')+',\n\nOne more thing about this —\n\n\n\nThanks again,\n';
+  return 'Hi'+(name?' '+name:'')+',\n\nThank you for writing — and for taking the trouble to tell us.\n\n\n\nThanks again,\n';
+}
+function fbReplyOpen(id){ fbOpen=(fbOpen===id?null:id); renderFeedback();
+  setTimeout(()=>{ const t=document.getElementById('fbbody'); if(t){ t.focus(); t.setSelectionRange(t.value.length-14, t.value.length-14); } },30); }
+async function fbSend(id){
+  const btn=document.getElementById('fbsend'), st=document.getElementById('fbstatus');
+  const subject=document.getElementById('fbsubj').value.trim();
+  const text=document.getElementById('fbbody').value.trim();
+  if(!text){ st.textContent='Write something first.'; return; }
+  btn.disabled=true; st.textContent='Sending…';
+  try{
+    const r=await api('/api/admin/feedback-reply',{id,subject,text});
+    st.textContent='Sent to '+r.to;
+    const f=FB.find(x=>x.id===id); if(f){ const at=new Date().toISOString();
+      f.replies=fbThread(f).concat([{text, at}]); f.reply=text; f.replied=at; f.status='done'; }
+    fbOpen=null; setTimeout(renderFeedback, 500);
+  }catch(e){ st.textContent=e.message; btn.disabled=false; }
+}
+/* the broadcast: deliberately two deliberate steps — a test to yourself, then a
+   typed confirmation. It is the only button on this page that reaches every family. */
+async function bcCount(){
+  try{ const d=await api('/api/admin/broadcast-list');
+    $('bcastwho').innerHTML = d.count
+      ? `<b>${d.count}</b> famil${d.count===1?'y':'ies'} will get this — e.g. ${d.sample.map(e=>'<span class="mono">'+esc(e)+'</span>').join(', ')}${d.count>d.sample.length?' …':''}`
+      : 'Nobody has an email address on file yet.';
+  }catch(e){ $('bcastwho').textContent='Could not count the families: '+e.message; }
+}
+async function bcSend(test){
+  const subject=$('bcsubj').value.trim(), text=$('bcbody').value.trim();
+  const st=$('bcstatus'), err=$('bcerr'); err.textContent='';
+  if(!subject || !text){ err.textContent='Give it a subject and a body first.'; return; }
+  if(!test && !confirm('Send "'+subject+'" to every family with an email on file?')) return;
+  $('bctest').disabled=true; $('bcgo').disabled=true; st.textContent = test?'Sending your test…':'Sending…';
+  try{
+    const r=await api('/api/admin/broadcast',{subject, text, test, confirm:$('bcconfirm').value.trim()});
+    st.textContent = (r.test?'Test sent':'Sent to '+r.sent+' famil'+(r.sent===1?'y':'ies'))
+      + (r.failed && r.failed.length ? ' · '+r.failed.length+' failed' : '');
+    if(r.failed && r.failed.length) err.textContent='Failed: '+r.failed.map(f=>f.email+' ('+f.why+')').join(', ');
+    if(!r.test){ $('bcconfirm').value=''; }
+  }catch(e){ st.textContent=''; err.textContent=e.message; }
+  $('bctest').disabled=false; $('bcgo').disabled=false;
+}
+async function setFbStatus(id,status){
+  try{ await api('/api/admin/feedback-status',{id,status}); const f=FB.find(x=>x.id===id); if(f) f.status=status; renderFeedback(); }
+  catch(e){ $('fberr').textContent=e.message; }
+}
+const STATUS_PILL={'active':'<span class="pill on">active</span>','recent':'<span class="pill" style="background:rgba(122,162,247,.15);color:#7aa2f7">recent</span>','cooling':'<span class="pill" style="background:rgba(240,196,88,.18);color:var(--accent)">cooling</span>','idle':'<span class="pill off">idle</span>','never used':'<span class="pill off">never used</span>'};
+let USAGE=[], uSort={k:'min30',d:-1};
+const STATUS_ORDER={'active':0,'recent':1,'cooling':2,'idle':3,'never used':4};
+const UCOLS=[['Family','lastName'],['Child','child'],['Status','status'],['Today','minToday'],['7 days','min7'],['30 days','min30'],['All time','totalMin'],['Active days (30d)','activeDays30'],['Last active','lastActive'],['Top subject','topSubject'],['Points','points']];
+function cmpVals(x,y,d){ if(typeof x==='string'||typeof y==='string'){ x=String(x??'').toLowerCase(); y=String(y??'').toLowerCase(); return d*(x<y?-1:x>y?1:0); } return d*((+x||0)-(+y||0)); }
+function setUSort(k){ if(uSort.k===k) uSort.d=-uSort.d; else uSort={k, d:(k==='lastName'||k==='child'||k==='status'||k==='topSubject')?1:-1}; renderUsage(); }
+function renderUsage(){
+  $('tblu').querySelector('thead').innerHTML='<tr>'+UCOLS.map(([l,k])=>`<th style="cursor:pointer;white-space:nowrap" onclick="setUSort('${k}')">${l}${uSort.k===k?(uSort.d>0?' ▲':' ▼'):''}</th>`).join('')+'</tr>';
+  const rows=USAGE.slice().sort((a,b)=>{ let x=a[uSort.k],y=b[uSort.k]; if(uSort.k==='status'){x=STATUS_ORDER[x];y=STATUS_ORDER[y];} return cmpVals(x,y,uSort.d); });
+  const tb=$('tblu').querySelector('tbody'); tb.innerHTML='';
+  for(const r of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${r.lastName?'<b>'+esc(r.lastName)+' Family</b><br>':r.parent?'<b>'+esc(r.parent)+'</b><br>':''}${r.parent&&r.lastName?esc(r.parent)+'<br>':''}<span class="mono">${esc(r.family)}</span>${r.email?'<br><small>'+esc(r.email)+'</small>':''}</td>
+      <td><b>${esc(r.child)}</b>${r.level?'<br><small>'+esc(r.level)+'</small>':''}</td>
+      <td>${STATUS_PILL[r.status]||esc(r.status)}</td>
+      <td>${r.minToday||0}m</td><td>${r.min7}m</td><td>${r.min30}m</td><td>${r.totalMin}m</td>
+      <td>${r.activeDays30}/30</td><td style="white-space:nowrap">${esc(r.lastActive||'—')}</td>
+      <td>${esc(r.topSubject||'—')}</td><td>${r.points}</td>`;
+    tb.appendChild(tr);
+  }
+}
+async function loadUsage(){
+  try{
+    const d=await api('/api/admin/usage?days=30');
+    const s=d.summary;
+    $('usagemeta').textContent='· live from every family\u2019s saved progress'
+      + (s.testAccounts?' · '+s.testAccounts+' test account'+(s.testAccounts===1?'':'s')+' left out':'');
+    /* real children only — the demo visitors and the code-only families are shown
+       beside them, dimmed, so a big number is never mistaken for a big month */
+    $('ukpis').innerHTML=[['Families',s.families],['Children',s.children],['Active today',s.activeToday],['Active this week',s.active7],['Minutes this week',s.min7],['Minutes (30d)',s.min30],['Minutes all-time',s.minAll],['Game rounds (30d)',s.sessions30]].map(([l,v])=>`<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join('')
+      + (s.demoFamilies?`<div class="kpi" style="opacity:.6"><b>${s.demoFamilies}</b><span>demo opens · not counted</span></div>`:'')
+      + (s.orphanFamilies?`<div class="kpi" style="opacity:.6"><b>${s.orphanFamilies}</b><span>code-only · not counted</span></div>`:'')
+      + (s.testAccounts?`<div class="kpi" style="opacity:.6"><b>${s.testAccounts}</b><span>test accounts · not counted</span></div>`:'');
+    USAGE=d.rows; renderUsage();
+  }catch(e){ $('usageerr').textContent='Usage unavailable: '+e.message; }
+}
+async function pullReport(csv){
+  const type=$('rtype').value, days=$('rdays').value||30; $('rerr').textContent='';
+  try{
+    if(csv){
+      const r=await fetch(`/api/admin/report?type=${type}&days=${days}&format=csv`,{headers:{'X-Admin-Key':key()}});
+      if(!r.ok) throw new Error('server '+r.status);
+      const blob=await r.blob(); const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob); a.download=`mth-report-${type}-${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove(); return;
+    }
+    const d=await api(`/api/admin/report?type=${type}&days=${days}`);
+    RPT=d; rSort={i:-1,d:1}; renderReport();
+  }catch(e){ $('rerr').textContent=e.message; }
+}
+let RPT=null, rSort={i:-1,d:1};
+function setRSort(i){ if(rSort.i===i) rSort.d=-rSort.d; else rSort={i,d:1}; renderReport(); }
+function renderReport(){
+  if(!RPT) return;
+  $('tblr').querySelector('thead').innerHTML='<tr>'+RPT.columns.map((c,i)=>`<th style="cursor:pointer;white-space:nowrap" onclick="setRSort(${i})">${esc(c)}${rSort.i===i?(rSort.d>0?' ▲':' ▼'):''}</th>`).join('')+'</tr>';
+  let rows=RPT.rows;
+  if(rSort.i>=0) rows=rows.slice().sort((a,b)=>cmpVals(a[rSort.i],b[rSort.i],rSort.d));
+  const tb=$('tblr').querySelector('tbody'); tb.innerHTML='';
+  $('rempty').hidden=!!rows.length;
+  for(const row of rows.slice(0,800)){ const tr=document.createElement('tr'); tr.innerHTML=row.map(v=>`<td>${esc(v??'')}</td>`).join(''); tb.appendChild(tr); }
+}
+const _loadAll=loadAll; loadAll=async function(){ initTabs(); await _loadAll(); loadFeedback(); bcCount(); loadUsage(); loadRecKey(); };
+if(key()) loadAll().catch(()=>{ localStorage.removeItem('mth.adminkey'); });
+</script>
+<footer dir="rtl" style="text-align:center;padding:20px 16px 28px;font-family:Georgia,serif;font-size:14px;line-height:1.9;color:var(--ink2)">לע״נ משה ירחמיאל בן יהודה ז״ל<br>לזכות רפואה שלמה אליעזר בן חיה פנינה</footer>
+</body>
+</html>
