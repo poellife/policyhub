@@ -7418,7 +7418,8 @@ function maturityColumns(m, investorView) {
           const amount = Number(r.commission) || 0;
           return `${amount ? fmtExact(amount) : dash}
             <div class="secondary">${eff ? `${fmtNum(eff)}% of profit` : 'none'}${
-              pct != null ? ' · on this case' : ''}</div>`;
+              pct != null ? ' · on this case' : ''}${amount && r.commission_on_sheet
+                ? ' · on the sheet' : ''}</div>`;
         } },
       { key: 'net_rate', header: 'Net to investors · simple', cls: 'num',
         value: (r) => r.net_rate,
@@ -7708,15 +7709,17 @@ async function maturitiesView() {
           ${matCols.map((c) => `<th class="sortable ${c.cls || ''}" data-mat-key="${c.key}">${
             c.header}${state.matSort.key === c.key
               ? `<span class="arrow">${state.matSort.dir === 1 ? '↑' : '↓'}</span>` : ''}</th>`).join('')}
-          <th></th>
+          ${investorView ? '' : '<th></th>'}
         </tr></thead>
         <tbody>${rows.map((r) => `<tr class="clickable" data-id="${r.id}">${
           matCols.map((c) => `<td class="${c.cls || ''}">${c.cell(r)}</td>`).join('')}${
-          `<td style="white-space:nowrap">${''/* Anybody who can see the row can
-              take the sheet: an investor's is their own share, net, and
-              without the commission on it. */}
-            <a class="btn-sm" href="/api/policies/${r.id}/maturity.pdf"
-               title="A one-page summary of this case">Sheet</a>${
+          `<td style="white-space:nowrap">${''/* The office's sheet, not the
+              investor's: it carries the gross figures, the commission
+              and the whole ledger. What they are owed is this register,
+              already net, and their statements. */}${
+            investorView ? '' : `<a class="btn-sm"
+              href="/api/policies/${r.id}/maturity.pdf"
+              title="A one-page summary of this case">Sheet</a>`}${
             canEditData() ? ` <button class="btn-sm" data-proceeds="${r.id}"
               >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button>` : ''}${
             isAdminUser() ? ` <button class="btn-sm" data-commission="${r.id}"
@@ -7747,9 +7750,10 @@ async function maturitiesView() {
             const v = totals[c.total || c.key];
             return v === null || v === undefined
               ? '<td></td>' : `<td class="num">${fmtExact(v)}</td>`;
-            /* The actions column is always there now — everybody can take
-               the sheet — so the foot always closes with its blank. */
-          }).join('') + '<td></td>';
+            /* The actions column is the office's: the sheet, the proceeds
+               and the commission all live in it, and an investor's
+               register has none of them. */
+          }).join('') + (investorView ? '' : '<td></td>');
         })()}</tr></tfoot>
       </table></div>
     </div>
@@ -7876,11 +7880,24 @@ function openCommissionDialog(r) {
         <span class="muted" id="commWorks" style="font-size:12px"></span></div>
       <div class="field"></div>
     </div>
+    ${''/* Whether the paper names it. Off by default: the sheet is the
+           obvious thing to hand an investor who asks how a case did, and
+           on that copy the deduction is not itemised — it is simply
+           already out of the figures, the way every other number they
+           are shown works. */}
+    <label class="dlg-check">
+      <input type="checkbox" name="show_on_sheet" value="yes"
+             ${r.commission_on_sheet ? 'checked' : ''}>
+      <span><strong>Show the commission on the one-pager</strong> — the sheet then gives
+        the gross profit, names the commission, and quotes the return before and after it.
+        Left unticked, the sheet shows the profit and the return that the investors
+        actually get and says nothing about how it got there.</span>
+    </label>
     <div class="dlg-note">
       Taken off the profit after costs — the purchase price and every premium are
       already out — and never off the gross. A policy that lost money owes nothing.
       <br><br>
-      Leave it <strong>empty</strong> and the owner entity's own rate stands${
+      Leave the percentage <strong>empty</strong> and the owner entity's own rate stands${
         standing ? `, which on this policy is ${fmtNum(standing)}%` : ''}. Enter
       <strong>0</strong> to charge nothing on this case in particular. Whatever is set
       here comes off the final payment, so the investors' return on this policy moves
@@ -7888,7 +7905,8 @@ function openCommissionDialog(r) {
     </div>
   `, async (v) => {
     await api(`/policies/${r.id}/commission`, { method: 'PUT', body: {
-      commission_pct: v.commission_pct === '' ? null : v.commission_pct } });
+      commission_pct: v.commission_pct === '' ? null : v.commission_pct,
+      show_on_sheet: v.show_on_sheet === 'yes' } });
     toast(v.commission_pct === '' ? 'The entity’s rate stands' : 'Commission saved');
   }, 'Save');
 

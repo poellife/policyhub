@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-28a
+PolicyHub — build 2026-09-29b
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -8,53 +8,59 @@ FILES IN THIS PACKAGE
   src/opportunity-pdf.js   src/maturity-pdf.js  (NEW FILE)
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  src/maturity-pdf.js is new — it has to be copied in, not just
-  overwritten, or the maturity sheet will not load.
+  src/maturity-pdf.js is new — copy it in, do not just overwrite the
+  others, or the maturity sheet will not load.
 
   Everything since 2026-09-17c is in here; deploy this instead of any
-  earlier package still waiting. It assumes 2026-09-17c, which carried
-  public/initials.js, is already deployed.
+  earlier package still waiting.
 
-NEW IN THIS ONE
+THE MATURITY SHEET AND THE COMMISSION
 
-  A COMMISSION PER MATURITY. On the Maturities register, administrators
-  get a Commission button on each row. It takes a percentage of the
-  PROFIT AFTER COSTS — everything that came back, less the purchase
-  price and every premium — and nothing is charged on a case that lost
-  money. The dialog works the percentage out in dollars as you type it.
+  A COMMISSION PER MATURITY, for administrators. On each row of the
+  Maturities register, the Commission button takes a percentage of the
+  PROFIT AFTER COSTS — what came back, less the purchase price and every
+  premium — and charges nothing on a case that lost money. The dialog
+  works the percentage out in dollars as you type it.
 
-    Two new columns: what the commission comes to on that case, and the
+    Two columns on the register: what it comes to on that case, and the
     NET RETURN TO THE INVESTORS beside the gross one, simple and
     compounded. The net rate is solved again from the cash flows with
     the deduction taken off the final payment on its own date — not the
-    gross rate with a percentage shaved off it, which is a different and
+    gross rate with a percentage taken off it, which is a different and
     wrong number.
 
-    Leaving the box EMPTY means the owner entity's own rate stands.
-    Entering 0 means nothing is charged on that case in particular.
+    Empty means the owner entity's rate stands. 0 means nothing is
+    charged on that case. A manager sees neither column nor button, and
+    an investor's register carries no trace of it.
 
-    Administrators only. A manager sees neither column nor button, and
-    an investor's register carries no trace of it — their figures are
-    already net, as they always were.
+  A ONE-PAGE SUMMARY. The "Sheet" link on each row prints the case and
+  its dates, what it cost itemised, what came back, the profit, the
+  multiple, both rates, and the cash as it moved.
 
-  A MATURITY ONE-PAGER. A "Sheet" link on every row prints a single
-  page: the case and its dates, what it cost (purchase price, premiums,
-  other costs), what came back (death benefit, proceeds), the profit,
-  the commission, the multiple, both rates, and the cash as it moved.
+    SHOW THE COMMISSION ON IT, OR NOT — a tick box on the commission
+    dialog, off by default. Left off, the sheet gives the profit and the
+    return the investors actually get and says nothing about how it got
+    there, so the page can be handed over as it stands. Ticked, it shows
+    the gross profit, names the commission, and quotes the return before
+    and after it. The register says which of the two a case is set to.
 
-    Investors can print their own: their share, net, with the insured as
-    initials and no mention of the commission.
+    The sheet is not offered to investors in the portal: their register
+    and their statements are their copy, already net.
+
+  Fixed: the note under the rates ran off the right-hand edge of the
+  page and lost its last few words. Everything written in sentences on
+  that sheet is wrapped to the page now.
 
 EVERYTHING ELSE IN THIS PACKAGE (25a–i)
 
-  Medical review is administrators only, with a Med Review tab, files
-  and links for the doctor, a separate records folder per review, the
-  internal LE, and his screen cut back to an estimate, his reasoning and
-  one button.
+  Medical review is administrators only, with its own tab, files and
+  links for the doctor, a separate records folder per review, the
+  internal LE beside the provider's report, and a screen cut back to an
+  estimate, his reasoning, his call and one button.
 
   Drop a provider's LE report onto the Life-expectancy reports card.
 
   Investors are quoted compounded by default, with a switch to simple.
 
-NOTHING TO RUN. Copy the files in and redeploy. The new column applies
-itself on boot.
+NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
+themselves on boot.

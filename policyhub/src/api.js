@@ -7524,6 +7524,8 @@ router.get('/maturities', wrap(async (req, res) => {
                  figures above are already net of it. */
               CASE WHEN $1::int IS NULL THEN pl.commission_pct END AS commission_pct,
               CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
+              CASE WHEN $1::int IS NULL THEN pl.commission_on_sheet END
+                                                                  AS commission_on_sheet,
               ${shareOf('pl.id', 1)}              AS my_pct,
               (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
                                                    AS lives_count
@@ -7552,7 +7554,9 @@ router.get('/maturities', wrap(async (req, res) => {
        in their payload — even empty — is the arrangement announcing
        itself on the one screen it has no business on. */
     const r = { ...row };
-    if (scope !== null) { delete r.commission_pct; delete r.effective_pct; }
+    if (scope !== null) {
+      delete r.commission_pct; delete r.effective_pct; delete r.commission_on_sheet;
+    }
     const flows = byPolicy.get(r.id) || [];
     const a = analyzeFlows(flows);
     /* For staff these flows are GROSS -- `portfolioFlows` only nets an
@@ -7653,12 +7657,18 @@ router.get('/maturities', wrap(async (req, res) => {
  * ledger rather than from anything a screen posted — so the paper and
  * the register cannot drift.
  *
- * An investor may take their own: the figures are their share and
- * already net of the managing partner's, and the commission itself is
- * left off, which is exactly how every other screen treats it.
+ * Staff only. It was briefly offered to investors as their own share,
+ * net; it is not, because the sheet is the desk's reading of a closed
+ * case — gross figures, the commission, the whole ledger — and what an
+ * investor is owed is already on their register and their statements.
  */
-router.get('/policies/:id/maturity.pdf', inPolicyScope('id'), wrap(async (req, res) => {
-  const scope = scopeId(req);
+router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
+  inPolicyScope('id'), wrap(async (req, res) => {
+  /* The office's sheet, and only the office's. An investor's statement
+     is the Realized register and the reports built for them; this page
+     carries the gross figures and what the house took out of them,
+     which is the desk's side of the same trade. */
+  const scope = null;
   const { rows } = await q(
     `SELECT pl.*, ${carryRate()} AS carry_pct, ${shareOf('pl.id', 1)} AS my_pct,
             /* terminalFlow reads a column called "benefit", and a
@@ -7681,21 +7691,23 @@ router.get('/policies/:id/maturity.pdf', inPolicyScope('id'), wrap(async (req, r
     `SELECT txn_date, txn_type, amount, remarks FROM transactions
       WHERE policy_id = $1 ORDER BY txn_date, id`, [req.params.id]);
 
-  const factor = scope === null ? 1 : (Number(p.my_pct) || 0) / 100;
+  /* Whole-policy figures throughout: this is the desk's sheet and the
+     desk owns the case, not a slice of it. */
+  const factor = 1;
   const asOf = today();
   const base = ledgerFlows(txns, factor);
   const lastOut = base.reduce((d, f) => (f.amount < 0 && (!d || f.date > d) ? f.date : d), null);
   const terminal = terminalFlow(p, asOf, lastOut);
   const gross = terminal ? [...base, { ...terminal, amount: terminal.amount * factor }] : base;
 
-  /* The commission, and therefore the two pairs of rates. For staff the
-     flows are gross and the net pair is solved here; an investor's are
-     already net and the "gross" pair is not theirs to see. */
+  /* The commission, and the two pairs of rates that follow from it: the
+     flows here are gross, and the net pair is solved from them with the
+     deduction taken off the final payment on its own date. */
   const pct = Number(p.carry_pct) || 0;
   const g = analyzeFlows(gross);
   const netFlows = pct ? flowsAfterCarry(gross, pct) : gross;
   const n = pct ? analyzeFlows(netFlows) : g;
-  const commission = scope === null && pct ? carryOn(g.returned, g.invested, pct) : 0;
+  const commission = pct ? carryOn(g.returned, g.invested, pct) : 0;
 
   const sum = (types) => txns
     .filter((t) => types.includes(t.txn_type))
@@ -7722,13 +7734,8 @@ router.get('/policies/:id/maturity.pdf', inPolicyScope('id'), wrap(async (req, r
     policy_number: p.policy_number,
     carrier_name: p.carrier_name,
     product_type: p.product_type,
-    fund_code: scope === null ? p.fund_code : null,
-    /* The name on the office's copy; initials on an investor's, the same
-       rule the deal sheet follows. */
-    insured: scope === null ? name
-      : `${initialsOf(p.first_name, p.last_name) || 'The insured'}`,
-    for_investor: scope !== null,
-    my_pct: Number(p.my_pct) || 0,
+    fund_code: p.fund_code,
+    insured: name,
     acquired_on: acquired,
     matured_on: p.matured_on,
     proceeds_received_on: p.proceeds_received_on,
@@ -7742,26 +7749,27 @@ router.get('/policies/:id/maturity.pdf', inPolicyScope('id'), wrap(async (req, r
     other_costs: sum(['Fee', 'Servicing', 'Commission']),
     other_income: sum(['Withdrawal']),
     total_invested: g.invested,
-    death_benefit: Number(p.death_benefit || p.face_amount || 0) * factor
-      - (scope === null ? 0 : carryOn(
-        Number(p.death_benefit || p.face_amount || 0) * factor, g.invested, pct)),
-    proceeds_amount: p.proceeds_amount == null ? null
-      : Number(p.proceeds_amount) * factor
-        - (scope === null ? 0
-          : carryOn(Number(p.proceeds_amount) * factor, g.invested, pct)),
-    returned: (scope === null ? g : n).returned,
+    death_benefit: Number(p.death_benefit || p.face_amount || 0),
+    proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount),
+    returned: g.returned,
     gross_profit: g.profit,
     commission,
     commission_pct: commission ? pct : 0,
+    /* Named on the paper only when this case says so. Off, the sheet
+       shows the net figures with nothing itemised -- which is how an
+       investor sees every other figure in this application -- and the
+       page can be handed to one without a second thought. */
+    show_commission: !!p.commission_on_sheet && !!commission,
     net_profit: g.profit - commission,
-    multiple: (scope === null ? g : n).multiple,
-    /* The office's copy carries both pairs; an investor's carries one,
-       which is theirs. */
-    rate: scope === null ? g.rate : null,
-    compound_rate: scope === null ? g.compound_rate : null,
-    net_rate: scope === null ? n.rate : g.rate,
-    net_compound_rate: scope === null ? n.compound_rate : g.compound_rate,
-    flows: (scope === null ? gross : netFlows).map((f) => ({
+    multiple: g.multiple,
+    /* Both pairs: what the case did, and what the investors on it are
+       left with once the commission comes off. The gap between them is
+       the point of the sheet. */
+    rate: g.rate,
+    compound_rate: g.compound_rate,
+    net_rate: n.rate,
+    net_compound_rate: n.compound_rate,
+    flows: gross.map((f) => ({
       date: f.date,
       what: f.label || (Number(f.amount) < 0 ? 'Paid out' : 'Received'),
       amount: f.amount,
@@ -7798,9 +7806,17 @@ router.put('/policies/:id/commission', blockInvestors, blockMedical, requireRole
     const pct = clear ? null : num(given);
     if (!clear && (pct === null || pct < 0 || pct > 100))
       return res.status(400).json({ error: 'A commission between 0 and 100 per cent.' });
+    /* Whether it is named on the one-pager. Sent with the rate because
+       the two are decided in the same breath, and left as it was when
+       the client does not mention it. */
+    const show = 'show_on_sheet' in req.body
+      ? !!(req.body.show_on_sheet === true || req.body.show_on_sheet === 'true') : null;
     const { rows } = await q(
-      `UPDATE policies SET commission_pct = $1::numeric, updated_at = now()
-        WHERE id = $2 RETURNING policy_number, commission_pct`, [pct, req.params.id]);
+      `UPDATE policies SET commission_pct = $1::numeric,
+              commission_on_sheet = COALESCE($3::boolean, commission_on_sheet),
+              updated_at = now()
+        WHERE id = $2 RETURNING policy_number, commission_pct, commission_on_sheet`,
+      [pct, req.params.id, show]);
     if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
     await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
       clear ? `${rows[0].policy_number} · commission cleared — the entity's rate stands`

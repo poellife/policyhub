@@ -299,6 +299,19 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
  * is therefore very hard to believe in. */
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
 
+/* Whether the commission is named on the one-page summary.
+ *
+ * Off by default, and the default is the argument. The sheet is the
+ * desk's, but it is the obvious thing to hand an investor who asks how
+ * a case did -- and on that copy the deduction is not itemised, it is
+ * simply already out of the figures, which is how every other screen in
+ * this application treats it. Turning this on says: on this case, show
+ * the gross profit, name the commission, and show the return before and
+ * after it.
+ *
+ * Above the view for the same reason as the column above it. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_on_sheet BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- The rule, as a function, so the trigger and any report agree by construction.
 CREATE OR REPLACE FUNCTION policy_maturity_date(p_id INTEGER)
 RETURNS DATE LANGUAGE sql STABLE AS $$
