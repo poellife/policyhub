@@ -312,6 +312,17 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
  * Above the view for the same reason as the column above it. */
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_on_sheet BOOLEAN NOT NULL DEFAULT FALSE;
 
+/* Whether the one-pager itemises every transaction.
+ *
+ * Off by default. The totals above it already say what the case cost --
+ * the purchase price, the premiums and how many of them -- and a reader
+ * asking how a policy did does not need forty dated lines to be told.
+ * Somebody checking the arithmetic does, and that is what this is for:
+ * ticked, the sheet lists the ledger as it moved.
+ *
+ * Above the view, for the same reason as the two columns before it. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS sheet_show_ledger BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- The rule, as a function, so the trigger and any report agree by construction.
 CREATE OR REPLACE FUNCTION policy_maturity_date(p_id INTEGER)
 RETURNS DATE LANGUAGE sql STABLE AS $$

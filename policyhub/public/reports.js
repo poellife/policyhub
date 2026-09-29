@@ -1048,8 +1048,13 @@ function buildReturn(d, o, { realized }) {
             <td class="num">${fmtExact(p.profit)}</td>
             <td class="num">${p.multiple ? `${p.multiple.toFixed(2)}×` : '—'}</td>` : ''}
           <td class="num">${p.days.toLocaleString('en-US')}</td>
-          <td class="num">${fmtRate(p.rate)}</td>
-          ${o.investorShare ? '' : `<td class="num">${fmtRate(p.compound_rate)}</td>`}
+          ${''/* On the SAME weighting as the headline above. These two
+                 printed the pooled capital-weighted figure whatever the
+                 document was set to, so a report asked for equal-weighted
+                 led with 65% and footed with 19% — two answers to one
+                 question, on one page, with nothing to say why. */}
+          <td class="num">${fmtRate(shown(p))}</td>
+          ${o.investorShare ? '' : `<td class="num">${fmtRate(shownCompound(p))}</td>`}
         </tr></tfoot>` : ''}
       </table>
     </div>

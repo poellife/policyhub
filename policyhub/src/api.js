@@ -7526,6 +7526,8 @@ router.get('/maturities', wrap(async (req, res) => {
               CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
               CASE WHEN $1::int IS NULL THEN pl.commission_on_sheet END
                                                                   AS commission_on_sheet,
+              CASE WHEN $1::int IS NULL THEN pl.sheet_show_ledger END
+                                                                  AS sheet_show_ledger,
               ${shareOf('pl.id', 1)}              AS my_pct,
               (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
                                                    AS lives_count
@@ -7556,6 +7558,7 @@ router.get('/maturities', wrap(async (req, res) => {
     const r = { ...row };
     if (scope !== null) {
       delete r.commission_pct; delete r.effective_pct; delete r.commission_on_sheet;
+      delete r.sheet_show_ledger;
     }
     const flows = byPolicy.get(r.id) || [];
     const a = analyzeFlows(flows);
@@ -7760,6 +7763,10 @@ router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
        investor sees every other figure in this application -- and the
        page can be handed to one without a second thought. */
     show_commission: !!p.commission_on_sheet && !!commission,
+    /* And whether it itemises the ledger. Off, the sheet stops at the
+       totals — which is the whole of what most readers want, and the
+       page stays one page. */
+    show_flows: !!p.sheet_show_ledger,
     net_profit: g.profit - commission,
     multiple: g.multiple,
     /* Both pairs: what the case did, and what the investors on it are
@@ -7809,14 +7816,23 @@ router.put('/policies/:id/commission', blockInvestors, blockMedical, requireRole
     /* Whether it is named on the one-pager. Sent with the rate because
        the two are decided in the same breath, and left as it was when
        the client does not mention it. */
-    const show = 'show_on_sheet' in req.body
-      ? !!(req.body.show_on_sheet === true || req.body.show_on_sheet === 'true') : null;
+    /* Null when the client did not mention it, so a dialog that only
+       changes the rate cannot silently clear a tick box. */
+    const flag = (k) => (k in req.body
+      ? !!(req.body[k] === true || req.body[k] === 'true') : null);
+    const show = flag('show_on_sheet');
+    /* And whether the sheet itemises the ledger. Set from the same
+       dialog because both are answers to "what does this page say", and
+       left alone when the client does not mention them. */
+    const ledger = flag('show_ledger');
     const { rows } = await q(
       `UPDATE policies SET commission_pct = $1::numeric,
               commission_on_sheet = COALESCE($3::boolean, commission_on_sheet),
+              sheet_show_ledger  = COALESCE($4::boolean, sheet_show_ledger),
               updated_at = now()
-        WHERE id = $2 RETURNING policy_number, commission_pct, commission_on_sheet`,
-      [pct, req.params.id, show]);
+        WHERE id = $2
+        RETURNING policy_number, commission_pct, commission_on_sheet, sheet_show_ledger`,
+      [pct, req.params.id, show, ledger]);
     if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
     await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
       clear ? `${rows[0].policy_number} · commission cleared — the entity's rate stands`

@@ -412,6 +412,13 @@ const otherRate = (a) => {
   return rateBasis() === 'simple' ? (a.rate ?? null) : (a.mean_rate ?? null);
 };
 
+/** And the same pair, compounded. */
+const otherCompound = (a) => {
+  if (!a) return null;
+  return rateBasis() === 'simple'
+    ? (a.compound_rate ?? null) : (a.mean_compound_rate ?? null);
+};
+
 /**
  * The compounded figure, on the same basis as the simple one beside it.
  *
@@ -438,7 +445,12 @@ const bookCompound = (a) => {
 const basisNote = (a, { count } = {}) => {
   if (!showsBothRates() || !a || bookRate(a) === null) return '';
   const here = BASIS_WORDS[rateBasis()];
-  const other = otherRate(a);
+  /* Compared like with like. The tiles lead with the compounded figure
+     now, so the "and the other weighting reads X" has to be the other
+     weighting of the COMPOUNDED figure — quoting the simple one there
+     is two different numbers in one sentence, differing for two
+     different reasons. */
+  const other = showSimpleToo() ? otherRate(a) : otherCompound(a);
   const n = count ?? a.rated_count;
   const of = rateBasis() === 'simple' && n
     ? ` across ${n} ${n === 1 ? 'rate' : 'rates'}` : '';
@@ -500,7 +512,12 @@ const interestShown = () => (['simple', 'compound', 'both']
      IRR is and what they compare this against; the desk gets simple
      interest, which is how a life settlement is quoted. Either can
      switch, and the choice is then theirs and is remembered. */
-  : (isInvestorUser() ? 'compound' : 'simple'));
+  /* Compounded, for everybody. It is what an IRR is, what every other
+     asset these people hold is measured by, and what the office quotes
+     when somebody asks how a case did. Simple interest is still solved
+     on the same flows and is one tick box away -- see `simpleBox` -- but
+     it is no longer the number a screen leads with by default. */
+  : 'compound');
 
 const INTEREST_WORDS = {
   simple: 'simple interest',
@@ -550,6 +567,34 @@ const interestToggle = () => (`
     <option value="both" ${interestShown() === 'both' ? 'selected' : ''}
       >Both</option>
   </select>`);
+
+/**
+ * "Show simple interest too."
+ *
+ * A tick box rather than the three-way select, because on the registers
+ * there are only two answers worth having: the compounded figure, which
+ * is the default, or both side by side. Ticked, it puts the simple
+ * column back beside the compounded one; unticked, every rate on the
+ * screen is compounded.
+ */
+const showSimpleToo = () => interestShown() !== 'compound';
+
+const simpleBox = () => `
+  <label class="head-check" title="Simple interest on dollar-years, beside the IRR">
+    <input type="checkbox" id="showSimpleToo" ${showSimpleToo() ? 'checked' : ''}>
+    <span>Show simple interest</span>
+  </label>`;
+
+const wireSimpleBox = () => {
+  $('#showSimpleToo')?.addEventListener('change', async (e) => {
+    state.interestShown = e.target.checked ? 'both' : 'compound';
+    render();
+    try {
+      await api('/me/prefs/interest_shown', {
+        method: 'PUT', body: { shown: state.interestShown } });
+    } catch (err) { toast(`That was not saved: ${err.message}`); }
+  });
+};
 
 /** Wire it up. Call from a view's `after`. */
 const wireInterestToggle = () => {
@@ -1150,8 +1195,15 @@ const isMedicalUser  = () => state.user?.role === 'medical';
  * no explanation is worse than one that is labelled.
  */
 const showsBothRates = () => !isInvestorUser();
-const compoundNote = (a) => (!showsBothRates() || !a || bookCompound(a) == null
-  ? '' : `${fmtRate(bookCompound(a))} compounded`);
+/**
+ * The other convention, said beside the figure on the tile.
+ *
+ * The tiles lead with the compounded rate, so this is the SIMPLE one —
+ * and only when somebody has asked to see it. It used to be the other
+ * way round, back when simple interest was what a screen led with.
+ */
+const compoundNote = (a) => (!showsBothRates() || !showSimpleToo() || !a
+  || bookRate(a) == null ? '' : `${fmtRate(bookRate(a))} simple interest`);
 
 let screenKeys = null;
 const onKey = (fn) => { screenKeys = fn; };
@@ -1822,6 +1874,7 @@ async function dashboardView() {
       </div>
       <div class="spacer"></div>
       ${rateToggle()}
+      ${showsBothRates() ? simpleBox() : ''}
       ${entityPicker(funds)}
       ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
       <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
@@ -1877,8 +1930,9 @@ async function dashboardView() {
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
       <div class="stat">
-        <div class="label">Portfolio return${showsBothRates() ? ' · simple interest' : ''}</div>
-        <div class="value">${fmtRate(bookRate(sum.rate))}</div>
+        <div class="label">Portfolio return${showsBothRates() ? ' · compounded' : ''}</div>
+        <div class="value">${fmtRate(showsBothRates()
+          ? bookCompound(sum.rate) : bookRate(sum.rate))}</div>
         ${''/* Which of the two ways of combining the policies is on the
                tile, and what the other reads. Printed rather than left to
                the control in the heading: the gap between them is the
@@ -1947,6 +2001,7 @@ async function dashboardView() {
     after: () => {
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
       lineChart($('#chartCapital'), {
@@ -2567,7 +2622,14 @@ async function policyView() {
       </div>
       <div class="spacer"></div>
       ${shareToggle(p.my_pct)}
-      ${['admin', 'manager'].includes(state.user.role)
+      ${''/* On a matured policy, "Offer to investors" is an offer of
+             something that has already paid out. What somebody wants
+             there instead is the sheet that says how it did. */}
+      ${p.status === 'Matured' && !isInvestorUser()
+        ? `<a class="btn" id="maturitySheetBtn"
+             href="/api/policies/${p.id}/maturity.pdf">One-pager</a>`
+        : ''}
+      ${['admin', 'manager'].includes(state.user.role) && p.status !== 'Matured'
         ? '<button id="offerPolicyBtn">Offer to investors</button>' : ''}
       ${['admin', 'manager'].includes(state.user.role) ? '<button class="btn-danger" id="deletePolicyBtn">Delete policy</button>' : ''}
       ${canEditData() && p.insured_id ? '<button id="editInsuredBtn">Edit insured</button>' : ''}
@@ -3357,23 +3419,27 @@ function returnTab(p, d) {
 
   return `
     <div class="kpi-row">
+      ${''/* Compounded leads. It is what an IRR is and what this office
+             quotes; simple interest is the same flows read the other way
+             and gets its own tile only when the box on the register is
+             ticked, so the two can never be mistaken for each other. */}
+      ${showsBothRates() && r.compound_rate != null ? `
+      <div class="stat">
+        <div class="label">${settled ? 'Realized return' : d.status === 'Matured'
+          ? 'Return if collected today' : 'Return if matured today'} · compounded</div>
+        <div class="value hero">${fmtRate(r.compound_rate)}</div>
+        <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
+          r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
+      </div>` : ''}
+      ${!showsBothRates() || showSimpleToo() || r.compound_rate == null ? `
       <div class="stat">
         <div class="label">${settled ? 'Realized return' : d.status === 'Matured' ? 'Return if collected today' : 'Return if matured today'}${
           showsBothRates() ? ' · simple' : ''}</div>
         <div class="value hero">${fmtRate(r.rate)}</div>
-        <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
-          r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
-      </div>
-      ${''/* The same cash flows, compounded. Its own tile rather than a
-             footnote: it is a different number and the difference matters,
-             so it gets a label of its own and cannot be misread as the one
-             beside it. */}
-      ${showsBothRates() && r.compound_rate != null ? `
-      <div class="stat">
-        <div class="label">Compounded (IRR)</div>
-        <div class="value hero">${fmtRate(r.compound_rate)}</div>
-        <div class="note">the same dated cash flows, solved as an internal rate of
-          return rather than as simple interest on dollar-years</div>
+        <div class="note">${showsBothRates() && r.compound_rate != null
+          ? 'simple interest on dollar-years, rather than an internal rate of return'
+          : `${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
+            r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}`}</div>
       </div>` : ''}
       <div class="stat">
         <div class="label">Capital invested</div>
@@ -4999,6 +5065,7 @@ async function servicingView() {
     after: () => {
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       wireServicingTabs();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', () => go(`#/policy/${tr.dataset.id}`)));
@@ -7384,23 +7451,26 @@ function maturityColumns(m, investorView) {
       cell: (r) => (gain(r) == null ? dash
         : `<span style="color:${gain(r) >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${
             fmtExact(gain(r))}</span>`) },
-    { key: 'rate', header: investorView ? 'Return' : 'Return · simple', cls: 'num',
+    /* Compounded first, because that is the figure this office reads and
+       the one every screen now leads with. Simple interest is still
+       solved from the same flows and appears beside it the moment the
+       box in the page header is ticked. */
+    ...(investorView || !showSimpleToo() ? [] : [{
+      key: 'rate', header: 'Return · simple', cls: 'num',
       value: (r) => r.rate,
-      cell: (r) => `<span title="${paid(r) == null
+      cell: (r) => `<span class="muted" title="${paid(r) == null
         ? 'Provisional — assumes the death benefit is collected today'
         : r.rate_short ? 'Held under 90 days — an annualised rate is unreliable here'
         : r.rate_ambiguous ? 'Cash flows change direction more than once; more than one rate can satisfy the equation'
         : `${r.rate_days} days held`}">${fmtRate(r.rate)}${
         r.rate != null && (paid(r) == null || r.rate_short || r.rate_ambiguous)
-          ? '<span class="muted"> *</span>' : ''}</span>` },
-    /* Beside it rather than instead of it, and sortable on its own: a
-       register ordered by simple return and one ordered by compounded
-       return are not the same list, and which one somebody wants depends
-       on the question they came with. */
-    ...(investorView ? [] : [{ key: 'compound_rate', header: 'Return · compounded',
+          ? ' *' : ''}</span>` }]),
+    { key: 'compound_rate', header: investorView ? 'Return' : 'Return · compounded',
       cls: 'num', value: (r) => r.compound_rate,
-      cell: (r) => `<span class="muted" title="Internal rate of return on the same dated cash flows">${
-        fmtRate(r.compound_rate)}</span>` }]),
+      cell: (r) => `<span title="Internal rate of return on the same dated cash flows${
+        paid(r) == null ? ' — assumes the death benefit is collected today' : ''}">${
+        fmtRate(r.compound_rate)}${r.compound_rate != null && paid(r) == null
+          ? '<span class="muted"> *</span>' : ''}</span>` },
     /* What the house takes on this case, and what the investors are left
        with. Two columns rather than one, because "20%" and "$482,000"
        answer different questions and the second is the one anybody
@@ -7421,11 +7491,14 @@ function maturityColumns(m, investorView) {
               pct != null ? ' · on this case' : ''}${amount && r.commission_on_sheet
                 ? ' · on the sheet' : ''}</div>`;
         } },
-      { key: 'net_rate', header: 'Net to investors · simple', cls: 'num',
-        value: (r) => r.net_rate,
+      { key: 'net_rate',
+        header: `Net to investors${showSimpleToo() ? ' · compounded' : ''}`, cls: 'num',
+        /* Sorted on whichever is being shown, so the column and the
+           ordering cannot disagree. */
+        value: (r) => (showSimpleToo() ? r.net_compound_rate : r.net_compound_rate),
         cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
-          fmtRate(r.net_rate)}</span>
-          <div class="secondary">${fmtRate(r.net_compound_rate)} compounded</div>` },
+          fmtRate(r.net_compound_rate)}</span>${showSimpleToo()
+          ? `<div class="secondary">${fmtRate(r.net_rate)} simple</div>` : ''}` },
     ]),
   ];
 }
@@ -7580,6 +7653,7 @@ async function carryView() {
     after: () => {
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       $('#carryStatus').addEventListener('change', (e) => {
         state.carryStatus = e.target.value;
         render();
@@ -7641,6 +7715,7 @@ async function maturitiesView() {
           !investorView && entityLabel() ? ` · ${esc(entityLabel())} only` : ''}</div></div>
       <div class="spacer"></div>
       ${rateToggle()}
+      ${showsBothRates() ? simpleBox() : ''}
       ${entityPicker(funds)}
       ${shareToggle()}
       ${rows.length && isAdminUser() ? '<button id="exportMaturitiesBtn">Export CSV</button>' : ''}
@@ -7684,14 +7759,18 @@ async function maturitiesView() {
              not folded in at today's date — it has had no time to run, so it
              would flatter the rate. That projection is still here, under the
              figure and named for what it is. */''}
+        ${''/* Compounded is the headline. Simple interest is the same
+               flows read the other way and appears under it only when
+               the box in the header is ticked. */}
         <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}${
-          showsBothRates() ? ' · simple interest' : ''}</div>
-        <div class="value">${fmtRate(bookRate(paidCount ? m.realized : m.portfolio))}</div>
-        ${showsBothRates() && compoundNote(paidCount ? m.realized : m.portfolio)
-          ? `<div class="note">${compoundNote(paidCount ? m.realized : m.portfolio)}</div>` : ''}
+          showsBothRates() ? ' · compounded' : ''}</div>
+        <div class="value">${fmtRate(bookCompound(paidCount ? m.realized : m.portfolio))}</div>
+        ${showsBothRates() && showSimpleToo()
+          ? `<div class="note">${fmtRate(bookRate(paidCount ? m.realized : m.portfolio))}
+             simple interest</div>` : ''}
         <div class="note">${paidCount
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
-             received${unpaidCount ? ` · ${fmtRate(bookRate(m.portfolio))} with the other ${
+             received${unpaidCount ? ` · ${fmtRate(bookCompound(m.portfolio))} with the other ${
                unpaidCount} assumed collected today` : ''}`
           : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}${
           basisNote(paidCount ? m.realized : m.portfolio)
@@ -7732,15 +7811,18 @@ async function maturitiesView() {
             total_death_benefit: t.total_death_benefit, total_invested: t.total_invested,
             total_proceeds: t.total_proceeds, gain,
             rate: bookRate(m.portfolio),
+            compound_rate: bookCompound(m.portfolio),
             commission: rows.reduce((x, r) => x + (Number(r.commission) || 0), 0),
           };
           const first = matCols.findIndex((c) => c.total || c.key === 'gain'
-            || c.key === 'rate');
+            || c.key === 'rate' || c.key === 'compound_rate');
           return matCols.map((c, i) => {
             if (i === 0) return `<td colspan="${first}">Totals — ${rows.length}
               ${rows.length === 1 ? 'policy' : 'policies'}</td>`;
             if (i < first) return '';
             if (c.key === 'rate') return `<td class="num">${fmtRate(totals.rate)}</td>`;
+            if (c.key === 'compound_rate')
+              return `<td class="num">${fmtRate(totals.compound_rate)}</td>`;
             /* The commission column totals as money; the net-rate column
                has no meaningful total — a book rate is not the sum of
                per-policy rates — so it stays blank rather than lying. */
@@ -7783,6 +7865,7 @@ async function maturitiesView() {
       wireShareToggle();
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       document.querySelectorAll('tr.clickable').forEach((tr) =>
         tr.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
@@ -7867,7 +7950,7 @@ function openCommissionDialog(r) {
   const profit = Number(r.gross_profit) || 0;
   const standing = Number(r.effective_pct) || 0;
   const own = r.commission_pct == null ? '' : String(Number(r.commission_pct));
-  const dlg = openDialog(`Commission — ${r.policy_number}`, `
+  const dlg = openDialog(`Commission and the one-pager — ${r.policy_number}`, `
     <div class="field"><span class="muted" style="font-size:12px">
       ${esc(r.carrier_name || '')} · matured ${fmtDate(r.matured_on)} ·
       profit on this case ${fmtExact(profit)}${r.proceeds_amount == null
@@ -7880,6 +7963,7 @@ function openCommissionDialog(r) {
         <span class="muted" id="commWorks" style="font-size:12px"></span></div>
       <div class="field"></div>
     </div>
+    <div class="dlg-section">What the one-pager says</div>
     ${''/* Whether the paper names it. Off by default: the sheet is the
            obvious thing to hand an investor who asks how a case did, and
            on that copy the deduction is not itemised — it is simply
@@ -7892,6 +7976,17 @@ function openCommissionDialog(r) {
         the gross profit, names the commission, and quotes the return before and after it.
         Left unticked, the sheet shows the profit and the return that the investors
         actually get and says nothing about how it got there.</span>
+    </label>
+    ${''/* And whether it itemises the ledger. Off by default: the totals
+           already say what the case cost and how many premiums went
+           into it, and forty dated lines is not what somebody asking
+           "how did that one do?" is after. */}
+    <label class="dlg-check">
+      <input type="checkbox" name="show_ledger" value="yes"
+             ${r.sheet_show_ledger ? 'checked' : ''}>
+      <span><strong>List every transaction on it</strong> — each premium and every other
+        entry, dated, as they were paid. Left unticked, the sheet stops at the totals:
+        the purchase price, what the premiums came to and how many there were.</span>
     </label>
     <div class="dlg-note">
       Taken off the profit after costs — the purchase price and every premium are
@@ -7906,7 +8001,8 @@ function openCommissionDialog(r) {
   `, async (v) => {
     await api(`/policies/${r.id}/commission`, { method: 'PUT', body: {
       commission_pct: v.commission_pct === '' ? null : v.commission_pct,
-      show_on_sheet: v.show_on_sheet === 'yes' } });
+      show_on_sheet: v.show_on_sheet === 'yes',
+      show_ledger: v.show_ledger === 'yes' } });
     toast(v.commission_pct === '' ? 'The entity’s rate stands' : 'Commission saved');
   }, 'Save');
 
@@ -7985,6 +8081,7 @@ async function insuredsView() {
     after: () => {
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       wireSearch('#insuredSearch', (term) => { state.insuredSearch = term; });
       $('#newInsuredBtn')?.addEventListener('click', () => openInsuredDialog(null));
       document.querySelectorAll('[data-edit-insured]').forEach((b) =>
@@ -8215,6 +8312,7 @@ async function investorsView() {
       wireSearch('#investorSearch', (term) => { state.investorSearch = term; });
       wireEntityPicker();
       wireRateToggle();
+      wireSimpleBox();
       $('#newInvestorBtn')?.addEventListener('click', () => openInvestorDialog(null));
       $('#appShowAll')?.addEventListener('click', () => {
         state.showDecided = !state.showDecided; render();

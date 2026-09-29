@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-29b
+PolicyHub — build 2026-09-29e
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -8,59 +8,52 @@ FILES IN THIS PACKAGE
   src/opportunity-pdf.js   src/maturity-pdf.js  (NEW FILE)
   public/app.js  public/reports.js  public/styles.css  public/build.js
 
-  src/maturity-pdf.js is new — copy it in, do not just overwrite the
-  others, or the maturity sheet will not load.
+  src/maturity-pdf.js is new — copy it in, or the maturity sheet will
+  not load. Everything since 2026-09-17c is in here.
 
-  Everything since 2026-09-17c is in here; deploy this instead of any
-  earlier package still waiting.
+COMPOUNDED IS NOW THE DEFAULT EVERYWHERE
 
-THE MATURITY SHEET AND THE COMMISSION
+  The dashboard, the policy return tiles and the Maturities register all
+  lead with the compounded figure — the IRR. A tick box in the page
+  header, "Show simple interest", puts the simple column and the simple
+  figure back beside it; unticked, every rate on the screen is
+  compounded. The choice is remembered against the account.
 
-  A COMMISSION PER MATURITY, for administrators. On each row of the
-  Maturities register, the Commission button takes a percentage of the
-  PROFIT AFTER COSTS — what came back, less the purchase price and every
-  premium — and charges nothing on a case that lost money. The dialog
-  works the percentage out in dollars as you type it.
+  Where the screen prints "the other weighting reads X", that figure is
+  now the other weighting of the SAME convention. It used to quote the
+  simple one beside a compounded headline — two numbers differing for
+  two different reasons, in one sentence.
 
-    Two columns on the register: what it comes to on that case, and the
-    NET RETURN TO THE INVESTORS beside the gross one, simple and
-    compounded. The net rate is solved again from the cash flows with
-    the deduction taken off the final payment on its own date — not the
-    gross rate with a percentage taken off it, which is a different and
-    wrong number.
+THE REPORT BUG YOU FOUND
 
-    Empty means the owner entity's rate stands. 0 means nothing is
-    charged on that case. A manager sees neither column nor button, and
-    an investor's register carries no trace of it.
+  A return report asked for EQUAL-WEIGHTED led with the equal-weighted
+  figure and footed the policies table with the capital-weighted one —
+  65.17% at the top, 19.30% at the bottom. The totals row now follows
+  the weighting the document is set to, both the simple column and the
+  compounded one beside it.
 
-  A ONE-PAGE SUMMARY. The "Sheet" link on each row prints the case and
-  its dates, what it cost itemised, what came back, the profit, the
-  multiple, both rates, and the cash as it moved.
+THE MATURITY SHEET
 
-    SHOW THE COMMISSION ON IT, OR NOT — a tick box on the commission
-    dialog, off by default. Left off, the sheet gives the profit and the
-    return the investors actually get and says nothing about how it got
-    there, so the page can be handed over as it stands. Ticked, it shows
-    the gross profit, names the commission, and quotes the return before
-    and after it. The register says which of the two a case is set to.
+  A tick box decides whether every transaction is listed. Off by
+  default: the sheet stops at the totals — the purchase price, what the
+  premiums came to and how many there were. Ticked, it lists the ledger
+  as it moved.
 
-    The sheet is not offered to investors in the portal: their register
-    and their statements are their copy, already net.
+  A second tick box decides whether the commission is named on it, also
+  off by default.
 
-  Fixed: the note under the rates ran off the right-hand edge of the
-  page and lost its last few words. Everything written in sentences on
-  that sheet is wrapped to the page now.
+  Removed at your request: the paragraph explaining simple interest
+  against the compounded figure.
 
-EVERYTHING ELSE IN THIS PACKAGE (25a–i)
+  On a MATURED policy, "Offer to investors" is gone from the policy page
+  — it offered something that had already paid out — and a One-pager
+  button is there instead.
 
-  Medical review is administrators only, with its own tab, files and
-  links for the doctor, a separate records folder per review, the
-  internal LE beside the provider's report, and a screen cut back to an
-  estimate, his reasoning, his call and one button.
+ALSO IN THIS PACKAGE (25a–i, 28a)
 
-  Drop a provider's LE report onto the Life-expectancy reports card.
-
-  Investors are quoted compounded by default, with a switch to simple.
+  The per-maturity commission, the Med Review tab and the medical review
+  rules, the attached provider LE reports, and the investor interest
+  default.
 
 NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
 themselves on boot.

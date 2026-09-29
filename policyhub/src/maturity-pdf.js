@@ -9,6 +9,12 @@
 
    Three decisions worth stating:
 
+     - THE LEDGER IS OPTIONAL AND THE TOTALS ARE NOT. Every sheet says
+       what the case cost and what came back; only a sheet asked to
+       lists the forty dated lines behind those totals. A reader wanting
+       to know how a policy did is not helped by them, and a reader
+       checking the arithmetic cannot do without them.
+
      - THE COSTS ARE ITEMISED. A life settlement is bought twice: once
        at closing and once a year afterwards until it matures. A sheet
        that shows only the purchase price against the death benefit
@@ -228,9 +234,9 @@ export function maturityPdf(m) {
   doc.reserve(1);
   rates.forEach(([, v], i) => at(doc, v, i * rw, { style: 'bold', size: 20 }));
   doc.y -= 26;
-  note(doc, 'Simple interest is the profit over the dollars actually at work, for the time '
-    + 'they were at work. The compounded figure is the internal rate of return on the same '
-    + 'dated cash flows. They answer different questions and both are given.', { gap: 2 });
+  /* The paragraph explaining the two conventions came off at the
+     office's request: the two are labelled, and a reader who needs the
+     definition is not the reader this sheet is for. */
   if (m.show_commission && (m.rate != null || m.compound_rate != null))
     note(doc, `Before the commission the case returned ${rate(m.rate)} simple, ${
       rate(m.compound_rate)} compounded.`, { style: 'italic', gap: 2 });
@@ -240,7 +246,7 @@ export function maturityPdf(m) {
     { style: 'italic', gap: 2 });
 
   /* ------------------------------ the flows ----------------------------- */
-  if ((m.flows || []).length) {
+  if (m.show_flows && (m.flows || []).length) {
     doc.space(8);
     rule(doc);
     label(doc, 'The cash, as it moved');
