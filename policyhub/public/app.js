@@ -7488,8 +7488,7 @@ function maturityColumns(m, investorView) {
           const amount = Number(r.commission) || 0;
           return `${amount ? fmtExact(amount) : dash}
             <div class="secondary">${eff ? `${fmtNum(eff)}% of profit` : 'none'}${
-              pct != null ? ' · on this case' : ''}${amount && r.commission_on_sheet
-                ? ' · on the sheet' : ''}</div>`;
+              pct != null ? ' · on this case' : ''}</div>`;
         } },
       { key: 'net_rate',
         header: `Net to investors${showSimpleToo() ? ' · compounded' : ''}`, cls: 'num',
@@ -7964,20 +7963,11 @@ function openCommissionDialog(r) {
       <div class="field"></div>
     </div>
     <div class="dlg-section">What the one-pager says</div>
-    ${''/* Whether the paper names it. Off by default: the sheet is the
-           obvious thing to hand an investor who asks how a case did, and
-           on that copy the deduction is not itemised — it is simply
-           already out of the figures, the way every other number they
-           are shown works. */}
-    <label class="dlg-check">
-      <input type="checkbox" name="show_on_sheet" value="yes"
-             ${r.commission_on_sheet ? 'checked' : ''}>
-      <span><strong>Show the commission on the one-pager</strong> — the sheet then gives
-        the gross profit, names the commission, and quotes the return before and after it.
-        Left unticked, the sheet shows the profit and the return that the investors
-        actually get and says nothing about how it got there.</span>
-    </label>
-    ${''/* And whether it itemises the ledger. Off by default: the totals
+    ${''/* Not whether it names the commission — it never does. The sheet
+           is the case as it performed, gross, and what the office
+           charges against it is read here in the portal. One document,
+           one meaning, whoever ends up holding it. */}
+    ${''/* Whether it itemises the ledger. Off by default: the totals
            already say what the case cost and how many premiums went
            into it, and forty dated lines is not what somebody asking
            "how did that one do?" is after. */}
@@ -7992,6 +7982,9 @@ function openCommissionDialog(r) {
       Taken off the profit after costs — the purchase price and every premium are
       already out — and never off the gross. A policy that lost money owes nothing.
       <br><br>
+      It is not on the one-pager and never appears there: that sheet reports the case
+      gross, and the return after commission is the column on this register.
+      <br><br>
       Leave the percentage <strong>empty</strong> and the owner entity's own rate stands${
         standing ? `, which on this policy is ${fmtNum(standing)}%` : ''}. Enter
       <strong>0</strong> to charge nothing on this case in particular. Whatever is set
@@ -8001,7 +7994,6 @@ function openCommissionDialog(r) {
   `, async (v) => {
     await api(`/policies/${r.id}/commission`, { method: 'PUT', body: {
       commission_pct: v.commission_pct === '' ? null : v.commission_pct,
-      show_on_sheet: v.show_on_sheet === 'yes',
       show_ledger: v.show_ledger === 'yes' } });
     toast(v.commission_pct === '' ? 'The entity’s rate stands' : 'Commission saved');
   }, 'Save');

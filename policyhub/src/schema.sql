@@ -299,19 +299,6 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
  * is therefore very hard to believe in. */
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
 
-/* Whether the commission is named on the one-page summary.
- *
- * Off by default, and the default is the argument. The sheet is the
- * desk's, but it is the obvious thing to hand an investor who asks how
- * a case did -- and on that copy the deduction is not itemised, it is
- * simply already out of the figures, which is how every other screen in
- * this application treats it. Turning this on says: on this case, show
- * the gross profit, name the commission, and show the return before and
- * after it.
- *
- * Above the view for the same reason as the column above it. */
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_on_sheet BOOLEAN NOT NULL DEFAULT FALSE;
-
 /* Whether the one-pager itemises every transaction.
  *
  * Off by default. The totals above it already say what the case cost --
@@ -466,6 +453,21 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS carrier_phone TEXT NOT NULL DEFAUL
 --  column list, and CREATE OR REPLACE VIEW may only append at the end.
 -- ---------------------------------------------------------------------
 DROP VIEW IF EXISTS policy_latest;
+
+/* The one-pager NEVER carries the commission.
+ *
+ * There was briefly a per-policy flag for it. The rule turned out to be
+ * simpler than the flag: the sheet is the case as it performed -- gross
+ * profit, gross return -- and what the house takes out of it is the
+ * office's own business, read in the portal by the people who set it.
+ * One document, one meaning, whoever it reaches.
+ *
+ * Dropped rather than left unread: a column nothing consults is a column
+ * somebody will consult by accident. BETWEEN the DROP VIEW above and the
+ * CREATE below, deliberately: `policy_latest` selects policies.*, so the
+ * view holds a dependency on every column and the drop is refused while
+ * it exists. */
+ALTER TABLE policies DROP COLUMN IF EXISTS commission_on_sheet;
 CREATE OR REPLACE VIEW policy_latest AS
 SELECT
   p.*,

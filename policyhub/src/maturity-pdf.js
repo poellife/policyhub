@@ -27,11 +27,13 @@
        carrying one of them unnamed is a sheet somebody will read as the
        other.
 
-     - IT IS THE OFFICE'S SHEET. It carries the gross figures, the
-       commission and the whole ledger, which is the desk's reading of a
-       closed case. What an investor is owed is on their own register
-       and their statements, already net, and this page is not offered
-       to them.
+     - IT IS THE CASE, NOT THE TRADE. Every figure on it is gross: what
+       was paid, what came back, and the rate that pair produced. The
+       commission and the return after it are the office's own reading
+       of the same case and are read in the portal, by the people who
+       set the rate. One document with one meaning, whoever ends up
+       holding it, beats a document that means two things depending on
+       a tick box nobody can see from the page.
 
    Drawn on src/pdf.js, which ships no rendering dependency — the same
    writer the agreements and the deal sheet use.
@@ -206,26 +208,15 @@ export function maturityPdf(m) {
 
   doc.space(10);
   label(doc, 'The result');
-  /* Itemised only when this case says so. Otherwise the sheet shows what
-     the investors are left with and says nothing about how it got there
-     -- the same treatment every other figure they are shown gets. */
-  if (m.show_commission) {
-    line(doc, 'Profit, gross', money(m.gross_profit));
-    line(doc, `Commission · ${Number(m.commission_pct).toFixed(2)}% of the profit`,
-      `(${money(m.commission)})`);
-    rule(doc, { gray: 0.85, gap: 3 });
-    line(doc, 'Profit to the investors', money(m.net_profit), { strong: true });
-  } else {
-    line(doc, 'Profit', money(m.net_profit), { strong: true });
-  }
+  line(doc, 'Profit', money(m.profit), { strong: true });
   line(doc, 'Multiple on capital', m.multiple ? `${Number(m.multiple).toFixed(2)}x` : '--');
 
   doc.space(12);
   rule(doc, { gray: 0.25, w: 1 });
-  label(doc, m.show_commission ? 'The return to the investors' : 'The return');
+  label(doc, 'The return');
   const rates = [
-    ['Simple interest', rate(m.net_rate)],
-    ['Compounded (IRR)', rate(m.net_compound_rate)],
+    ['Simple interest', rate(m.rate)],
+    ['Compounded (IRR)', rate(m.compound_rate)],
   ];
   const rw = WIDTH / 2;
   doc.reserve(2);
@@ -237,9 +228,6 @@ export function maturityPdf(m) {
   /* The paragraph explaining the two conventions came off at the
      office's request: the two are labelled, and a reader who needs the
      definition is not the reader this sheet is for. */
-  if (m.show_commission && (m.rate != null || m.compound_rate != null))
-    note(doc, `Before the commission the case returned ${rate(m.rate)} simple, ${
-      rate(m.compound_rate)} compounded.`, { style: 'italic', gap: 2 });
   if (!m.settled)
     note(doc, 'The claim has not been paid. The rates above assume the death benefit is '
       + 'collected today; a claim that takes another three months to fund will return less.',
@@ -279,7 +267,7 @@ export function maturityPdf(m) {
   rule(doc, { gray: 0.8 });
   note(doc, `Prepared ${longDate(m.as_of)}${m.prepared_by ? ` by ${m.prepared_by}` : ''}. `
     + "Figures are drawn from this policy's own ledger and are for the whole policy."
-    + `${m.show_commission ? ' Confidential — for internal use.' : ''}`,
+    + ' Figures are before any commission the office charges against the case.',
   { size: 7.5, gap: 0 });
 
   return doc.build();

@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-29e
+PolicyHub — build 2026-09-29f
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -11,49 +11,41 @@ FILES IN THIS PACKAGE
   src/maturity-pdf.js is new — copy it in, or the maturity sheet will
   not load. Everything since 2026-09-17c is in here.
 
-COMPOUNDED IS NOW THE DEFAULT EVERYWHERE
+THE ONE-PAGER IS GROSS, ALWAYS
 
-  The dashboard, the policy return tiles and the Maturities register all
-  lead with the compounded figure — the IRR. A tick box in the page
-  header, "Show simple interest", puts the simple column and the simple
-  figure back beside it; unticked, every rate on the screen is
-  compounded. The choice is remembered against the account.
+  Every figure on the maturity sheet is now before commission: the
+  profit, the multiple, and both rates. There is no tick box for it any
+  more and no way for the commission to reach that page — one document
+  with one meaning, whoever ends up holding it.
 
-  Where the screen prints "the other weighting reads X", that figure is
-  now the other weighting of the SAME convention. It used to quote the
-  simple one beside a compounded headline — two numbers differing for
-  two different reasons, in one sentence.
+  The commission and the return AFTER it are read in the portal, on the
+  Maturities register, by the administrators who set the rate: the
+  Commission column and the "Net to investors" column beside it.
 
-THE REPORT BUG YOU FOUND
-
-  A return report asked for EQUAL-WEIGHTED led with the equal-weighted
-  figure and footed the policies table with the capital-weighted one —
-  65.17% at the top, 19.30% at the bottom. The totals row now follows
-  the weighting the document is set to, both the simple column and the
-  compounded one beside it.
-
-THE MATURITY SHEET
-
-  A tick box decides whether every transaction is listed. Off by
-  default: the sheet stops at the totals — the purchase price, what the
-  premiums came to and how many there were. Ticked, it lists the ledger
-  as it moved.
-
-  A second tick box decides whether the commission is named on it, also
-  off by default.
-
-  Removed at your request: the paragraph explaining simple interest
-  against the compounded figure.
-
-  On a MATURED policy, "Offer to investors" is gone from the policy page
-  — it offered something that had already paid out — and a One-pager
-  button is there instead.
-
-ALSO IN THIS PACKAGE (25a–i, 28a)
-
-  The per-maturity commission, the Med Review tab and the medical review
-  rules, the attached provider LE reports, and the investor interest
+  The sheet still has its tick box for listing every transaction, off by
   default.
 
-NOTHING TO RUN. Copy the files in and redeploy. The new columns apply
+EVERYTHING ELSE, AS BEFORE
+
+  COMPOUNDED IS THE DEFAULT on the dashboard, the policy return tiles
+  and the Maturities register, with a "Show simple interest" box in the
+  page header.
+
+  THE REPORT WEIGHTING BUG is fixed: a document asked for equal-weighted
+  now foots with the equal-weighted figure instead of the
+  capital-weighted one.
+
+  A COMMISSION PER MATURITY, administrators only — a percentage of the
+  profit after costs, with the after-commission return solved from the
+  cash flows rather than shaved off the rate.
+
+  On a matured policy the policy page offers the One-pager instead of
+  "Offer to investors".
+
+  Medical review is administrators only, with its own tab, files and
+  links for the reviewing doctor, the internal LE beside the provider's
+  report, and a screen cut back to an estimate, his reasoning and one
+  button.
+
+NOTHING TO RUN. Copy the files in and redeploy. The schema changes apply
 themselves on boot.

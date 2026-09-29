@@ -7524,8 +7524,6 @@ router.get('/maturities', wrap(async (req, res) => {
                  figures above are already net of it. */
               CASE WHEN $1::int IS NULL THEN pl.commission_pct END AS commission_pct,
               CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
-              CASE WHEN $1::int IS NULL THEN pl.commission_on_sheet END
-                                                                  AS commission_on_sheet,
               CASE WHEN $1::int IS NULL THEN pl.sheet_show_ledger END
                                                                   AS sheet_show_ledger,
               ${shareOf('pl.id', 1)}              AS my_pct,
@@ -7557,8 +7555,7 @@ router.get('/maturities', wrap(async (req, res) => {
        itself on the one screen it has no business on. */
     const r = { ...row };
     if (scope !== null) {
-      delete r.commission_pct; delete r.effective_pct; delete r.commission_on_sheet;
-      delete r.sheet_show_ledger;
+      delete r.commission_pct; delete r.effective_pct; delete r.sheet_show_ledger;
     }
     const flows = byPolicy.get(r.id) || [];
     const a = analyzeFlows(flows);
@@ -7703,14 +7700,12 @@ router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
   const terminal = terminalFlow(p, asOf, lastOut);
   const gross = terminal ? [...base, { ...terminal, amount: terminal.amount * factor }] : base;
 
-  /* The commission, and the two pairs of rates that follow from it: the
-     flows here are gross, and the net pair is solved from them with the
-     deduction taken off the final payment on its own date. */
-  const pct = Number(p.carry_pct) || 0;
+  /* GROSS, and only gross. This sheet reports the case: what it cost,
+     what came back, and the rate that pair produced. The commission and
+     the return after it are the office's own reading of the same case
+     and live in the portal, on the Maturities register, where the
+     person who set the rate can see both sides of it. */
   const g = analyzeFlows(gross);
-  const netFlows = pct ? flowsAfterCarry(gross, pct) : gross;
-  const n = pct ? analyzeFlows(netFlows) : g;
-  const commission = pct ? carryOn(g.returned, g.invested, pct) : 0;
 
   const sum = (types) => txns
     .filter((t) => types.includes(t.txn_type))
@@ -7755,27 +7750,20 @@ router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
     death_benefit: Number(p.death_benefit || p.face_amount || 0),
     proceeds_amount: p.proceeds_amount == null ? null : Number(p.proceeds_amount),
     returned: g.returned,
-    gross_profit: g.profit,
-    commission,
-    commission_pct: commission ? pct : 0,
-    /* Named on the paper only when this case says so. Off, the sheet
-       shows the net figures with nothing itemised -- which is how an
-       investor sees every other figure in this application -- and the
-       page can be handed to one without a second thought. */
-    show_commission: !!p.commission_on_sheet && !!commission,
-    /* And whether it itemises the ledger. Off, the sheet stops at the
+    profit: g.profit,
+    /* NO COMMISSION ON THE PAPER. The sheet is the case as it
+       performed; what the house takes out of it is read in the portal,
+       by the people who set it. Kept out of the payload entirely rather
+       than passed and ignored, so it cannot be printed by accident. */
+    /* Whether the sheet itemises the ledger. Off, it stops at the
        totals — which is the whole of what most readers want, and the
        page stays one page. */
     show_flows: !!p.sheet_show_ledger,
-    net_profit: g.profit - commission,
     multiple: g.multiple,
-    /* Both pairs: what the case did, and what the investors on it are
-       left with once the commission comes off. The gap between them is
-       the point of the sheet. */
+    /* Gross, always. The rate on this page is what the case returned,
+       before anything the office charges against it. */
     rate: g.rate,
     compound_rate: g.compound_rate,
-    net_rate: n.rate,
-    net_compound_rate: n.compound_rate,
     flows: gross.map((f) => ({
       date: f.date,
       what: f.label || (Number(f.amount) < 0 ? 'Paid out' : 'Received'),
@@ -7820,19 +7808,17 @@ router.put('/policies/:id/commission', blockInvestors, blockMedical, requireRole
        changes the rate cannot silently clear a tick box. */
     const flag = (k) => (k in req.body
       ? !!(req.body[k] === true || req.body[k] === 'true') : null);
-    const show = flag('show_on_sheet');
-    /* And whether the sheet itemises the ledger. Set from the same
-       dialog because both are answers to "what does this page say", and
-       left alone when the client does not mention them. */
+    /* Whether the sheet itemises the ledger. Set from the same dialog
+       because it is the other answer to "what does this page say", and
+       left alone when the client does not mention it. */
     const ledger = flag('show_ledger');
     const { rows } = await q(
       `UPDATE policies SET commission_pct = $1::numeric,
-              commission_on_sheet = COALESCE($3::boolean, commission_on_sheet),
-              sheet_show_ledger  = COALESCE($4::boolean, sheet_show_ledger),
+              sheet_show_ledger = COALESCE($3::boolean, sheet_show_ledger),
               updated_at = now()
         WHERE id = $2
-        RETURNING policy_number, commission_pct, commission_on_sheet, sheet_show_ledger`,
-      [pct, req.params.id, show, ledger]);
+        RETURNING policy_number, commission_pct, sheet_show_ledger`,
+      [pct, req.params.id, ledger]);
     if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
     await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
       clear ? `${rows[0].policy_number} · commission cleared — the entity's rate stands`
