@@ -7769,8 +7769,10 @@ router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
       what: f.label || (Number(f.amount) < 0 ? 'Paid out' : 'Received'),
       amount: f.amount,
     })),
+    /* `as_of` still goes over — the sheet dates an unpaid claim's
+       assumed collection by it. Who prepared it does not: the footer
+       that said so came off the page. */
     as_of: asOf,
-    prepared_by: req.user?.name || null,
   };
 
   await audit(req.user.uid, 'policy', Number(req.params.id), 'read',

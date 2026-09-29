@@ -21,11 +21,12 @@
        flatters every deal on the book, and it flatters the slow ones
        most.
 
-     - BOTH RATES, LABELLED. Simple interest on dollar-years is how this
-       business quotes; an IRR is what the money was measured against
-       everywhere else. They are far apart on a long hold, and a sheet
-       carrying one of them unnamed is a sheet somebody will read as the
-       other.
+     - ONE RATE, AND IT IS THE IRR. Simple interest on dollar-years is
+       how this business quotes internally, and it is on the register
+       for anybody who wants it; a sheet carrying two rates for one case
+       hands the reader the job of deciding which one it meant. The
+       figure is labelled, because an unlabelled rate is read as
+       whichever convention the reader brought with them.
 
      - IT IS THE CASE, NOT THE TRADE. Every figure on it is gross: what
        was paid, what came back, and the rate that pair produced. The
@@ -214,22 +215,19 @@ export function maturityPdf(m) {
   doc.space(12);
   rule(doc, { gray: 0.25, w: 1 });
   label(doc, 'The return');
-  const rates = [
-    ['Simple interest', rate(m.rate)],
-    ['Compounded (IRR)', rate(m.compound_rate)],
-  ];
-  const rw = WIDTH / 2;
+  /* ONE FIGURE, AND IT IS THE IRR.
+     Simple interest on dollar-years came off this page at the office's
+     request. Both are still solved on the same flows and both are on
+     the register in the portal; a sheet that hands a reader two rates
+     for one case hands them the job of deciding which one it meant. */
   doc.reserve(2);
-  rates.forEach(([k], i) => at(doc, k.toUpperCase(), i * rw, { style: 'sansBold', size: 6.5 }));
+  at(doc, 'COMPOUNDED (IRR)', 0, { style: 'sansBold', size: 6.5 });
   doc.y -= 14;
   doc.reserve(1);
-  rates.forEach(([, v], i) => at(doc, v, i * rw, { style: 'bold', size: 20 }));
+  at(doc, rate(m.compound_rate), 0, { style: 'bold', size: 20 });
   doc.y -= 26;
-  /* The paragraph explaining the two conventions came off at the
-     office's request: the two are labelled, and a reader who needs the
-     definition is not the reader this sheet is for. */
   if (!m.settled)
-    note(doc, 'The claim has not been paid. The rates above assume the death benefit is '
+    note(doc, 'The claim has not been paid. The rate above assumes the death benefit is '
       + 'collected today; a claim that takes another three months to fund will return less.',
     { style: 'italic', gap: 2 });
 
@@ -262,13 +260,12 @@ export function maturityPdf(m) {
     }
   }
 
-  /* -------------------------------- foot -------------------------------- */
-  doc.space(10);
-  rule(doc, { gray: 0.8 });
-  note(doc, `Prepared ${longDate(m.as_of)}${m.prepared_by ? ` by ${m.prepared_by}` : ''}. `
-    + "Figures are drawn from this policy's own ledger and are for the whole policy."
-    + ' Figures are before any commission the office charges against the case.',
-  { size: 7.5, gap: 0 });
+  /* No footer.
+   *
+   * It said who prepared the sheet, where the figures came from and
+   * that they are gross — three things the reader either knows or does
+   * not need. A page that answers one question does not need a
+   * paragraph at the bottom explaining itself. */
 
   return doc.build();
 }

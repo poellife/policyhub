@@ -1,4 +1,4 @@
-PolicyHub — build 2026-09-29f
+PolicyHub — build 2026-09-29g
 Minimal update, on top of 2026-09-17c. Paths are relative to the
 `policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
 
@@ -11,41 +11,40 @@ FILES IN THIS PACKAGE
   src/maturity-pdf.js is new — copy it in, or the maturity sheet will
   not load. Everything since 2026-09-17c is in here.
 
-THE ONE-PAGER IS GROSS, ALWAYS
+THE MATURITY ONE-PAGER, AS IT NOW READS
 
-  Every figure on the maturity sheet is now before commission: the
-  profit, the multiple, and both rates. There is no tick box for it any
-  more and no way for the commission to reach that page — one document
-  with one meaning, whoever ends up holding it.
+  The case and its dates · what it cost · what came back · the profit
+  and the multiple · ONE rate, the compounded IRR · and the ledger if
+  the box for it is ticked.
 
-  The commission and the return AFTER it are read in the portal, on the
-  Maturities register, by the administrators who set the rate: the
-  Commission column and the "Net to investors" column beside it.
+  Gone from it in this build: the footer line ("Prepared … by …") and
+  the simple-interest figure. Simple interest is still solved on the
+  same flows and is on the Maturities register beside the compounded
+  one; the sheet gives a reader one rate so there is nothing to choose
+  between.
 
-  The sheet still has its tick box for listing every transaction, off by
-  default.
+  Still true from the last build: every figure on the page is GROSS.
+  The commission and the return after it are read in the portal, on the
+  register, by the administrators who set the rate.
 
 EVERYTHING ELSE, AS BEFORE
 
-  COMPOUNDED IS THE DEFAULT on the dashboard, the policy return tiles
+  Compounded is the default on the dashboard, the policy return tiles
   and the Maturities register, with a "Show simple interest" box in the
   page header.
 
-  THE REPORT WEIGHTING BUG is fixed: a document asked for equal-weighted
-  now foots with the equal-weighted figure instead of the
-  capital-weighted one.
+  The report weighting bug is fixed: a document asked for equal-weighted
+  now foots with the equal-weighted figure.
 
-  A COMMISSION PER MATURITY, administrators only — a percentage of the
-  profit after costs, with the after-commission return solved from the
-  cash flows rather than shaved off the rate.
+  A commission per maturity, administrators only, with the
+  after-commission return solved from the cash flows.
 
   On a matured policy the policy page offers the One-pager instead of
   "Offer to investors".
 
   Medical review is administrators only, with its own tab, files and
-  links for the reviewing doctor, the internal LE beside the provider's
-  report, and a screen cut back to an estimate, his reasoning and one
-  button.
+  links for the reviewing doctor, and the internal LE beside the
+  provider's report.
 
 NOTHING TO RUN. Copy the files in and redeploy. The schema changes apply
 themselves on boot.
