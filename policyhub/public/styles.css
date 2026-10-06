@@ -2013,6 +2013,41 @@ table.data td.risk-note-cell {
 tr.scen-shown > td { background: var(--tint, rgba(0, 0, 0, 0.035)); }
 tr.scen-shown > td:first-child { box-shadow: inset 2px 0 0 var(--fg, #111); }
 
+/* ------------------------------------------------------------------ *
+ * What the messages say
+ *
+ * A list of messages on the left and one of them open on the right.
+ * The preview is set in the reader's own terms — monospace, the width
+ * of a plain-text email — because the thing being judged is how it
+ * will look in somebody's inbox, not how it looks in this application.
+ * ------------------------------------------------------------------ */
+.mail-grid { display: grid; grid-template-columns: 270px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 1000px) { .mail-grid { grid-template-columns: 1fr; } }
+.mail-list > div { max-height: 70vh; overflow: auto; }
+.mail-row { display: block; padding: 10px 14px; border-bottom: 1px solid var(--grid);
+  text-decoration: none; color: inherit; }
+.mail-row:last-child { border-bottom: 0; }
+.mail-row:hover { background: rgba(0, 0, 0, 0.025); }
+.mail-row.on { background: rgba(0, 0, 0, 0.05); box-shadow: inset 2px 0 0 var(--fg, #111); }
+.mail-row-name { font-size: 13px; font-weight: 600; }
+.mail-row-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+.mail-fields { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--grid); }
+.chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  padding: 3px 8px; margin: 0 6px 6px 0; border: 1px solid var(--border);
+  border-radius: 999px; background: transparent; cursor: pointer; }
+.chip:hover { border-color: var(--border-strong); }
+.mail-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.mail-actions .spacer { flex: 1; }
+
+.mail-preview { border: 1px solid var(--border); border-radius: 6px; padding: 16px 18px; }
+.mail-preview-subject { font-weight: 700; font-size: 14px; margin-bottom: 12px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--grid); }
+.mail-preview-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; max-width: 68ch; }
+#mailBody { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.6; resize: vertical; }
+
 /* The carrier's telephone number in the policy header. A link, so it
    dials from a phone and a desktop softphone, but set as quietly as the
    rest of the line — it is a reference, not a call to action. */

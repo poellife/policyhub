@@ -6072,6 +6072,17 @@ async function opportunityView() {
       <div class="card-head"><h2>Deal notes</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">administrators only</span></div>
       <div class="card-body">
+        ${''/* Where it came from, first, because it is the question
+               somebody opens this card to answer six months later. One
+               line, in the order you would say it out loud. */}
+        ${(o.source_name || o.source_contact || o.source_on) ? `<div class="deal-note-standing">
+          <div class="deal-note-label">Where it came from</div>
+          <div style="font-size:14px">${[
+    o.source_name ? `<strong>${esc(o.source_name)}</strong>` : null,
+    o.source_contact ? esc(o.source_contact) : null,
+    o.source_on ? `introduced ${fmtDate(o.source_on)}` : null,
+  ].filter(Boolean).join(' · ')}</div>
+        </div>` : ''}
         ${''/* The standing picture of the deal, from the edit form. Shown
                above the log because it is the thing a note is a note
                ON -- and absent entirely when nobody has written one,
@@ -6109,8 +6120,8 @@ async function opportunityView() {
           : `<div class="muted" style="font-size:14px;margin-top:12px">${o.deal_notes
             ? 'Nothing logged against it yet.'
             : `Nothing written yet. Type above to start a running note on this deal, or use
-               <strong>Edit</strong> for the standing background. Either way it stays on this
-               screen and on no other.`}</div>`}
+               <strong>Edit</strong> for the standing background and for who sent us the deal.
+               Either way it stays on this screen and on no other.`}</div>`}
       </div>
     </div>`}
 
@@ -6535,6 +6546,18 @@ async function openOpportunityDialog(o) {
            the server does not send them the field either, and a greyed
            box that saves nothing is a worse lie than no box. */}
     ${!isAdminUser() ? '' : `
+    <div class="dlg-section">Where it came from <span class="muted">· administrators only</span></div>
+    <div class="field-row">
+      ${inputField('Who sent it to us', 'source_name', o?.source_name || '', 'text',
+    'placeholder="Abacus Settlements" maxlength="200"')}
+      ${inputField('Who there', 'source_contact', o?.source_contact || '', 'text',
+    'placeholder="Marty Feld · 248-555-0134" maxlength="200"')}
+      ${inputField('When it arrived', 'source_on', dateInput(o?.source_on), 'date')}
+    </div>
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      The broker, the firm or the person who introduced the case. Administrators only — an
+      investor never sees it, and neither does a manager or an editor.</span></div>
+
     <div class="field"><label>Deal notes <span class="muted">· administrators only</span></label>
       <textarea name="deal_notes" rows="5"
         placeholder="What the seller actually wants, where the price came from, why the last offer was walked away from…">${esc(o?.deal_notes || '')}</textarea>
@@ -9443,7 +9466,8 @@ async function settingsView() {
       <div class="card">
         <div class="card-head"><h2>The post</h2><div class="spacer"></div>
           <span class="muted" style="font-size:12px">${mailHealth.configured
-            ? esc(mailHealth.from || 'sending') : 'not configured'}</span></div>
+            ? esc(mailHealth.from || 'sending') : 'not configured'}</span>
+          <a class="btn-sm" href="#/emails">What the messages say</a></div>
         ${mailHealth.from_problem ? `<div class="card-body" style="padding-bottom:0">
           <div class="error-box">${esc(mailHealth.from_problem)}</div></div>` : ''}
         ${mailHealth.link_problem ? `<div class="card-body" style="padding-bottom:0">
@@ -12531,6 +12555,202 @@ function openReviewFileDialog(reviewId) {
   return dlg;
 }
 
+/* ===================================================================== *
+ * What the messages say
+ *
+ * Every automated message the portal sends, with the wording it ships
+ * with on the left of the question and whatever the office has decided
+ * on the right. Administrators only — these are the words the firm says
+ * to its investors in writing, and that is not a thing a book manager
+ * speaks for.
+ *
+ * The screen is arranged around one fear: that somebody edits a message
+ * and only finds out what it looks like when an investor reads it. So
+ * the preview is filled in with specimen values and sits beside the box
+ * rather than behind a button, and a specimen can be posted to your own
+ * address before anything is saved.
+ * ===================================================================== */
+async function mailTemplatesView() {
+  if (state.user.role !== 'admin')
+    return { html: '<div class="empty">This is an administrator’s screen.</div>' };
+
+  const { templates, samples } = await api('/mail-templates');
+  const chosen = state.params.id
+    ? templates.find((t) => t.kind === state.params.id)
+    : null;
+  const t = chosen || templates[0];
+  const current = t.custom || t.default;
+
+  const WHO = { everyone: 'everybody', investor: 'investors', admin: 'administrators',
+    staff: 'the desk', medical: 'the reviewing doctor' };
+
+  const listItem = (x) => `<a class="mail-row ${x.kind === t.kind ? 'on' : ''}"
+      href="#/emails/${x.kind}">
+    <div class="mail-row-name">${esc(x.label)}</div>
+    <div class="mail-row-sub">to ${esc(WHO[x.who] || x.who)}${
+  x.custom ? ' · <strong>your wording</strong>' : ''}</div>
+  </a>`;
+
+  return {
+    html: `
+      <div class="page-head">
+        <div><div class="sub"><a href="#/settings">← Settings</a></div>
+          <h1>What the messages say</h1>
+          <div class="sub">The wording of every email the portal sends. Changes take effect
+            on the next message — nothing to deploy.</div></div>
+      </div>
+
+      <div class="mail-grid">
+        <div class="card mail-list">
+          <div class="card-head"><h2>Messages</h2></div>
+          <div>${templates.map(listItem).join('')}</div>
+        </div>
+
+        <div>
+          <div class="card">
+            <div class="card-head"><h2>${esc(t.label)}</h2><div class="spacer"></div>
+              ${t.custom ? `<span class="muted" style="font-size:12px">your wording${
+  t.custom.updated_by_name ? ` · ${esc(t.custom.updated_by_name)}` : ''}${
+  t.custom.updated_at ? ` · ${fmtDate(t.custom.updated_at)}` : ''}</span>
+                <button class="btn-sm" id="mailRevert">Revert to the default</button>`
+    : '<span class="muted" style="font-size:12px">the wording it ships with</span>'}
+            </div>
+            <div class="card-body">
+              ${t.note ? `<div class="muted" style="font-size:12.5px;margin-bottom:14px">${
+  esc(t.note)}</div>` : ''}
+              ${inputField('Subject', 'mailSubject', current.subject, 'text',
+    'id="mailSubject" maxlength="300"')}
+              <div class="field"><label>Body</label>
+                <textarea id="mailBody" rows="16">${esc(current.body)}</textarea></div>
+
+              <div class="mail-fields">
+                <div class="eyebrow">What you can put in it</div>
+                <div>${[...t.fields, 'link'].map((f) => `<button class="chip" data-field="${
+  esc(f)}" title="Insert">{{${esc(f)}}}</button>`).join('')}</div>
+                <div class="muted" style="font-size:12px;margin-top:8px">
+                  Click one to drop it in where the cursor is. <strong>{{link}}</strong> is the
+                  portal address and is the same in every message.
+                  A line whose field has no value for a particular message is left out of that
+                  message entirely — so a sentence about an optional note does not go out
+                  with a blank where the note should be.
+                </div>
+              </div>
+
+              <div class="mail-actions">
+                <button class="primary" id="mailSave">Save this wording</button>
+                <button id="mailSend">Send me a specimen</button>
+                <div class="spacer"></div>
+                <button class="btn-sm" id="mailReset">Put the default back in the box</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>As it would arrive</h2><div class="spacer"></div>
+              <span class="muted" style="font-size:12px">with specimen figures</span></div>
+            <div class="card-body">
+              <div class="mail-preview">
+                <div class="mail-preview-subject" id="pvSubject"></div>
+                <div class="mail-preview-body" id="pvBody"></div>
+              </div>
+              <div class="muted" style="font-size:12px;margin-top:10px">
+                The names and figures above are made up. The real ones come from whatever the
+                message is about.
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body">
+              <span class="muted" style="font-size:12.5px">
+                Two things this box cannot do, said plainly rather than discovered. It cannot
+                branch — the default wording says “one policy” or “three
+                policies” where it needs to, and your wording says whatever you type.
+                And it cannot carry a password, a tax number or an insured’s name: those
+                are not fields on any message, because email is not a place we control.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>`,
+
+    after: () => {
+      const subject = $('#mailSubject');
+      const body = $('#mailBody');
+      const vars = samples[t.kind] || {};
+
+      /* The preview is the same substitution the server does, written
+         once here so that typing shows it immediately. The server is
+         still the thing that decides what goes out; this is a reading
+         of it, and the specimen send is there for anybody who wants the
+         real article in their inbox before committing. */
+      const fill = (text) => String(text || '').split('\n').filter((line) => {
+        const used = [...line.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)].map((m) => m[1]);
+        return used.length === 0 || used.every((k) => k === 'link'
+          || String(vars[k] ?? '').trim() !== '');
+      }).map((line) => line.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g,
+        /* The browser's own address stands in for the server's APP_URL.
+           They are the same thing in every deployment that works, and
+           where they are not, the mail panel in Settings is already
+           saying so in red. */
+        (_, k) => (k === 'link' ? window.location.origin : String(vars[k] ?? ''))))
+        .join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+      const paint = () => {
+        $('#pvSubject').textContent = fill(subject.value) || '(no subject)';
+        $('#pvBody').textContent = fill(body.value);
+      };
+      subject.addEventListener('input', paint);
+      body.addEventListener('input', paint);
+      paint();
+
+      document.querySelectorAll('[data-field]').forEach((b) =>
+        b.addEventListener('click', () => {
+          const tag = `{{${b.dataset.field}}}`;
+          const el = document.activeElement === subject ? subject : body;
+          const at = el.selectionStart ?? el.value.length;
+          el.value = `${el.value.slice(0, at)}${tag}${el.value.slice(el.selectionEnd ?? at)}`;
+          el.focus();
+          el.selectionStart = el.selectionEnd = at + tag.length;
+          paint();
+        }));
+
+      $('#mailReset')?.addEventListener('click', () => {
+        subject.value = t.default.subject;
+        body.value = t.default.body;
+        paint();
+        toast('The default is in the box — save it to use it');
+      });
+
+      $('#mailSave')?.addEventListener('click', async () => {
+        try {
+          await api(`/mail-templates/${t.kind}`, { method: 'PUT',
+            body: { subject: subject.value, body: body.value } });
+          toast('Saved — the next one goes out in these words');
+          render();
+        } catch (e) { alert(e.message); }
+      });
+
+      $('#mailRevert')?.addEventListener('click', async () => {
+        if (!confirm('Put this message back to the wording the application ships with?\n\n'
+          + 'What you have written is not kept.')) return;
+        try {
+          await api(`/mail-templates/${t.kind}`, { method: 'DELETE' });
+          toast('Back to the default'); render();
+        } catch (e) { alert(e.message); }
+      });
+
+      $('#mailSend')?.addEventListener('click', async () => {
+        try {
+          const out = await api(`/mail-templates/${t.kind}/test`, { method: 'POST',
+            body: { subject: subject.value, body: body.value } });
+          toast(`Specimen sent to ${out.to}`);
+        } catch (e) { alert(e.message); }
+      });
+    },
+  };
+}
+
 async function medicalQueueView() {
   if (state.params.id) return medicalCaseView();
   const rows = await api('/medical-reviews');
@@ -13390,6 +13610,7 @@ const VIEWS = {
   agreements: () => (isInvestorUser() ? agreementsView() : documentsView()),
   agreement: agreementView,
   settings: settingsView,
+  emails: mailTemplatesView,
 };
 
 /* Which render is the current one.

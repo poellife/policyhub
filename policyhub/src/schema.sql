@@ -727,6 +727,23 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS investor_url TEXT;
    else, so there is nothing on the wire for a screen to leak. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS deal_notes TEXT NOT NULL DEFAULT '';
 
+/* Who sent us the deal.
+ *
+ * The single most valuable fact about a book of cases and the one most
+ * reliably lost: six months on, "where did this one come from" is
+ * answered from memory or not at all. Three columns rather than one,
+ * because the three questions asked of it are different ones -- who
+ * (the broker or the firm), who at that firm (a person with a
+ * telephone), and when it arrived.
+ *
+ * Administrators only, in and out, like the deal notes beside it.
+ * Introducers are a relationship the house owns, and a list of who
+ * feeds the desk is not something every member of staff needs, nor
+ * anything an investor should ever be shown. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS source_contact TEXT NOT NULL DEFAULT '';
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS source_on DATE;
+
 /* And the running log beside it.
  *
  * The column above is the standing picture of a deal: what it is, what
@@ -1786,3 +1803,34 @@ CREATE INDEX IF NOT EXISTS idx_policy_reminders_from_value
    ==================================================================== */
 ALTER TABLE policy_reminders ADD COLUMN IF NOT EXISTS paid_txn_id INTEGER
   REFERENCES transactions(id) ON DELETE SET NULL;
+
+/* ====================================================================
+   The wording of the automated messages, owned by the office
+   ====================================================================
+
+   Every message this application sends has a default written in
+   `src/mail.js`. Those defaults are good, and they are also in a file
+   nobody at the firm can open: changing "a new file has been submitted
+   for review" to something else meant a code change and a deployment,
+   which is a silly price for a sentence.
+
+   So the defaults stay where they are, and this table holds an
+   override for any kind somebody has decided to word differently. An
+   absent row means the default, which is why nothing is seeded here:
+   the table starts empty and the application behaves exactly as it
+   does now.
+
+   An override is plain text with {{fields}} in it. It cannot carry
+   logic, which is the point -- a template language in a database is a
+   second program nobody can test. The one rule beyond substitution is
+   that a line whose field has no value for a particular message is
+   left out of it entirely, so an optional figure does not leave a
+   sentence with a hole in it.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS mail_templates (
+  kind        TEXT PRIMARY KEY,
+  subject     TEXT NOT NULL DEFAULT '',
+  body        TEXT NOT NULL DEFAULT '',
+  updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

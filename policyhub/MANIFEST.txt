@@ -1,64 +1,63 @@
-PolicyHub — build 2026-10-06e
-Scenarios on a deal, and which one the investors are shown
+PolicyHub — build 2026-10-07a
+Editing the email wording yourself, and who sent us the deal
 
-WHAT THIS ADDS
-A Scenarios card on every opportunity. The deal as it stands is the
-first row and is never a scenario — it is what the record says, and
-every variant is read against it. Add as many as you like, each one
-naming a life expectancy, a price, or both:
+1. WHAT THE MESSAGES SAY — Settings → The post → "What the messages say"
+Every automated email the portal sends, listed on the left; click one
+and its wording opens on the right.
 
-  The deal as it stands        72 mo   $300,000   64.12%
-  If he lives to 96 months     96 mo   $300,000   40.30%
-  If we get him to 260         72 mo   $260,000   72.68%
-  Both, the pessimistic case   96 mo   $260,000   45.35%
+  · The subject and body are in boxes you can edit. They start out as
+    the exact wording being sent today — taken from the real template,
+    not retyped — with the variable parts shown as {{fields}}.
+  · The fields that message has are listed as chips under the box.
+    Click one to drop it in where the cursor is.
+  · Beside it, "As it would arrive" shows the message filled in with
+    made-up names and figures, and it changes as you type.
+  · "Send me a specimen" posts it to your own address, before or after
+    saving, marked [Specimen] so it can never be mistaken for a real one.
+  · Save, and the next message of that kind goes out in your words. No
+    deployment. "Revert to the default" puts the application's wording
+    back; "Put the default back in the box" lets you start over from it
+    without saving.
 
-A scenario holds only what it changes. Everything else — the premium
-schedule, the dates, the benefit, the second life — is read from the
-deal, so correcting the deal corrects every row at once. A figure a
-scenario borrowed is set in grey against one it changed, so the eye
-lands on what is actually different. Each row is solved by the same
-engine the deal itself goes through, so the comparison is like for like.
+One rule beyond plain substitution: a line whose field has no value for
+a particular message is left out of that message entirely. Write "They
+said: {{note}}" on its own line and it simply disappears from messages
+that carry no note.
 
-WHICH ONE THE INVESTORS SEE
-The Shown column. Pick a row and that case is what an investor is given
-— their deal page, the list behind it, and the one-pager, including the
-copy you download to send out. They are told which case it is ("These
-figures are the If we get him to 260 case") and are never shown the
-rest of the set. Pick the top row to put them back on the deal's own
-figures.
+What it cannot do, said plainly: branch. The default says "one policy"
+or "three policies" where it needs to; your wording says what you type.
+And no message has a password, tax number or insured's name among its
+fields, so none can be added.
 
-Nothing a scenario does touches the deal. The record goes on saying
-exactly what it says, which is the point: the afternoon spent trying
-numbers out no longer leaves the file claiming something nobody
-believes.
+Administrators only — managers and investors are refused, both the
+screen and the routes behind it. Every save, revert and specimen is in
+the audit log.
 
-WHO CAN DO WHAT
-Trying numbers out is the ordinary work of pricing a deal, so anybody
-who may edit the deal may add, change and delete scenarios. Deciding
-which one an investor is shown changes what the house is offering, so
-that is an administrator's alone. An investor can do neither, and sees
-no scenario card at all. Choosing one warns you first, in figures, and
-says plainly that anybody already shown the deal is not told it moved.
+2. WHO SENT US THE DEAL — on every opportunity, administrators only
+Three boxes in the deal's edit form under "Where it came from": who sent
+it (the broker or firm), who there (a person and a number), and when it
+arrived. It is the first line on the Deal notes card. Same gate as the
+deal notes: a manager is not sent it, cannot see the boxes, and cannot
+write to it; an investor never sees it.
 
 FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
-  src/schema.sql    opportunity_scenarios, with a partial unique index
-                    that makes "exactly one shown" a rule the database
-                    keeps
-  src/api.js        applyScenario as the single lens; the set on the deal
-                    for staff with each one solved; the override for an
-                    investor on the deal, the list and the one-pager;
-                    four routes, the last admin-only
-  public/app.js     the card, the dialog, the Shown column, and the
-                    banner that tells an investor which case they have
-  public/styles.css the chosen row's tint
-  public/build.js   2026-10-06e
-  scripts/opportunity-scenarios-test.mjs     32 API checks
-  scripts/opportunity-scenarios-ui-test.mjs  18 screen checks
+  src/schema.sql    mail_templates table (starts empty — nothing changes
+                    until somebody changes something); source_name,
+                    source_contact, source_on on opportunities
+  src/mail.js       MAIL_FIELDS, defaultTemplate, render, compose; sendMail
+                    now uses the office's wording where there is one
+  src/api.js        GET/PUT/DELETE /mail-templates, POST …/:kind/test;
+                    the source fields behind the admin-only gate
+  public/app.js     the wording screen; the source boxes and card line
+  public/styles.css the wording screen's layout
+  public/build.js   2026-10-07a
+  scripts/mail-templates-test.mjs     26 API checks
+  scripts/mail-templates-ui-test.mjs  20 screen checks
+  scripts/deal-notes-test.mjs         +6 source checks
+  scripts/deal-notes-ui-test.mjs      +5 source checks
 
-NO MIGRATION TO RUN — schema.sql creates the table on boot. Every
-existing deal starts with no scenarios and investors on its own figures,
-exactly as now.
+NO MIGRATION TO RUN — schema.sql adds the table and columns on boot.
 
-TESTS: 119 suites green. The same six sandbox-only failures as the last
+TESTS: 121 suites green. The same six sandbox-only failures as the last
 build, all unrelated (investor-ui, sample-import, user-admin,
 valuation-menu, valuation-proxy, premium-dues).

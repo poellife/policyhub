@@ -114,6 +114,69 @@ check('the deal reaches the investor it was shared with', shown?.id === deal.id,
 check('and carries no trace of the desk’s notes',
   shown.deal_notes === undefined && !JSON.stringify(shown).includes('no hurry'));
 
+console.log('\nAND WHO SENT US THE DEAL');
+await api(`/opportunities/${deal.id}`, { method: 'PUT', body: {
+  source_name: 'Abacus Settlements', source_contact: 'Marty Feld \u00b7 248-555-0134',
+  source_on: '2026-09-18' } });
+const sourced = await json(await api(`/opportunities/${deal.id}`));
+check('an administrator can record the introducer',
+  sourced.source_name === 'Abacus Settlements', String(sourced.source_name));
+check('with a person at that firm', /Marty Feld/.test(String(sourced.source_contact)));
+check('and the date it arrived', String(sourced.source_on).startsWith('2026-09-18'),
+  String(sourced.source_on));
+
+const mgrSource = await json(await mgr(`/opportunities/${deal.id}`));
+check('a manager is not told who sent it', mgrSource.source_name === undefined
+  && !JSON.stringify(mgrSource).includes('Abacus'), JSON.stringify(mgrSource.source_name));
+await mgr(`/opportunities/${deal.id}`, { method: 'PUT',
+  body: { source_name: 'MANAGER WROTE THIS' } });
+check('nor can he change it',
+  (await json(await api(`/opportunities/${deal.id}`))).source_name === 'Abacus Settlements');
+const invSource = await json(await inv(`/opportunities/${deal.id}`));
+check('and an investor is nowhere near it', invSource.source_name === undefined
+  && !JSON.stringify(invSource).includes('Abacus'));
+
+console.log('\nAND THE LOG BESIDE THE STANDING NOTE');
+/* The column above is a summary and is replaced each time it is edited.
+   A negotiation arrives one call at a time, so it goes in entries. */
+const n1 = await json(await api(`/opportunities/${deal.id}/notes`, { method: 'POST',
+  body: { body: 'He came back at 22. Says the son is the holdup.' } }));
+check('an entry can be added', !!n1?.id, JSON.stringify(n1?.error));
+await new Promise((r) => { setTimeout(r, 1100); });
+await api(`/opportunities/${deal.id}/notes`, { method: 'POST',
+  body: { body: 'Quiet since the 9th. Broker chasing.' } });
+const withLog = await json(await api(`/opportunities/${deal.id}`));
+check('both are on the deal', (withLog.deal_note_log || []).length === 2,
+  String((withLog.deal_note_log || []).length));
+check('newest first, because that is what you came to read',
+  /Quiet since/.test(withLog.deal_note_log[0].body), withLog.deal_note_log[0].body);
+check('each is signed', !!withLog.deal_note_log[0].created_by_name,
+  String(withLog.deal_note_log[0].created_by_name));
+check('and dated', !!withLog.deal_note_log[0].created_at);
+check('and the standing note is untouched by any of it',
+  withLog.deal_notes === PRIVATE, String(withLog.deal_notes).slice(0, 40));
+
+const empty = await api(`/opportunities/${deal.id}/notes`, { method: 'POST',
+  body: { body: '   ' } });
+check('an empty entry is refused rather than filed', empty.status === 400, String(empty.status));
+
+const gone = await json(await api(`/opportunities/${deal.id}/notes/${n1.id}`,
+  { method: 'DELETE' }));
+check('one typed onto the wrong deal can be deleted', (gone?.log || []).length === 1,
+  JSON.stringify(gone?.error));
+
+console.log('\nAND THE LOG IS AS PRIVATE AS THE FIELD');
+const mgrLog = await json(await mgr(`/opportunities/${deal.id}`));
+check('a manager is not sent it', mgrLog.deal_note_log === undefined
+  && !JSON.stringify(mgrLog).includes('son is the holdup'),
+  JSON.stringify(mgrLog.deal_note_log));
+const mgrWrite = await mgr(`/opportunities/${deal.id}/notes`, { method: 'POST',
+  body: { body: 'MANAGER WROTE THIS' } });
+check('nor may he add to it', mgrWrite.status === 403, String(mgrWrite.status));
+const invLog = await json(await inv(`/opportunities/${deal.id}`));
+check('and an investor is nowhere near it', invLog.deal_note_log === undefined
+  && !JSON.stringify(invLog).includes('Quiet since'));
+
 await wipe();
 console.log(`\n${fails.length
   ? `FAILED: ${fails.join(', ')}` : 'All deal notes checks passed.'}`);

@@ -19,7 +19,8 @@ import { opportunityEmail } from './opportunity-email.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
-  appUrlMissing, mailFromProblem } from './mail.js';
+  appUrlMissing, mailFromProblem,
+  MAIL_FIELDS, templateList, composeWith, forgetTemplates, queueMail } from './mail.js';
 // The agreement template is under public/ for the same reason the rate engine
 // is: the browser renders it for preview, and a second copy of the clauses
 // would eventually differ from the one that was signed.
@@ -1183,6 +1184,92 @@ router.post('/mail/test', authenticate, blockInvestors, requireRole('admin'),
     if (queued.error) return res.status(500).json({ error: queued.error });
     const out = await flushMail({ limit: 5 });
     await audit(req.user.uid, 'user', req.user.uid, 'update', 'sent a test email');
+    res.json({ ok: true, to: req.user.email, ...out });
+  }));
+
+/* ==================================================================== *
+ * The wording of the automated messages
+ *
+ * Administrators only, and for a reason worth saying out loud: these
+ * are the words the firm says to its investors in writing, and a
+ * sentence about a capital call is as much the firm's voice as a
+ * letter on headed paper. Managers run a book; they do not speak for
+ * the house.
+ *
+ * Nothing here can break a message. An override is plain text with
+ * {{fields}} in it, the defaults stay in source and are a click away,
+ * and a kind with no row behaves exactly as it did before this screen
+ * existed.
+ * ==================================================================== */
+router.get('/mail-templates', authenticate, blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+    res.json({ templates: await templateList(), samples: MAIL_FIELDS });
+  }));
+
+/** Save one. An empty subject AND body is the same as reverting it. */
+router.put('/mail-templates/:kind', authenticate, blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+    const kind = str(req.params.kind);
+    if (!MAIL_FIELDS[kind]) return res.status(404).json({ error: 'No such message' });
+    const subject = str(req.body.subject).trim().slice(0, 300);
+    const body = str(req.body.body).slice(0, 20000).trim();
+    if (!subject || !body)
+      return res.status(400).json({
+        error: 'A message needs both a subject and a body. '
+          + 'To go back to the wording the application ships with, use Revert.' });
+    await q(
+      `INSERT INTO mail_templates (kind, subject, body, updated_by, updated_at)
+       VALUES ($1,$2,$3,$4, now())
+       ON CONFLICT (kind) DO UPDATE SET subject = $2, body = $3, updated_by = $4,
+                                        updated_at = now()`,
+      [kind, subject, body, req.user.uid]);
+    forgetTemplates();
+    await audit(req.user.uid, 'user', req.user.uid, 'update',
+      `rewrote the wording of the "${kind}" email`);
+    res.json({ ok: true });
+  }));
+
+/** Back to the wording the application ships with. */
+router.delete('/mail-templates/:kind', authenticate, blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+    const kind = str(req.params.kind);
+    await q('DELETE FROM mail_templates WHERE kind = $1', [kind]);
+    forgetTemplates();
+    await audit(req.user.uid, 'user', req.user.uid, 'update',
+      `put the "${kind}" email back to the wording it ships with`);
+    res.json({ ok: true });
+  }));
+
+/**
+ * Send one to yourself, as it would go out.
+ *
+ * To the signed-in administrator's own address and nowhere else — the
+ * one thing a screen like this must not become is a way to send
+ * arbitrary words to an arbitrary address. The specimen values are the
+ * server's, not the browser's, so what arrives is what the preview
+ * showed.
+ */
+router.post('/mail-templates/:kind/test', authenticate, blockInvestors, requireRole('admin'), wrap(async (req, res) => {
+    const kind = str(req.params.kind);
+    if (!MAIL_FIELDS[kind]) return res.status(404).json({ error: 'No such message' });
+    if (!mailReady())
+      return res.status(503).json({
+        error: 'No mail key is set on the server, so nothing can be sent yet.' });
+    /* Whatever is in the editor at this moment, saved or not — the point
+       of a test is to read the thing before committing to it. */
+    const draft = (str(req.body.subject).trim() || str(req.body.body).trim())
+      ? { subject: str(req.body.subject).slice(0, 300), body: str(req.body.body).slice(0, 20000) }
+      : null;
+    const made = composeWith(kind, draft, MAIL_FIELDS[kind]);
+    if (!made) return res.status(404).json({ error: 'No such message' });
+    /* Queued as a `test`, never as the real kind: a specimen capital
+       call sitting in the outbox under that name is a specimen somebody
+       will one day mistake for a real one in the log. */
+    const queued = await queueMail({ to: req.user.email, userId: null, kind: 'test',
+      subject: `[Specimen] ${made.subject}`,
+      text: `${made.text}\n\n— — —\nThis is a specimen of the "${kind}" message, sent to you `
+        + 'from the portal. The names and figures in it are made up.' });
+    if (queued.error) return res.status(500).json({ error: queued.error });
+    const out = await flushMail({ limit: 5 });
+    await audit(req.user.uid, 'user', req.user.uid, 'update',
+      `sent themselves a specimen of the "${kind}" email`);
     res.json({ ok: true, to: req.user.email, ...out });
   }));
 
@@ -3082,6 +3169,10 @@ const OPP_FIELDS = {
      and `hideDealNotes` takes it out of every reply that is not going
      to an administrator. */
   deal_notes: str,
+  /* Who introduced the deal. Same gate as `deal_notes` -- `onlyAdmin`
+     keeps it out of anybody else's body, `hideDealNotes` keeps it out
+     of anybody else's reply. */
+  source_name: str, source_contact: str, source_on: date,
 };
 
 /* ---------------------------------------------------------------------
@@ -3097,17 +3188,24 @@ const OPP_FIELDS = {
    bare RETURNING * on create and on update, which is where a field
    added later is most often forgotten.
    --------------------------------------------------------------------- */
+/* The fields on a deal that are the administrators' alone: the desk's
+   private commentary, and where the deal came from. One list, used in
+   both directions, so adding a third of them is one line rather than
+   three edits somebody can do two of. */
+const ADMIN_ONLY_OPP = ['deal_notes', 'deal_note_log',
+  'source_name', 'source_contact', 'source_on'];
+
 const onlyAdmin = (req) => {
-  if (isAdmin(req) || !req.body || !('deal_notes' in req.body)) return req.body;
+  if (isAdmin(req) || !req.body) return req.body;
+  if (!ADMIN_ONLY_OPP.some((k) => k in req.body)) return req.body;
   const b = { ...req.body };
-  delete b.deal_notes;
+  for (const k of ADMIN_ONLY_OPP) delete b[k];
   return b;
 };
 const hideDealNotes = (req, row) => {
   if (!row || isAdmin(req)) return row;
   const r = { ...row };
-  delete r.deal_notes;
-  delete r.deal_note_log;
+  for (const k of ADMIN_ONLY_OPP) delete r[k];
   return r;
 };
 

@@ -621,10 +621,207 @@ export const TEMPLATES = {
   }),
 };
 
+/* ==================================================================== *
+ * The wording, when the office has decided on its own
+ *
+ * The defaults above are the application's. They are also in a file
+ * nobody at the firm can open, and "change this email to say X" is a
+ * reasonable thing to want without a deployment. So: an override table,
+ * an empty one by default, and three small pieces of machinery.
+ *
+ *   MAIL_FIELDS   what each message has to work with, and a specimen of
+ *                 each, which is what the preview and the test message
+ *                 are built from.
+ *   defaultTemplate  the default wording WITH its placeholders still in
+ *                 it -- got by running the real template with every
+ *                 field set to its own `{{name}}`, which makes every
+ *                 optional clause appear and the result read as the
+ *                 template it is. Nothing is transcribed by hand, so
+ *                 the starting point somebody edits cannot drift from
+ *                 the wording actually being sent.
+ *   render        substitution, plus the one rule: a line whose field
+ *                 has no value for this particular message is dropped,
+ *                 so an optional figure never leaves a hole in a
+ *                 sentence.
+ *
+ * What an override cannot do is branch. "one policy" versus "three
+ * policies" is a judgement the default makes and a plain string cannot,
+ * and the screen says so rather than pretending otherwise. A template
+ * language living in a database is a second program nobody can test.
+ * ==================================================================== */
+
+/** What each message is given, with a specimen for the preview. */
+export const MAIL_FIELDS = {
+  new_location: { name: 'Ada Sommers', label: 'Safari on iOS · Detroit',
+    when: '6 October 2026, 2:14 PM' },
+  bulk_export: { actor: 'Jonathan Polter', detail: 'the whole book, 214 policies',
+    when: '6 October 2026, 2:14 PM' },
+  account_invite: { name: 'Ada Sommers', email: 'ada@example.com', token: 'xxxxx',
+    lasts: '48 hours', who: 'Jonathan Polter', role: 'investor' },
+  portal_open: { name: 'Ada Sommers', email: 'ada@example.com' },
+  password_reset: { name: 'Ada Sommers', email: 'ada@example.com', token: 'xxxxx' },
+  password_changed: { name: 'Ada Sommers', when: '6 October 2026, 2:14 PM',
+    how: 'from the reset link' },
+  agreement_out: { name: 'Ada Sommers', title: 'LCG I Operating Agreement',
+    parties: 'you and Lincoln Capital Group I' },
+  agreement_signed: { title: 'LCG I Operating Agreement', who: 'Ada Sommers',
+    outstanding: '2' },
+  agreement_declined: { title: 'LCG I Operating Agreement', who: 'Ada Sommers',
+    note: 'Wants her lawyer to read clause 7 first.' },
+  capital_call: { name: 'Ada Sommers', amount: '$42,500', due: '15 November 2026',
+    title: 'November premiums', policies: '4', note: '', purpose: 'Premiums' },
+  capital_call_paid: { investor: 'Ada Sommers', amount: '$42,500',
+    title: 'November premiums', note: 'Sent by wire this morning.' },
+  opportunity_shared: { name: 'Ada Sommers', headline: 'Northbank Life · $2,000,000',
+    closes: '31 October 2026', rate: '14.2%' },
+  investor_interest: { investor: 'Ada Sommers', pct: '25%',
+    headline: 'Northbank Life · $2,000,000', note: '', remaining: '40%' },
+  medical_review_requested: { name: 'Dr Weiss', initials: 'A.S.',
+    benefit: '$2,000,000', reviewId: '41' },
+  medical_review_returned: { name: 'Jonathan Polter', who: 'Dr Weiss', months: '41',
+    recommendation: 'Proceed' },
+  medical_review_declined: { name: 'Jonathan Polter', who: 'Dr Weiss',
+    reason: 'Outside my field — this is an oncology file.' },
+  registration_received: { name: 'Ada Sommers' },
+  registration_approved: { name: 'Ada Sommers', email: 'ada@example.com' },
+  registration_new: { name: 'Ada Sommers', email: 'ada@example.com',
+    entity: 'Sommers Family Trust', when: '6 October 2026' },
+  test: { who: 'Jonathan Polter' },
+};
+
+/** The fields a kind offers, as a plain list for the screen. */
+export const fieldsFor = (kind) => Object.keys(MAIL_FIELDS[kind] || {});
+
+/**
+ * The default wording, with its placeholders still in it.
+ *
+ * Every field is handed its own `{{name}}`, which is a non-empty string,
+ * so every conditional clause in the real template is taken and the
+ * output is the whole of the wording rather than the subset a
+ * particular message happens to use. The portal address is put back as
+ * `{{link}}` afterwards, because a hard-coded host in an editable
+ * template is a template that breaks the day the address changes.
+ */
+export function defaultTemplate(kind) {
+  const make = TEMPLATES[kind];
+  if (!make) return null;
+  const vars = Object.fromEntries(fieldsFor(kind).map((f) => [f, `{{${f}}}`]));
+  let { subject, text } = make(vars);
+  const url = link();
+  if (url) {
+    const find = new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    subject = subject.replace(find, '{{link}}');
+    text = text.replace(find, '{{link}}');
+  }
+  /* A placeholder that passed through `encodeURIComponent` on its way
+     into a link comes back as %7B%7Bname%7D%7D. Put back, because the
+     person editing this should see `{{reviewId}}` and not a smear of
+     percent signs -- and because `render` would not recognise the
+     encoded form as a field at all. */
+  const unencode = (t) => t.replace(/%7B%7B\s*([a-zA-Z0-9_]+)\s*%7D%7D/gi, '{{$1}}');
+  return { subject: unencode(subject), body: unencode(text) };
+}
+
+/**
+ * Lay a set of values over a template.
+ *
+ * Two rules, and no third. Substitution, and: a LINE that mentions a
+ * field this message has no value for is dropped whole. That second one
+ * is what lets one wording serve a message that sometimes carries a
+ * note and sometimes does not, without the office having to write "They
+ * said: " above an empty space.
+ */
+export function render(tpl, vars) {
+  const has = (k) => {
+    if (k === 'link') return !!link();
+    const v = vars[k];
+    return !(v === undefined || v === null || String(v).trim() === '');
+  };
+  const value = (k) => (k === 'link' ? link() : String(vars[k] ?? ''));
+  const fill = (line) => line.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k) => value(k));
+  const keep = (line) => {
+    const used = [...line.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)].map((m) => m[1]);
+    return used.length === 0 || used.every(has);
+  };
+  const body = String(tpl || '').split('\n').filter(keep).map(fill).join('\n')
+    /* Dropping a line can leave three blank ones where there were two.
+       Tidied here rather than asked of whoever is writing the wording. */
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return body;
+}
+
+/* The overrides, read once and kept. A message is queued inside a
+   request; going to the database for the wording every time would put a
+   query on a path that does not need one. `forgetTemplates` is called
+   by the route that writes them, which is the only thing that can
+   change them. */
+let overrides = null;
+export const forgetTemplates = () => { overrides = null; };
+async function overrideFor(kind) {
+  if (!overrides) {
+    try {
+      const { rows } = await q('SELECT kind, subject, body FROM mail_templates');
+      overrides = new Map(rows.map((r) => [r.kind, r]));
+    } catch (e) {
+      console.error('[mail] could not read the wording overrides:', e.message);
+      return null;
+    }
+  }
+  const row = overrides.get(kind);
+  return row && (row.subject || row.body) ? row : null;
+}
+
+/** Every kind, with its default and whatever the office has written. */
+export async function templateList() {
+  const { rows } = await q(
+    `SELECT t.kind, t.subject, t.body, t.updated_at, u.full_name AS updated_by_name
+       FROM mail_templates t LEFT JOIN users u ON u.id = t.updated_by`);
+  const by = new Map(rows.map((r) => [r.kind, r]));
+  return Object.keys(TEMPLATES).map((kind) => {
+    const meta = MAIL_KINDS.find((k) => k.kind === kind) || {};
+    const own = by.get(kind) || null;
+    return {
+      kind,
+      label: meta.label || kind,
+      who: meta.who || 'staff',
+      note: meta.note || '',
+      fields: fieldsFor(kind),
+      default: defaultTemplate(kind),
+      custom: own && (own.subject || own.body)
+        ? { subject: own.subject, body: own.body,
+            updated_at: own.updated_at, updated_by_name: own.updated_by_name }
+        : null,
+    };
+  });
+}
+
+/** What a kind would actually say, given a set of values. */
+export async function compose(kind, vars) {
+  const own = await overrideFor(kind);
+  if (own) return { subject: render(own.subject, vars), text: render(own.body, vars),
+                    custom: true };
+  const make = TEMPLATES[kind];
+  if (!make) return null;
+  const { subject, text } = make(vars);
+  return { subject, text, custom: false };
+}
+
+/** The same thing, without touching the database — for the preview. */
+export function composeWith(kind, tpl, vars) {
+  if (tpl && (tpl.subject || tpl.body))
+    return { subject: render(tpl.subject, vars), text: render(tpl.body, vars) };
+  const make = TEMPLATES[kind];
+  if (!make) return null;
+  return make(vars);
+}
+
 /** Queue a templated message. The only entry point the application uses. */
 export async function sendMail(kind, { to, userId = null, ...vars }) {
-  const make = TEMPLATES[kind];
-  if (!make) { console.error(`[mail] no template for ${kind}`); return { error: 'no template' }; }
-  const { subject, text } = make(vars);
-  return queueMail({ to, userId, kind, subject, text });
+  /* The office's own wording if there is one, the application's
+     otherwise. `compose` is the only thing that knows the difference,
+     so every caller in the application sends whichever is current
+     without having been told that a choice exists. */
+  const made = await compose(kind, vars);
+  if (!made) { console.error(`[mail] no template for ${kind}`); return { error: 'no template' }; }
+  return queueMail({ to, userId, kind, subject: made.subject, text: made.text });
 }

@@ -91,6 +91,47 @@ const written = (await p.locator('.card:has(h2:text-is("Deal notes"))').innerTex
 check('what was typed comes back on the card', written.includes('Do not reopen above 21'),
   written.replace(/\s+/g, ' ').slice(0, 140));
 
+const card = () => p.locator('.card:has(h2:text-is("Deal notes"))');
+console.log('\nAND WHO SENT US THE DEAL SITS AT THE TOP OF IT');
+await p.click('#editOppBtn');
+await p.waitForSelector('dialog[open] input[name="source_name"]', { timeout: 20000 });
+check('there are boxes for the introducer, a person there, and the date',
+  await p.locator('dialog[open] input[name="source_contact"]').count() === 1
+  && await p.locator('dialog[open] input[name="source_on"]').count() === 1);
+await p.fill('dialog[open] input[name="source_name"]', 'Abacus Settlements');
+await p.fill('dialog[open] input[name="source_contact"]', 'Marty Feld · 248-555-0134');
+await p.fill('dialog[open] input[name="source_on"]', '2026-09-18');
+await p.click('dialog[open] button[type=submit]');
+await p.waitForTimeout(2000);
+const sourced = (await card().innerText()).replace(/\s+/g, ' ');
+check('and it is the first thing on the card',
+  /Where it came from/i.test(sourced) && /Abacus Settlements/.test(sourced)
+  && /Marty Feld/.test(sourced), sourced.slice(0, 200));
+
+console.log('\nAND THE RUNNING LOG IS TYPED ON THE CARD ITSELF');
+check('there is a box on the card, not behind a dialog',
+  await p.locator('#dealNoteBody').count() === 1);
+await p.fill('#dealNoteBody', 'He came back at 22. Says the son is the holdup.');
+await p.click('#dealNoteAdd');
+await p.waitForTimeout(1800);
+const one = (await card().innerText()).replace(/\s+/g, ' ');
+check('what was typed is on the card', /son is the holdup/.test(one), one.slice(0, 200));
+check('signed by whoever wrote it', /Test Admin/.test(one));
+check('and the standing note is still above it, as background',
+  /background/i.test(one) && /reopen above 21/.test(one), one.slice(0, 160));
+check('and the box is empty again, ready for the next one',
+  (await p.locator('#dealNoteBody').inputValue()) === '');
+
+await p.fill('#dealNoteBody', 'Quiet since the 9th. Broker chasing.');
+await p.click('#dealNoteAdd');
+await p.waitForTimeout(1800);
+const two = (await card().innerText()).replace(/\s+/g, ' ');
+check('a second entry does not replace the first',
+  /Quiet since/.test(two) && /son is the holdup/.test(two), two.slice(0, 240));
+check('and the newest is at the top',
+  two.indexOf('Quiet since') < two.indexOf('son is the holdup'));
+check('each entry can be removed', await p.locator('[data-note-rm]').count() === 2);
+
 console.log('\nFOR A MANAGER THERE IS NO CARD AND NO BOX');
 await signIn(MANAGER1);
 await p.goto(`${BASE}/#/opportunity/${deal.id}`);
@@ -100,12 +141,18 @@ check('the manager is on the deal, which is the point',
   (await p.locator('.page-head').innerText()).includes(PREFIX), '');
 check('no Deal notes card', !(await cards()).includes('Deal notes'), (await cards()).join(' | '));
 check('and the words are not in the page source either',
-  !(await p.content()).includes('reopen above 21'));
+  !(await p.content()).includes('reopen above 21')
+  && !(await p.content()).includes('son is the holdup'));
+check('nor a box to add to the log', await p.locator('#dealNoteBody').count() === 0);
+check('and no trace of who sent us the deal',
+  !(await p.content()).includes('Abacus Settlements'));
 if (await p.locator('#editOppBtn').count()) {
   await p.click('#editOppBtn');
   await p.waitForSelector('dialog[open]', { timeout: 20000 });
   check('nor a box for them in his edit form',
     await p.locator('dialog[open] textarea[name="deal_notes"]').count() === 0);
+  check('nor one for the introducer',
+    await p.locator('dialog[open] input[name="source_name"]').count() === 0);
   check('though he still has the investors’ notes',
     await p.locator('dialog[open] textarea[name="notes"]').count() === 1);
   await p.keyboard.press('Escape');
