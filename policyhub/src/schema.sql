@@ -717,6 +717,16 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS documents_url TEXT;
    is not the same link as the case folder. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS investor_url TEXT;
 
+/* The desk's own notes on the deal, which are not the deal's notes.
+   `notes` above is written with everybody in mind -- it travels onto
+   the one-pager's neighbourhood and any member of staff can read it.
+   This column is for what is said about a case before it is said out
+   loud: what the seller actually wants, where the price came from, why
+   the last offer was walked away from. Administrators only, going in
+   and coming back out; the server never puts it in a reply to anybody
+   else, so there is nothing on the wire for a screen to leak. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS deal_notes TEXT NOT NULL DEFAULT '';
+
 /* When the carrier issued the contract.
  *
  * Policies have carried this since the beginning; a deal being priced
@@ -1599,6 +1609,26 @@ CREATE INDEX IF NOT EXISTS idx_medreview_who    ON medical_reviews (reviewer_id,
  * single link cannot be both, and one link doing double duty is how the
  * wrong person ends up inside the wrong folder. */
 ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS records_url TEXT;
+
+/* Who actually typed the answer.
+ *
+ * Doctors are not all going to sit at the screen. The usual way an
+ * estimate arrives is a telephone call: he reads out a number and talks
+ * for two minutes about why, and whoever took the call writes it down.
+ * That is a perfectly good review and it should live where every other
+ * review lives rather than in somebody's notebook.
+ *
+ * What it must not do is pretend he typed it. These three columns are
+ * the whole difference: when they are empty the doctor entered his own
+ * review, and when they are filled the screen says who took it down,
+ * when, and how it came in. Nothing downstream changes -- the estimate
+ * is adopted onto the case the same way -- because the number is his
+ * either way. Only the provenance differs, and provenance is exactly
+ * the thing somebody asks about six months later. */
+ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS recorded_by
+  INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ;
+ALTER TABLE medical_reviews ADD COLUMN IF NOT EXISTS recorded_how TEXT NOT NULL DEFAULT '';
 
 /* More records, arriving after the first lot.
  *

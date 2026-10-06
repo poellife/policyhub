@@ -1,39 +1,68 @@
-PolicyHub — build 2026-10-06a
-The investors' folder
+PolicyHub — build 2026-10-06c
+Two things: deal notes, and writing the doctor's answer down for him
 
-WHAT THIS ADDS
-A second document link on every opportunity and every policy: an
-investor folder, separate from the office's case folder.
+1. DEAL NOTES ON AN OPPORTUNITY — ADMINISTRATORS ONLY
+A second notes box on every deal, beside the existing one.
 
-  Case files       — the desk's working folder. Staff only. Investors
-                     never see it, and neither does a reviewing doctor.
-  Investor documents — the link handed to the people who own a piece of
-                     the policy: policy documents and whatever of the
-                     health picture you decide they should have.
+  Notes for investors — what you already had. Every member of staff
+                        reads it, and it belongs to the deal as shown.
+  Deal notes          — yours. What the seller actually wants, where the
+                        price came from, why the last offer was walked
+                        away from.
 
-On an investor's own screen there is only one folder and it is simply
-called "Documents", because they have only the one.
+Administrators only, in both directions. A manager is not sent the field
+at all — not an empty string, absent — so there is nothing on the wire
+for a screen to leak, and a write from anybody who is not an admin is
+dropped before it reaches the database. It is on the deal's own screen
+as its own card and in the edit form as its own box; for everybody else
+neither exists. Not on the one-pager, not on an investor's screen.
 
-The link set on an opportunity travels onto the policy when the deal is
-funded, alongside the case folder and the issue date.
+2. ENTERING THE MEDICAL ANALYSIS YOURSELF
+For a reviewing doctor who gives you his reading over the telephone
+rather than typing it in.
 
-A reviewing doctor is sent neither folder — he sees only the records
-folder attached to his own review.
+On the review — on the deal's Medical review panel and on the review's
+own screen — there is now "Enter his answer". It asks for the life
+expectancy in months, whether that is a median or a mean, his reasoning
+in his own words, what he suggests, and a line saying how the answer
+came in ("By telephone, this afternoon"). It then behaves exactly as his
+own return would: the review reads as back, and the estimate lands on
+the case if the case has none, or waits beside it as the internal LE if
+it already carries a number.
+
+What it will not do is pretend he typed it:
+
+  · Every screen showing the estimate also says who wrote it down, when,
+    and how it came in — on the review, on the deal's panel, in the
+    register.
+  · Administrators only. A manager cannot do it, and nor can the doctor,
+    who has a route of his own.
+  · A review the doctor HAS written himself is refused rather than
+    overwritten — his words stand.
+  · If he later types his own, the office's handwriting comes off it and
+    the review is simply his.
+  · You can correct what you took down: the button becomes "Change what
+    you took down" on a review the office recorded.
 
 FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
-  src/schema.sql   investor_url on policies and on opportunities
-  src/api.js       the field on both whitelists; stripped for investors
-                   on the case folder only; carried at funding
-  public/app.js    both boxes on both forms, both rows on the policy,
-                   the investor row on the deal header
-  public/build.js  2026-10-06a
-  scripts/investor-folder-test.mjs      11 API checks
-  scripts/investor-folder-ui-test.mjs    9 screen checks
+  src/schema.sql   opportunities.deal_notes; medical_reviews.recorded_by
+                   / recorded_at / recorded_how
+  src/api.js       deal_notes on the whitelist with onlyAdmin/hideDealNotes
+                   on every path that returns a deal; POST
+                   /medical-reviews/:id/record
+  public/app.js    the Deal notes card and box; "Enter his answer" and
+                   its dialog; the provenance line wherever the estimate
+                   is shown
+  public/build.js  2026-10-06c
+  scripts/deal-notes-test.mjs             16 API checks
+  scripts/deal-notes-ui-test.mjs          11 screen checks
+  scripts/med-review-dictated-test.mjs    24 API checks
+  scripts/med-review-dictated-ui-test.mjs 14 screen checks
 
 NO MIGRATION TO RUN — schema.sql adds the columns on boot.
 
-TESTS: 113 suites green. Five fail in the sandbox only and are unrelated
-(investor-ui, sample-import, user-admin, valuation-menu, valuation-proxy
-— the last two need the Flask pricing app, which is not running here),
-plus premium-dues, whose dashboard card is crowded out by leftover
-sample fixtures in the sandbox database.
+TESTS: 117 suites green. Six fail in the sandbox only and are unrelated
+(investor-ui, sample-import, user-admin, valuation-menu and
+valuation-proxy — the last two need the Flask pricing app, which is not
+running here — plus premium-dues, whose dashboard card is crowded out by
+leftover sample fixtures in the sandbox database).

@@ -6050,6 +6050,20 @@ async function opportunityView() {
     ${o.notes ? `<div class="card"><div class="card-head"><h2>Notes</h2></div>
       <div class="card-body"><div style="font-size:14px;white-space:pre-wrap">${esc(o.notes)}</div></div></div>` : ''}
 
+    ${''/* The desk's own notes. The field only arrives for an
+           administrator, so the card cannot appear for anybody else even
+           if this test were wrong; the role check is here so that an
+           administrator sees the empty card and knows the place exists. */}
+    ${!isAdminUser() ? '' : `<div class="card">
+      <div class="card-head"><h2>Deal notes</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">administrators only</span></div>
+      <div class="card-body">${o.deal_notes
+        ? `<div style="font-size:14px;white-space:pre-wrap">${esc(o.deal_notes)}</div>`
+        : `<div class="muted" style="font-size:14px">Nothing written yet.
+             Open <strong>Edit</strong> to put something here — it stays on this screen
+             and on no other.</div>`}</div>
+    </div>`}
+
     ${staff ? `
     <div class="card">
       <div class="card-head"><h2>Investor interest</h2><div class="spacer"></div>
@@ -6435,6 +6449,18 @@ async function openOpportunityDialog(o) {
       that. It travels onto the policy if the deal is funded.</span></div>
     <div class="field"><label>Notes for investors</label>
       <textarea name="notes" rows="3">${esc(o?.notes || '')}</textarea></div>
+    ${''/* The desk's own notes on the deal. The box is absent for anybody
+           who is not an administrator -- not disabled, absent -- because
+           the server does not send them the field either, and a greyed
+           box that saves nothing is a worse lie than no box. */}
+    ${!isAdminUser() ? '' : `
+    <div class="field"><label>Deal notes <span class="muted">· administrators only</span></label>
+      <textarea name="deal_notes" rows="5"
+        placeholder="What the seller actually wants, where the price came from, why the last offer was walked away from…">${esc(o?.deal_notes || '')}</textarea>
+      <span class="muted" style="font-size:12px">
+        Private to administrators. Not on the one-pager, not on an investor's screen, and
+        not visible to managers or editors — the server never sends this field to them.
+      </span></div>`}
 
     <div class="dlg-section">For the one-pager</div>
     <div class="field-row">
@@ -11498,6 +11524,16 @@ function medicalPanel(reviews, o) {
           : r.status === 'Requested' || r.status === 'Opened'
             ? `<button class="btn-sm" data-med-cancel="${r.id}">Withdraw</button>`
             : '—'}</td>
+      ${''/* Taking it down for him. Offered while the review is still
+             out, which is when the telephone rings, and again on one the
+             office already took down so a misheard number can be
+             corrected. Never on a review the doctor wrote himself: the
+             server refuses that, and a button that only ever produces
+             an error is worse than no button. */}
+      <td>${(r.status === 'Requested' || r.status === 'Opened' || r.recorded_by_name)
+        ? `<button class="btn-sm" data-med-record="${r.id}">${
+          r.recorded_by_name ? 'Change what you took down' : 'Enter his answer'}</button>`
+        : ''}</td>
       ${''/* Through to the whole of it: the papers that went with it,
              what came back, and the button that takes the estimate onto
              the case. */}
@@ -11510,6 +11546,15 @@ function medicalPanel(reviews, o) {
       <strong>${r.le_months} months</strong>${r.recommendation
         ? ` · ${esc(r.recommendation)}` : ''}${r.confidence
         ? ` · ${esc(r.confidence)}` : ''}</div>
+    ${''/* Said on the opinion itself rather than in a column somewhere,
+           because this is the sentence that answers "did he write this?"
+           — and that is the question somebody asks about an estimate
+           six months after it was priced off. */}
+    ${r.recorded_by_name ? `<div class="med-opinion-sub"><span>How this was taken</span>
+      <div class="secondary">Written down by ${esc(r.recorded_by_name)}${
+        r.recorded_at ? ` on ${fmtDate(r.recorded_at)}` : ''}${
+        r.recorded_how ? ` — ${esc(r.recorded_how)}` : ''}. The estimate is
+        ${esc(r.reviewer_name || 'the reviewer')}'s; the typing is not.</div></div>` : ''}
     ${r.findings ? `<p class="med-opinion-body">${esc(r.findings)}</p>` : ''}
     ${r.impairments ? `<div class="med-opinion-sub"><span>Impairments</span>
       <ul class="rpt-bullets">${String(r.impairments).split('\n').map((l) => l.trim())
@@ -11530,7 +11575,7 @@ function medicalPanel(reviews, o) {
       ${rows.length ? `<div class="table-wrap"><table class="data">
           <thead><tr><th>Status</th><th>Reviewer</th><th>Sent</th>
             <th class="num">Their estimate</th><th>Recommendation</th><th></th>
-            <th></th></tr></thead>
+            <th></th><th></th></tr></thead>
           <tbody>${rows.map(line).join('')}</tbody></table></div>`
         : `<div class="empty">Nobody has looked at this case yet.
            <strong>Send for medical review</strong> puts it in a doctor's queue with the
@@ -11637,8 +11682,67 @@ async function openMedicalReviewDialog(o) {
   return medDlg;
 }
 
+/* ===================================================================== *
+ * Taking his answer down for him
+ *
+ * A doctor who will not sit at a screen still has an opinion, and it
+ * usually arrives by telephone. This is the same three facts his own
+ * screen asks for — the number, the basis, and what he said about it —
+ * typed by whoever took the call.
+ *
+ * The dialog is written to be read out loud while he is still on the
+ * line, which is why the order matches the order he will say it in and
+ * why the reasoning box is big: the two minutes of why are the part
+ * worth having, and a three-line box invites a summary of them.
+ * ===================================================================== */
+function openRecordAnswerDialog(r, onDone) {
+  const who = r.reviewer_name || r.reviewer_email || 'the reviewer';
+  return openDialog(`Write down ${who}'s answer`, `
+    <div class="dlg-note">
+      For a reviewer who gives you his reading over the telephone rather than typing it in.
+      It lands on the case exactly as his own would, and the record will say throughout that
+      <strong>you</strong> wrote it down and he gave it — so nobody reading this in a year
+      mistakes your handwriting for his.
+    </div>
+    <div class="field-row">
+      ${inputField('Life expectancy (months) *', 'le_months', r.le_months || '', 'number',
+        'min="1" max="1200" required')}
+      ${selectField('Read as', 'le_basis', r.le_basis || 'median', ['median', 'mean'])}
+    </div>
+    <div class="field"><label>His reasoning</label>
+      <textarea name="findings" rows="8"
+        placeholder="In his words as near as you can manage — what he is weighing, what he discounted, what would change his mind.">${esc(r.findings || '')}</textarea>
+      <span class="muted" style="font-size:12px">Write what he actually said rather than what
+        it means for the price. The number is the easy part; this is the part you will want
+        when somebody asks why.</span></div>
+    <div class="field"><label>What he suggests</label>
+      <select name="recommendation">
+        <option value="">He did not say</option>
+        ${['Proceed', 'Pass', 'More records needed'].map((x) =>
+    `<option value="${x}" ${r.recommendation === x ? 'selected' : ''}>${x}</option>`).join('')}
+      </select></div>
+    ${inputField('How it came in', 'recorded_how', r.recorded_how || '', 'text',
+      'placeholder="By telephone, this afternoon" maxlength="300"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      A sentence for the record — a call, a voicemail, a note he dictated at the Tuesday
+      meeting. It is printed beside his estimate wherever the review is shown.</span></div>
+  `, async (v) => {
+    await api(`/medical-reviews/${r.id}/record`, { method: 'POST', body: {
+      le_months: Number(v.le_months), le_basis: v.le_basis,
+      findings: v.findings, recommendation: v.recommendation,
+      recorded_how: v.recorded_how } });
+    toast('Written down');
+    if (onDone) onDone(); else render();
+  }, 'Save his answer');
+}
+
 /** The buttons in the panel above. */
 function wireMedicalPanel(o) {
+  document.querySelectorAll('[data-med-record]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const r = (o.medical_reviews || []).find((x) => String(x.id) === b.dataset.medRecord);
+      if (r) openRecordAnswerDialog(r);
+    }));
   $('#medSendBtn')?.addEventListener('click', () =>
     openMedicalReviewDialog(o).catch((e) => alert(e.message)));
   document.querySelectorAll('[data-med-adopt]').forEach((b) =>
@@ -11953,6 +12057,15 @@ async function medReviewDetailView() {
                     ? `taken ${fmtDate(r.adopted_at)}${r.adopted_by_name
                       ? ` by ${esc(r.adopted_by_name)}` : ''}`
                     : 'not taken'}</dd>
+                  ${''/* Only when somebody here typed it. Absent on a
+                         review the doctor wrote himself, which is how
+                         its presence means something. */}
+                  ${r.recorded_by_name ? `<dt>Written down by</dt><dd>${
+                    esc(r.recorded_by_name)}${r.recorded_at
+                      ? ` on ${fmtDate(r.recorded_at)}` : ''}${r.recorded_how
+                      ? ` — ${esc(r.recorded_how)}` : ''}<div class="secondary">The estimate
+                      is ${esc(r.reviewer_name || 'the reviewer')}'s. He did not type it
+                      himself, so the record says who did.</div></dd>` : ''}
                 </dl>
                 ${r.findings ? `<h3 class="med-h3">His reasoning</h3>
                   <p class="med-opinion-body">${esc(r.findings)}</p>` : ''}
@@ -11974,6 +12087,18 @@ async function medReviewDetailView() {
                   : ''}`
                 : `<div class="empty">Nothing has come back yet. He was sent this on ${
                      fmtDate(r.requested_at)}.</div>`}
+              ${''/* The telephone case. Offered while it is still out --
+                     which is when the call comes -- and again on one the
+                     office took down, so a misheard number can be put
+                     right. Never on a review he wrote himself. */}
+              ${state.user.role === 'admin' && (open || r.recorded_by_name)
+                ? `<button class="btn-sm" id="medRecord" style="margin-top:14px">${
+                  r.recorded_by_name ? 'Change what you took down'
+                    : 'Enter his answer for him'}</button>
+                   <div class="muted" style="font-size:12px;margin-top:8px">
+                     For a reviewer who gives you his reading over the telephone. It lands on
+                     the case as his own would, and the record says you wrote it down.</div>`
+                : ''}
             </div>
           </div>
         </div>
@@ -12050,6 +12175,7 @@ async function medReviewDetailView() {
           go('#/med-review');
         } catch (err) { alert(err.message); }
       });
+      onClick('#medRecord', () => openRecordAnswerDialog(r, render));
       onClick('#medAdopt', async () => {
         try {
           await api(`/medical-reviews/${r.id}/adopt`, { method: 'POST' });

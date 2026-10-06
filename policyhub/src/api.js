@@ -3076,6 +3076,38 @@ const OPP_FIELDS = {
   /* The folder the investors are given, which is not the case folder.
      Same guard: http and https only. */
   investor_url: url,
+  /* The desk's private running commentary on the deal. It is on the
+     whitelist so an administrator can write it; `onlyAdmin` below takes
+     it out of the body of anybody else before this list is ever read,
+     and `hideDealNotes` takes it out of every reply that is not going
+     to an administrator. */
+  deal_notes: str,
+};
+
+/* ---------------------------------------------------------------------
+   The admin-only field on the deal, in both directions.
+
+   One column, two guards, because a field like this fails in two
+   different ways. A manager who can WRITE it has not read anything, but
+   he has put words in a place the author believed only administrators
+   could reach -- so the write is dropped. A manager who can READ it has
+   the whole of it, and that is the real harm, so every path that
+   returns an opportunity row goes through hideDealNotes rather than
+   only the ones that looked likely: loadOpportunity, yes, but also the
+   bare RETURNING * on create and on update, which is where a field
+   added later is most often forgotten.
+   --------------------------------------------------------------------- */
+const onlyAdmin = (req) => {
+  if (isAdmin(req) || !req.body || !('deal_notes' in req.body)) return req.body;
+  const b = { ...req.body };
+  delete b.deal_notes;
+  return b;
+};
+const hideDealNotes = (req, row) => {
+  if (!row || isAdmin(req)) return row;
+  const r = { ...row };
+  delete r.deal_notes;
+  return r;
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -3184,7 +3216,11 @@ async function loadOpportunity(req, id) {
     o.analysis_error = 'The scenarios could not be worked out from the figures on this '
       + 'record — check the life expectancy, the dates and the premium schedule.';
   }
-  return o;
+  /* Last, so that nothing added to this function above can smuggle the
+     desk's private notes out with it. Everything that reads a whole
+     opportunity -- the detail screen, the sheet, funding, sharing --
+     comes through here. */
+  return hideDealNotes(req, o);
 }
 
 router.get('/opportunities', wrap(async (req, res) => {
@@ -3403,14 +3439,14 @@ router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => 
   if ('status' in req.body && !OPP_STATUSES.includes(str(req.body.status)))
     return res.status(400).json({ error: `Status must be one of ${OPP_STATUSES.join(', ')}` });
 
-  const { cols, vals } = buildSet(OPP_FIELDS, req.body);
+  const { cols, vals } = buildSet(OPP_FIELDS, onlyAdmin(req));
   cols.push('created_by'); vals.push(req.user.uid);
   const ph = cols.map((_, i) => `$${i + 1}`).join(',');
   const { rows } = await q(
     `INSERT INTO opportunities (${cols.join(',')}) VALUES (${ph}) RETURNING *`, vals);
   await audit(req.user.uid, 'opportunity', rows[0].id, 'create',
     `${rows[0].policy_number || rows[0].insured_last_name} · ${rows[0].carrier_name}`);
-  res.status(201).json(rows[0]);
+  res.status(201).json(hideDealNotes(req, rows[0]));
 }));
 
 /**
@@ -3506,7 +3542,7 @@ router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) 
           + 'or links it to one already there.' });
   }
 
-  const { sets, vals, next } = buildSet(OPP_FIELDS, req.body);
+  const { sets, vals, next } = buildSet(OPP_FIELDS, onlyAdmin(req));
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(
     `UPDATE opportunities SET ${sets.join(',')}, updated_at = now() WHERE id = $${next} RETURNING *`,
@@ -3530,7 +3566,7 @@ router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) 
   await audit(req.user.uid, 'opportunity', rows[0].id, 'update',
     `${sets.join(',')}${synced === 'schedule' ? ' · year one of the benefit schedule moved with it'
       : synced === 'benefit' ? ' · death benefit taken from the benefit schedule' : ''}`);
-  res.json(back[0]);
+  res.json(hideDealNotes(req, back[0]));
 }));
 
 router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manager'),
@@ -6068,6 +6104,10 @@ const REVIEW_SELECT = `
   SELECT m.*, u.full_name AS reviewer_name, u.email AS reviewer_email,
          rq.full_name AS requested_by_name,
          ad.full_name AS adopted_by_name,
+         /* Who took the answer down, when the doctor did not type it
+            himself. Null on an ordinary review, which is how every
+            screen tells the two apart. */
+         rc.full_name AS recorded_by_name,
          o.policy_number AS opportunity_number, o.carrier_name AS opportunity_carrier,
          p.policy_number AS policy_number,
          /* Who the case is about, for the register. Staff only ever read
@@ -6081,6 +6121,7 @@ const REVIEW_SELECT = `
     LEFT JOIN users u  ON u.id = m.reviewer_id
     LEFT JOIN users rq ON rq.id = m.requested_by
     LEFT JOIN users ad ON ad.id = m.adopted_by
+    LEFT JOIN users rc ON rc.id = m.recorded_by
     LEFT JOIN opportunities o ON o.id = m.opportunity_id
     LEFT JOIN policies p ON p.id = m.policy_id
     LEFT JOIN insureds i ON i.id = p.insured_id`;
@@ -6193,6 +6234,13 @@ async function reviewPacket(row) {
     mitigating: row.mitigating,
     recommendation: row.recommendation,
     adopted_at: row.adopted_at,
+    /* Who typed this, when it was not the reviewer. Null on an ordinary
+       review. Sent to the doctor too, deliberately: if the office took
+       his answer down over the telephone he should be able to see what
+       they wrote and correct it. */
+    recorded_by_name: row.recorded_by_name || null,
+    recorded_at: row.recorded_at || null,
+    recorded_how: row.recorded_how || '',
     subject,
     /* The machine's reading, offered as a reading rather than as an
        answer. He may agree with it, and he may not. */
@@ -6522,7 +6570,11 @@ router.put('/medical-reviews/:id', wrap(async (req, res) => {
             impairments = $5, mitigating = $6, recommendation = $7,
             status = CASE WHEN $8 THEN 'Returned' ELSE 'Opened' END,
             returned_at = CASE WHEN $8 THEN now() ELSE NULL END,
-            opened_at = COALESCE(opened_at, now())
+            opened_at = COALESCE(opened_at, now()),
+            /* If the office had taken his answer down over the
+               telephone, it is his own now. The stamp comes off rather
+               than sitting under words he has since typed himself. */
+            recorded_by = NULL, recorded_at = NULL, recorded_how = ''
       WHERE id = $9 RETURNING *`,
     [months, basis, keep('confidence', row.confidence, 200),
       keep('findings', row.findings), keep('impairments', row.impairments),
@@ -6915,6 +6967,98 @@ router.post('/medical-reviews/:id/cancel', blockInvestors, blockMedical, canEdit
  * So that case is one click, and the screen shows the rate before and
  * after.
  */
+/* ==================================================================== *
+ * Taking the answer down for him
+ *
+ * Not every doctor is going to sit at a screen, and the office should
+ * not lose a review because of it. The usual way an estimate arrives is
+ * a telephone call: a number, and two minutes on why. This route is
+ * that call, written into the same record the doctor would have filled
+ * in himself, so the estimate is adopted onto the case the ordinary way
+ * and the Med Review register is not quietly missing half of what the
+ * office actually knows.
+ *
+ * Three things keep it honest.
+ *
+ *   It is an administrator's. The doctor's own route refuses everybody
+ *   who is not the reviewer; this is its opposite number and refuses
+ *   everybody who is not an admin, so there is no role that can write
+ *   both and no way for a manager to put words in a physician's mouth.
+ *
+ *   It never pretends he typed it. `recorded_by`, `recorded_at` and
+ *   `recorded_how` are stamped on every write, and every screen that
+ *   shows the review says who took it down and how it came in. A review
+ *   with those columns empty is one the doctor entered himself; that is
+ *   the only difference between the two, and it is the one somebody
+ *   asks about six months later.
+ *
+ *   It will not overwrite his own words. If the doctor has returned the
+ *   review himself, this refuses rather than silently replacing an
+ *   opinion that is on the record under his name.
+ * ==================================================================== */
+router.post('/medical-reviews/:id/record', blockInvestors, blockMedical, requireRole('admin'),
+  wrap(async (req, res) => {
+    const row = await oneReview(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'That review is not on file' });
+    if (row.status === 'Cancelled')
+      return res.status(409).json({ error: 'That request was withdrawn.' });
+    if (row.status === 'Declined')
+      return res.status(409).json({ error: 'The reviewer declined this one.' });
+    if (row.status === 'Returned' && !row.recorded_by)
+      return res.status(409).json({
+        error: 'The reviewer has already written this one himself. '
+          + 'His own words stand — telephone him if the estimate has changed.' });
+
+    const months = int(req.body.le_months);
+    if (!months || months < 0 || months > 1200)
+      return res.status(400).json({
+        error: 'A life expectancy in months, between 1 and 1200 — it is the one thing '
+          + 'the office is writing down for him.' });
+    const basis = LE_BASIS.includes(str(req.body.le_basis)) ? str(req.body.le_basis) : 'median';
+    const rec = RECOMMENDATIONS.includes(str(req.body.recommendation))
+      ? str(req.body.recommendation) : '';
+    const findings = str(req.body.findings).slice(0, 20000);
+    /* How it came in, in whoever took it down's own words — "by
+       telephone, 6 Oct", "read out at the Tuesday call". Free text on
+       purpose: a dropdown of three options would be wrong by the fourth
+       week, and this is a sentence somebody reads rather than a field
+       anything sorts on. */
+    const how = str(req.body.recorded_how).slice(0, 300)
+      || 'taken down by the office';
+
+    const { rows } = await q(
+      `UPDATE medical_reviews
+          SET le_months = $1::int, le_basis = $2, findings = $3, recommendation = $4,
+              status = 'Returned',
+              returned_at = COALESCE(returned_at, now()),
+              opened_at = COALESCE(opened_at, now()),
+              recorded_by = $5, recorded_at = now(), recorded_how = $6
+        WHERE id = $7 RETURNING *`,
+      [months, basis, findings, rec, req.user.uid, how, row.id]);
+
+    await audit(req.user.uid, 'medical_review', row.id, 'update',
+      `recorded the reviewer's answer on his behalf — ${months} months${
+        rec ? `, ${rec}` : ''} · ${how}`);
+
+    /* Onto the case by itself only where there is nothing to overwrite —
+       the same rule the doctor's own return follows, and for the same
+       reason: a case that has been priced off an older estimate is
+       repriced by hand or not at all. */
+    if (!(await caseHasLe(rows[0]))) {
+      await adoptReview({ ...rows[0], reviewer_name: row.reviewer_name }, req.user.uid);
+      await audit(req.user.uid, 'medical_review', row.id, 'update',
+        'estimate taken onto the case automatically — it had none');
+    }
+
+    /* No mail. The desk is the one holding the telephone; telling it
+       what it has just typed is noise. */
+    /* Read back through `oneReview` rather than handing back the bare
+       RETURNING row: the names the screens print -- the reviewer's, and
+       now whoever took this down -- come from joins, and a row straight
+       out of the UPDATE has neither. */
+    res.json(await reviewPacket((await oneReview(req, row.id)) || rows[0]));
+  }));
+
 router.post('/medical-reviews/:id/adopt', blockInvestors, blockMedical, canEdit,
   wrap(async (req, res) => {
     const row = await oneReview(req, req.params.id);
