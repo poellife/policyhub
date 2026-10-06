@@ -1,68 +1,64 @@
-PolicyHub — build 2026-10-06c
-Two things: deal notes, and writing the doctor's answer down for him
+PolicyHub — build 2026-10-06e
+Scenarios on a deal, and which one the investors are shown
 
-1. DEAL NOTES ON AN OPPORTUNITY — ADMINISTRATORS ONLY
-A second notes box on every deal, beside the existing one.
+WHAT THIS ADDS
+A Scenarios card on every opportunity. The deal as it stands is the
+first row and is never a scenario — it is what the record says, and
+every variant is read against it. Add as many as you like, each one
+naming a life expectancy, a price, or both:
 
-  Notes for investors — what you already had. Every member of staff
-                        reads it, and it belongs to the deal as shown.
-  Deal notes          — yours. What the seller actually wants, where the
-                        price came from, why the last offer was walked
-                        away from.
+  The deal as it stands        72 mo   $300,000   64.12%
+  If he lives to 96 months     96 mo   $300,000   40.30%
+  If we get him to 260         72 mo   $260,000   72.68%
+  Both, the pessimistic case   96 mo   $260,000   45.35%
 
-Administrators only, in both directions. A manager is not sent the field
-at all — not an empty string, absent — so there is nothing on the wire
-for a screen to leak, and a write from anybody who is not an admin is
-dropped before it reaches the database. It is on the deal's own screen
-as its own card and in the edit form as its own box; for everybody else
-neither exists. Not on the one-pager, not on an investor's screen.
+A scenario holds only what it changes. Everything else — the premium
+schedule, the dates, the benefit, the second life — is read from the
+deal, so correcting the deal corrects every row at once. A figure a
+scenario borrowed is set in grey against one it changed, so the eye
+lands on what is actually different. Each row is solved by the same
+engine the deal itself goes through, so the comparison is like for like.
 
-2. ENTERING THE MEDICAL ANALYSIS YOURSELF
-For a reviewing doctor who gives you his reading over the telephone
-rather than typing it in.
+WHICH ONE THE INVESTORS SEE
+The Shown column. Pick a row and that case is what an investor is given
+— their deal page, the list behind it, and the one-pager, including the
+copy you download to send out. They are told which case it is ("These
+figures are the If we get him to 260 case") and are never shown the
+rest of the set. Pick the top row to put them back on the deal's own
+figures.
 
-On the review — on the deal's Medical review panel and on the review's
-own screen — there is now "Enter his answer". It asks for the life
-expectancy in months, whether that is a median or a mean, his reasoning
-in his own words, what he suggests, and a line saying how the answer
-came in ("By telephone, this afternoon"). It then behaves exactly as his
-own return would: the review reads as back, and the estimate lands on
-the case if the case has none, or waits beside it as the internal LE if
-it already carries a number.
+Nothing a scenario does touches the deal. The record goes on saying
+exactly what it says, which is the point: the afternoon spent trying
+numbers out no longer leaves the file claiming something nobody
+believes.
 
-What it will not do is pretend he typed it:
-
-  · Every screen showing the estimate also says who wrote it down, when,
-    and how it came in — on the review, on the deal's panel, in the
-    register.
-  · Administrators only. A manager cannot do it, and nor can the doctor,
-    who has a route of his own.
-  · A review the doctor HAS written himself is refused rather than
-    overwritten — his words stand.
-  · If he later types his own, the office's handwriting comes off it and
-    the review is simply his.
-  · You can correct what you took down: the button becomes "Change what
-    you took down" on a review the office recorded.
+WHO CAN DO WHAT
+Trying numbers out is the ordinary work of pricing a deal, so anybody
+who may edit the deal may add, change and delete scenarios. Deciding
+which one an investor is shown changes what the house is offering, so
+that is an administrator's alone. An investor can do neither, and sees
+no scenario card at all. Choosing one warns you first, in figures, and
+says plainly that anybody already shown the deal is not told it moved.
 
 FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
-  src/schema.sql   opportunities.deal_notes; medical_reviews.recorded_by
-                   / recorded_at / recorded_how
-  src/api.js       deal_notes on the whitelist with onlyAdmin/hideDealNotes
-                   on every path that returns a deal; POST
-                   /medical-reviews/:id/record
-  public/app.js    the Deal notes card and box; "Enter his answer" and
-                   its dialog; the provenance line wherever the estimate
-                   is shown
-  public/build.js  2026-10-06c
-  scripts/deal-notes-test.mjs             16 API checks
-  scripts/deal-notes-ui-test.mjs          11 screen checks
-  scripts/med-review-dictated-test.mjs    24 API checks
-  scripts/med-review-dictated-ui-test.mjs 14 screen checks
+  src/schema.sql    opportunity_scenarios, with a partial unique index
+                    that makes "exactly one shown" a rule the database
+                    keeps
+  src/api.js        applyScenario as the single lens; the set on the deal
+                    for staff with each one solved; the override for an
+                    investor on the deal, the list and the one-pager;
+                    four routes, the last admin-only
+  public/app.js     the card, the dialog, the Shown column, and the
+                    banner that tells an investor which case they have
+  public/styles.css the chosen row's tint
+  public/build.js   2026-10-06e
+  scripts/opportunity-scenarios-test.mjs     32 API checks
+  scripts/opportunity-scenarios-ui-test.mjs  18 screen checks
 
-NO MIGRATION TO RUN — schema.sql adds the columns on boot.
+NO MIGRATION TO RUN — schema.sql creates the table on boot. Every
+existing deal starts with no scenarios and investors on its own figures,
+exactly as now.
 
-TESTS: 117 suites green. Six fail in the sandbox only and are unrelated
-(investor-ui, sample-import, user-admin, valuation-menu and
-valuation-proxy — the last two need the Flask pricing app, which is not
-running here — plus premium-dues, whose dashboard card is crowded out by
-leftover sample fixtures in the sandbox database).
+TESTS: 119 suites green. The same six sandbox-only failures as the last
+build, all unrelated (investor-ui, sample-import, user-admin,
+valuation-menu, valuation-proxy, premium-dues).

@@ -5896,6 +5896,14 @@ async function opportunityView() {
     <div class="share-banner" id="shareBanner">
       Figures below are for the <strong>whole policy</strong>.</div>` : ''}
 
+    ${''/* When the office is quoting a case rather than the deal's own
+           columns, the reader is told so. Which estimate and which
+           price a return is built on is part of the offer, not a
+           footnote the office keeps to itself. */}
+    ${o.scenario_shown ? `<div class="share-banner">
+      These figures are the <strong>${esc(o.scenario_shown.name)}</strong> case${
+  o.scenario_shown.note ? ` — ${esc(o.scenario_shown.note)}` : ''}.</div>` : ''}
+
     <div class="card">
       <div class="card-head"><h2>Return if the insured lives to…</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">life expectancy, and two years either side</span></div>
@@ -5907,6 +5915,12 @@ async function opportunityView() {
              the reader of this screen is staff or an investor who has the
              one-pager's disclosure. */}
     </div>
+
+    ${''/* The two numbers nobody is sure of, varied on purpose.
+           Staff only: a list of the prices the office considered is the
+           office's business, and the one an investor is shown reaches
+           them as the deal's own figures rather than as a menu. */}
+    ${o.scenarios === undefined ? '' : oppScenarioCard(o)}
 
     ${staff && (o.account_value != null || o.cash_surrender_value != null) ? `
     <div class="card">
@@ -6057,11 +6071,47 @@ async function opportunityView() {
     ${!isAdminUser() ? '' : `<div class="card">
       <div class="card-head"><h2>Deal notes</h2><div class="spacer"></div>
         <span class="muted" style="font-size:12px">administrators only</span></div>
-      <div class="card-body">${o.deal_notes
-        ? `<div style="font-size:14px;white-space:pre-wrap">${esc(o.deal_notes)}</div>`
-        : `<div class="muted" style="font-size:14px">Nothing written yet.
-             Open <strong>Edit</strong> to put something here — it stays on this screen
-             and on no other.</div>`}</div>
+      <div class="card-body">
+        ${''/* The standing picture of the deal, from the edit form. Shown
+               above the log because it is the thing a note is a note
+               ON -- and absent entirely when nobody has written one,
+               rather than sitting there as an empty heading. */}
+        ${o.deal_notes ? `<div class="deal-note-standing">
+          <div class="deal-note-label">Background</div>
+          <div style="font-size:14px;white-space:pre-wrap">${esc(o.deal_notes)}</div>
+        </div>` : ''}
+
+        ${''/* Typed here rather than behind Edit. Something said on the
+               telephone has to be two clicks from the screen you are
+               already looking at, or it is not written down at all. */}
+        <div class="deal-note-add">
+          <textarea id="dealNoteBody" rows="2"
+            placeholder="He came back at 22 — says the son is the holdup…"></textarea>
+          <div class="deal-note-add-foot">
+            <span class="muted" style="font-size:12px">Dated and signed when you add it.
+              Entries are not editable afterwards — put a correction underneath.</span>
+            <div class="spacer"></div>
+            <button class="btn-sm primary" id="dealNoteAdd">Add note</button>
+          </div>
+        </div>
+
+        ${(o.deal_note_log || []).length ? `<div class="deal-note-log">
+          ${(o.deal_note_log || []).map((n) => `<div class="deal-note">
+            <div class="deal-note-head">
+              <strong>${esc(n.created_by_name || 'Somebody')}</strong>
+              <span class="muted">${fmtDateTime(n.created_at)}</span>
+              <div class="spacer"></div>
+              <button class="btn-sm" data-note-rm="${n.id}">Delete</button>
+            </div>
+            <div class="deal-note-body">${esc(n.body)}</div>
+          </div>`).join('')}
+        </div>`
+          : `<div class="muted" style="font-size:14px;margin-top:12px">${o.deal_notes
+            ? 'Nothing logged against it yet.'
+            : `Nothing written yet. Type above to start a running note on this deal, or use
+               <strong>Edit</strong> for the standing background. Either way it stays on this
+               screen and on no other.`}</div>`}
+      </div>
     </div>`}
 
     ${staff ? `
@@ -6145,6 +6195,7 @@ async function opportunityView() {
       }
       if (o.valuations !== undefined) wireValuationPanel('opportunity', o.id);
       if (o.medical_reviews !== undefined) wireMedicalPanel(o);
+      if (o.scenarios !== undefined) wireScenarioCard(o);
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
       $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
@@ -6162,6 +6213,36 @@ async function opportunityView() {
       $('#unfundOppBtn')?.addEventListener('click', () => {
         openReopenDialog(o).catch((e) => alert(e.message));
       });
+
+      /* The running log. Posted without leaving the screen -- a whole
+         re-render after every line would lose the scroll position in
+         the middle of a telephone call, so only the card is redrawn,
+         from the log the server hands back. */
+      const noteBox = $('#dealNoteBody');
+      const addNote = async () => {
+        const body = (noteBox?.value || '').trim();
+        if (!body) { noteBox?.focus(); return; }
+        try {
+          await api(`/opportunities/${o.id}/notes`, { method: 'POST', body: { body } });
+          noteBox.value = '';
+          toast('Noted'); render();
+        } catch (err) { alert(err.message); }
+      };
+      $('#dealNoteAdd')?.addEventListener('click', addNote);
+      /* Ctrl/⌘-Enter sends it, because this box is used one-handed. A
+         bare Enter stays a newline: these run to several lines often
+         enough that losing one mid-sentence would be the worse bug. */
+      noteBox?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addNote(); }
+      });
+      document.querySelectorAll('[data-note-rm]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          if (!confirm('Delete this note? It is not kept anywhere else.')) return;
+          try {
+            await api(`/opportunities/${o.id}/notes/${b.dataset.noteRm}`, { method: 'DELETE' });
+            toast('Deleted'); render();
+          } catch (err) { alert(err.message); }
+        }));
 
       document.querySelectorAll('[data-del-prem]').forEach((b) =>
         b.addEventListener('click', async () => {
@@ -11489,6 +11570,179 @@ function leCard(r, { compact = false } = {}) {
  * figure on the one-pager without anybody pressing anything. So that one
  * case is a click, and the line above it says what it would change.
  */
+/* ===================================================================== *
+ * Scenarios: the deal priced off numbers it does not carry
+ *
+ * A life settlement is priced off a life expectancy and a price, and
+ * neither is a fact. This is the place to say so out loud -- "at 72 we
+ * are fine, at 96 it is thin, at 260 we would take it tomorrow" --
+ * without the record spending the afternoon claiming something nobody
+ * believes.
+ *
+ * The deal itself is the first row, always, and is not a scenario: it
+ * is what the record says, and every variant is read against it. A
+ * field left blank on a scenario is the deal's, which is why those
+ * cells are set in grey rather than repeated in black -- the eye should
+ * land on what actually changed.
+ * ===================================================================== */
+function oppScenarioCard(o) {
+  const rows = o.scenarios || [];
+  const admin = isAdminUser();
+  const chosen = rows.find((s) => s.shown_to_investors) || null;
+
+  /* The same two readings the rest of the page shows, so a figure here
+     and the same figure in the card above cannot disagree. */
+  const rateCell = (a) => (a?.base
+    ? rateText(a.base.rate, a.base.compound_rate)
+    : '<span class="muted">—</span>');
+  const dim = (v, formatted) => (v == null
+    ? `<span class="muted">${formatted}</span>` : formatted);
+
+  const row = (s) => {
+    const a = s === null ? o.analysis : s.analysis;
+    const le = s === null ? o.le_months : (s.le_months ?? o.le_months);
+    const price = s === null ? o.asking_price : (s.asking_price ?? o.asking_price);
+    const isBase = s === null;
+    return `<tr class="${!isBase && s.shown_to_investors ? 'scen-shown' : ''}">
+      <td>${admin ? `<label class="scen-pick" title="Show this to investors">
+          <input type="radio" name="scenShown" value="${isBase ? '' : s.id}"
+                 ${isBase ? (chosen ? '' : 'checked') : (s.shown_to_investors ? 'checked' : '')}>
+        </label>` : ''}</td>
+      <td class="strong">${isBase ? 'The deal as it stands' : esc(s.name || 'Unnamed')}
+        ${isBase ? '' : (s.note
+    ? `<div class="secondary">${esc(s.note)}</div>` : '')}</td>
+      <td class="num">${isBase ? (le ? `${le} mo` : '—')
+    : dim(s.le_months, le ? `${le} mo` : '—')}</td>
+      <td class="num">${isBase ? (price == null ? '—' : fmtExact(price))
+    : dim(s.asking_price, price == null ? '—' : fmtExact(price))}</td>
+      <td class="num strong">${rateCell(a)}</td>
+      <td>${a?.base?.matures_on ? fmtDate(a.base.matures_on) : '—'}</td>
+      <td class="num">${isBase ? '' : `${canEditData()
+        ? `<button class="btn-sm" data-scen-edit="${s.id}">Edit</button>
+           <button class="btn-sm" data-scen-rm="${s.id}">Delete</button>` : ''}`}</td>
+    </tr>`;
+  };
+
+  return `
+  <div class="card">
+    <div class="card-head"><h2>Scenarios</h2><div class="spacer"></div>
+      ${canEditData() ? '<button class="btn-sm" id="scenAddBtn">Add a scenario</button>' : ''}
+    </div>
+    <div class="table-wrap"><table class="data">
+      <thead><tr>
+        <th style="width:34px">${admin ? 'Shown' : ''}</th><th>Case</th>
+        <th class="num">Life expectancy</th><th class="num">Price</th>
+        <th class="num">Return at LE</th><th>Matures</th><th></th>
+      </tr></thead>
+      <tbody>${[row(null), ...rows.map(row)].join('')}</tbody>
+    </table></div>
+    <div class="card-body" style="border-top:1px solid var(--grid)">
+      <span class="muted" style="font-size:12.5px">
+        ${admin
+    ? `A scenario changes only the figures typed into it; everything else — the premium
+         schedule, the dates, the benefit — is read from the deal, so correcting the deal
+         corrects every row here at once. <strong>Shown</strong> decides which of them an
+         investor is given: their screens, their list and the one-pager all follow it, and
+         the deal's own record is never touched. ${chosen
+    ? `Investors are currently shown <strong>${esc(chosen.name || 'a scenario')}</strong>.`
+    : 'Investors are currently shown the deal as it stands.'}`
+    : `A scenario changes only the figures typed into it; everything else is read from the
+         deal. Which one an investor is shown is an administrator's to set.`}
+      </span>
+    </div>
+  </div>`;
+}
+
+/** Adding one, or correcting one. */
+function openScenarioDialog(o, s) {
+  const isNew = !s;
+  const twoLives = !!o.analysis?.survivorship;
+  return openDialog(isNew ? 'A scenario on this deal' : 'Change this scenario', `
+    ${inputField('What to call it *', 'name', s?.name || '', 'text',
+      'placeholder="If he lives to 96 months" required maxlength="120"')}
+    <div class="field-row">
+      ${inputField('Life expectancy (months)', 'le_months', s?.le_months ?? '', 'number',
+        'min="1" max="1200"')}
+      ${inputField('Asking price', 'asking_price', s?.asking_price ?? '', 'number',
+        'min="0" step="1000"')}
+    </div>
+    ${twoLives ? inputField('Second insured’s LE (months)', 'insured2_le_months',
+    s?.insured2_le_months ?? '', 'number', 'min="1" max="1200"') : ''}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      Leave a box empty and the deal's own figure is used. Everything else — the premium
+      schedule, the dates, the benefit — always comes from the deal, so this stays right
+      when the deal is corrected.</span></div>
+    <div class="field"><label>Why this case is worth looking at</label>
+      <textarea name="note" rows="2"
+        placeholder="The cardiology reads better than 21st allowed for.">${esc(s?.note || '')}</textarea></div>
+    <div class="dlg-note">
+      Nothing here touches the deal. The record goes on saying exactly what it says now;
+      this is a second set of figures run through the same arithmetic.
+    </div>
+  `, async (v) => {
+    const body = { name: v.name, note: v.note };
+    /* An empty box means "as the deal has it", and has to be sent as
+       null rather than left out -- otherwise clearing one would quietly
+       keep the old override. */
+    for (const k of ['le_months', 'asking_price', 'insured2_le_months']) {
+      if (!(k in v)) continue;
+      body[k] = String(v[k]).trim() === '' ? null : Number(v[k]);
+    }
+    if (body.le_months == null && body.asking_price == null
+      && body.insured2_le_months == null)
+      throw new Error('Change the life expectancy or the price — otherwise this is the deal.');
+    if (isNew) await api(`/opportunities/${o.id}/scenarios`, { method: 'POST', body });
+    else await api(`/opportunities/${o.id}/scenarios/${s.id}`, { method: 'PUT', body });
+    toast(isNew ? 'Scenario added' : 'Scenario changed');
+    render();
+  }, isNew ? 'Add it' : 'Save');
+}
+
+/** The buttons and the radio column on the card above. */
+function wireScenarioCard(o) {
+  $('#scenAddBtn')?.addEventListener('click', () => openScenarioDialog(o));
+  document.querySelectorAll('[data-scen-edit]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const s = (o.scenarios || []).find((x) => String(x.id) === b.dataset.scenEdit);
+      if (s) openScenarioDialog(o, s);
+    }));
+  document.querySelectorAll('[data-scen-rm]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const s = (o.scenarios || []).find((x) => String(x.id) === b.dataset.scenRm);
+      if (!confirm(`Delete "${s?.name || 'this scenario'}"?${s?.shown_to_investors
+        ? '\n\nIt is the one investors are being shown — they go back to the deal’s own '
+          + 'figures.' : ''}`)) return;
+      try {
+        await api(`/opportunities/${o.id}/scenarios/${b.dataset.scenRm}`, { method: 'DELETE' });
+        toast('Deleted'); render();
+      } catch (err) { alert(err.message); }
+    }));
+  /* Choosing one is a change to what the house is offering, so it is
+     named rather than confirmed with a shrug -- and the people already
+     shown the old figures are not told it moved, which the warning
+     says. */
+  document.querySelectorAll('input[name=scenShown]').forEach((r) =>
+    r.addEventListener('change', async () => {
+      const id = r.value ? Number(r.value) : null;
+      const s = (o.scenarios || []).find((x) => x.id === id);
+      const what = id
+        ? `Show investors "${s?.name || 'this scenario'}"?\n\n`
+          + `Their screens, their list and the one-pager will all quote ${
+            s?.le_months ? `${s.le_months} months` : 'the deal’s life expectancy'} at ${
+            s?.asking_price == null ? 'the deal’s price' : fmtExact(s.asking_price)}. `
+          + 'Anybody already shown this deal is not told the figures moved.'
+        : 'Put investors back on the deal’s own figures?\n\n'
+          + 'Anybody already shown a scenario is not told the figures moved.';
+      if (!confirm(what)) { render(); return; }
+      try {
+        await api(`/opportunities/${o.id}/scenarios/shown`, { method: 'PUT',
+          body: { scenario_id: id } });
+        toast(id ? 'Investors see that case' : 'Investors see the deal');
+        render();
+      } catch (err) { alert(err.message); render(); }
+    }));
+}
+
 function medicalPanel(reviews, o) {
   /* Administrators only, and the server agrees: for anybody else the
      reviews are not in the payload at all, so there is nothing here to

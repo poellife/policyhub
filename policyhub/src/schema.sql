@@ -727,6 +727,76 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS investor_url TEXT;
    else, so there is nothing on the wire for a screen to leak. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS deal_notes TEXT NOT NULL DEFAULT '';
 
+/* And the running log beside it.
+ *
+ * The column above is the standing picture of a deal: what it is, what
+ * the seller wants, where the price came from. It is edited, and each
+ * edit replaces the last. That is the right shape for a summary and the
+ * wrong shape for a negotiation, which arrives one telephone call at a
+ * time over six weeks -- "he came back at 22", "broker says the son is
+ * the holdup", "quiet since the 9th". Written into one box those
+ * overwrite each other or run together into a wall nobody dates.
+ *
+ * So: entries. Each one is stamped with who wrote it and when, kept in
+ * the order it happened, and never silently rewritten. Added from the
+ * deal's own screen rather than from a dialog, because something typed
+ * while the telephone is still in your hand has to be two clicks at
+ * most or it does not get typed at all.
+ *
+ * Administrators only, like the column it sits beside. Cascades with
+ * the deal: a deleted opportunity should not leave its private
+ * correspondence behind. */
+CREATE TABLE IF NOT EXISTS opportunity_notes (
+  id              SERIAL PRIMARY KEY,
+  opportunity_id  INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  body            TEXT NOT NULL,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_oppnote_opp ON opportunity_notes (opportunity_id, created_at DESC);
+
+/* What the deal looks like if the two numbers you are least sure of are
+ * wrong.
+ *
+ * A life settlement is priced off a life expectancy and a price, and
+ * neither is a fact. The estimate is a median with a wide distribution
+ * behind it, and the price is whatever the seller can be got to. Every
+ * real conversation about a deal is therefore conditional -- "at 72
+ * months we are fine, at 90 it is thin; at 300 we walk" -- and until
+ * now the only way to see that was to edit the deal, read the figures,
+ * and edit it back. Which means the record spends the afternoon saying
+ * something nobody believes, and the comparison lives in somebody's
+ * head.
+ *
+ * So: named variants, stored beside the deal and never on it. Each one
+ * holds only what it changes -- a life expectancy, a price, the second
+ * life on a survivorship case -- and everything else is read from the
+ * deal itself, so a corrected premium schedule corrects every scenario
+ * at once.
+ *
+ * `shown_to_investors` is the part that has to be exactly one. A deal
+ * carries its own figures as the base case; marking a scenario replaces
+ * what an investor is shown, headline figures and one-pager together,
+ * and the partial index below is what makes "exactly one" a rule the
+ * database keeps rather than a thing the code remembers to do. */
+CREATE TABLE IF NOT EXISTS opportunity_scenarios (
+  id                  SERIAL PRIMARY KEY,
+  opportunity_id      INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  name                TEXT NOT NULL DEFAULT '',
+  le_months           INTEGER,
+  insured2_le_months  INTEGER,
+  asking_price        NUMERIC(14,2),
+  note                TEXT NOT NULL DEFAULT '',
+  shown_to_investors  BOOLEAN NOT NULL DEFAULT false,
+  created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_oppscen_opp ON opportunity_scenarios (opportunity_id, id);
+/* One at most, per deal, enforced here rather than in a transaction
+   somebody might forget to write. */
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oppscen_shown
+  ON opportunity_scenarios (opportunity_id) WHERE shown_to_investors;
+
 /* When the carrier issued the contract.
  *
  * Policies have carried this since the beginning; a deal being priced

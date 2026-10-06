@@ -1973,6 +1973,46 @@ table.data td.risk-note-cell {
   text-transform: uppercase; color: var(--muted); }
 @media (max-width: 900px) { .med-grid { grid-template-columns: 1fr; } }
 
+/* ------------------------------------------------------------------ *
+ * The running log on a deal
+ *
+ * Set as correspondence rather than as a table: entries are sentences,
+ * of wildly different lengths, read newest first and skimmed for a
+ * date. The left rule down each one is what makes a column of them
+ * scannable without a grid, and the box sits at the TOP because adding
+ * is what somebody came here to do.
+ * ------------------------------------------------------------------ */
+.deal-note-standing { border-left: 2px solid var(--border-strong); padding: 2px 0 2px 12px;
+  margin-bottom: 16px; }
+.deal-note-label { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
+
+.deal-note-add textarea { width: 100%; resize: vertical; min-height: 54px; }
+.deal-note-add-foot { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.deal-note-add-foot .spacer { flex: 1; }
+
+.deal-note-log { margin-top: 18px; border-top: 1px solid var(--border); }
+.deal-note { padding: 13px 0 12px; border-bottom: 1px solid var(--grid); }
+.deal-note:last-child { border-bottom: 0; padding-bottom: 2px; }
+.deal-note-head { display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+  margin-bottom: 5px; }
+.deal-note-head .spacer { flex: 1; }
+/* The delete button keeps out of the way until the entry is pointed at:
+   a column of rows each carrying a live Delete reads as a list of things
+   to remove rather than a list of things to read. */
+.deal-note-head [data-note-rm] { opacity: 0; transition: opacity 0.12s; }
+.deal-note:hover .deal-note-head [data-note-rm],
+.deal-note-head [data-note-rm]:focus { opacity: 1; }
+.deal-note-body { font-size: 13.5px; line-height: 1.65; white-space: pre-wrap; }
+
+/* The scenarios table. The chosen row is tinted rather than badged:
+   the question somebody brings to this table is "which one are we
+   showing", and a tint answers it from across the room. */
+.scen-pick { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.scen-pick input { margin: 0; cursor: pointer; }
+tr.scen-shown > td { background: var(--tint, rgba(0, 0, 0, 0.035)); }
+tr.scen-shown > td:first-child { box-shadow: inset 2px 0 0 var(--fg, #111); }
+
 /* The carrier's telephone number in the policy header. A link, so it
    dials from a phone and a desktop softphone, but set as quietly as the
    rest of the line — it is a reference, not a call to action. */

@@ -3107,8 +3107,54 @@ const hideDealNotes = (req, row) => {
   if (!row || isAdmin(req)) return row;
   const r = { ...row };
   delete r.deal_notes;
+  delete r.deal_note_log;
   return r;
 };
+
+/* ---------------------------------------------------------------------
+   Scenarios: the deal priced off numbers it does not carry.
+
+   A scenario holds only what it changes. `applyScenario` is the one
+   place that knows how to lay one over a deal, so the figures on the
+   desk's comparison, the figures an investor is shown and the figures
+   on the one-pager cannot drift apart -- they are the same function.
+   An empty field on a scenario means "as the deal has it", which is
+   why this tests for null rather than for falsy: a price of zero is a
+   price somebody meant to type.
+   --------------------------------------------------------------------- */
+const applyScenario = (o, s) => (!s ? o : {
+  ...o,
+  le_months: s.le_months == null ? o.le_months : s.le_months,
+  insured2_le_months: s.insured2_le_months == null
+    ? o.insured2_le_months : s.insured2_le_months,
+  asking_price: s.asking_price == null ? o.asking_price : s.asking_price,
+});
+
+async function scenariosFor(id) {
+  const { rows } = await q(
+    `SELECT s.id, s.name, s.le_months, s.insured2_le_months, s.asking_price, s.note,
+            s.shown_to_investors, s.created_at, u.full_name AS created_by_name
+       FROM opportunity_scenarios s
+       LEFT JOIN users u ON u.id = s.created_by
+      WHERE s.opportunity_id = $1 ORDER BY s.id`, [id]);
+  return rows.map((r) => ({
+    ...r,
+    le_months: r.le_months == null ? null : Number(r.le_months),
+    insured2_le_months: r.insured2_le_months == null ? null : Number(r.insured2_le_months),
+    asking_price: r.asking_price == null ? null : Number(r.asking_price),
+  }));
+}
+
+/** The running log beside the standing note. Newest first. */
+async function dealNoteLog(id) {
+  const { rows } = await q(
+    `SELECT n.id, n.body, n.created_at, u.full_name AS created_by_name
+       FROM opportunity_notes n
+       LEFT JOIN users u ON u.id = n.created_by
+      WHERE n.opportunity_id = $1
+      ORDER BY n.created_at DESC, n.id DESC`, [id]);
+  return rows;
+}
 
 /** Everything an opportunity carries, with its analysis. */
 async function loadOpportunity(req, id) {
@@ -3153,6 +3199,10 @@ async function loadOpportunity(req, id) {
      produces is on the deal itself for everybody who needs it. */
   o.medical_reviews = scopeId(req) === null && req.user?.role === 'admin'
     ? await medicalReviewsFor('opportunity', id) : undefined;
+  /* The running log. Loaded only for an administrator -- `hideDealNotes`
+     would strip it anyway, but there is no sense reading somebody's
+     private correspondence out of the database to throw it away. */
+  o.deal_note_log = isAdmin(req) ? await dealNoteLog(id) : undefined;
   o.taken_pct = Number(o.taken_pct) || 0;
   o.confirmed_pct = Number(o.confirmed_pct) || 0;
   o.remaining_pct = Math.max(0, 100 - o.taken_pct);
@@ -3196,6 +3246,31 @@ async function loadOpportunity(req, id) {
   o.min_commitment_pct = minimumTake(
     o.remaining_pct + (Number(o.my_commitment?.pct) || 0));
 
+  /* ------------------------------------------------------------------
+     The scenarios, and which figures this reader is actually shown.
+
+     Staff get the whole set, each one solved, so the comparison is on
+     one screen. An investor gets none of them -- a list of the prices
+     the office considered is the office's business -- but if one has
+     been marked, it is the one their figures are built from, headline
+     and one-pager alike. The deal's own columns stay exactly as typed:
+     a scenario is a lens, never an edit.
+     ------------------------------------------------------------------ */
+  const scenarios = await scenariosFor(id);
+  const shown = scenarios.find((s) => s.shown_to_investors) || null;
+  if (me === null) {
+    o.scenarios = scenarios;
+  } else {
+    o.scenarios = undefined;
+    if (shown) {
+      Object.assign(o, applyScenario(o, shown));
+      /* Said rather than hidden. They are being shown a case built on an
+         estimate and a price, and which ones those are is part of the
+         offer -- not a footnote the office keeps to itself. */
+      o.scenario_shown = { name: shown.name || 'Base case', note: shown.note || '' };
+    }
+  }
+
   const share = me === null ? 1 : (Number(o.my_commitment?.pct) || 0) / 100;
   /* Net for an investor: they are weighing up what they would actually
      receive, and every figure on that page has to be the same money. */
@@ -3215,6 +3290,19 @@ async function loadOpportunity(req, id) {
     o.my_analysis = null;
     o.analysis_error = 'The scenarios could not be worked out from the figures on this '
       + 'record — check the life expectancy, the dates and the premium schedule.';
+  }
+
+  /* Each scenario solved with the same engine the deal itself goes
+     through, so the comparison is like for like. One that cannot be
+     solved carries a null analysis rather than taking the page down
+     with it -- a scenario is somebody trying numbers out, and a typo in
+     one of them should cost that row and nothing else. */
+  if (o.scenarios) {
+    for (const s of o.scenarios) {
+      try {
+        s.analysis = analyseOpportunity(applyScenario(o, s), 1, 0);
+      } catch { s.analysis = null; }
+    }
   }
   /* Last, so that nothing added to this function above can smuggle the
      desk's private notes out with it. Everything that reads a whole
@@ -3281,7 +3369,23 @@ router.get('/opportunities', wrap(async (req, res) => {
     schedules.get(p.opportunity_id).push(p);
   }
 
-  const list = rows.map((o) => {
+  /* The list has to agree with the detail page it leads to. An investor
+     reading a deal built on a chosen scenario must see that deal's rate
+     in the list too -- one number on the card and another on the page
+     behind it is the kind of discrepancy nobody reports and everybody
+     stops trusting. Staff see the deal's own figures here; the
+     scenarios are on the detail page, where they can be compared. */
+  const picked = new Map();
+  if (me !== null && rows.length) {
+    const { rows: sc } = await q(
+      `SELECT opportunity_id, le_months, insured2_le_months, asking_price
+         FROM opportunity_scenarios
+        WHERE opportunity_id = ANY($1) AND shown_to_investors`, [rows.map((r) => r.id)]);
+    for (const x of sc) picked.set(x.opportunity_id, x);
+  }
+
+  const list = rows.map((row) => {
+    const o = applyScenario(row, picked.get(row.id) || null);
     const taken = Number(o.taken_pct) || 0;
     const withPremiums = { ...o, premiums: schedules.get(o.id) || [] };
     /* The analysis is arithmetic over dates and figures somebody typed,
@@ -3361,12 +3465,26 @@ router.get('/opportunities/:id/sheet.pdf', wrap(async (req, res) => {
   const o = await loadOpportunity(req, req.params.id);
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
 
+  /* The one-pager is the thing that actually reaches an investor, so it
+     is built on whichever scenario they are shown -- including when a
+     member of staff is the one pressing the button. An investor's own
+     copy already carries the override from `loadOpportunity`; this is
+     the desk's, and without it the paper going out of the office would
+     quote figures nobody on the portal can see. */
+  const picked = (o.scenarios || []).find((x) => x.shown_to_investors) || null;
+  const sheet = picked ? applyScenario(o, picked) : o;
+  if (picked) {
+    try {
+      sheet.analysis = analyseOpportunity(sheet, 1, 0);
+    } catch { /* the sheet copes with a null analysis as the page does */ }
+  }
+
   const asked = Number(req.query.share);
   const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
   const interest = ['simple', 'compound', 'both'].includes(str(req.query.interest))
     ? str(req.query.interest) : 'simple';
 
-  const pdf = opportunityPdf(o, { share, interest });
+  const pdf = opportunityPdf(sheet, { share, interest });
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'read',
     `downloaded the one-pager${share < 100 ? ` at ${share}%` : ''} · ${describeOrigin(req)}`);
 
@@ -3568,6 +3686,150 @@ router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) 
       : synced === 'benefit' ? ' · death benefit taken from the benefit schedule' : ''}`);
   res.json(hideDealNotes(req, back[0]));
 }));
+
+/* ==================================================================== *
+ * Scenarios on a deal
+ *
+ * Written by whoever may edit the deal -- trying a price out is the
+ * ordinary work of pricing one, not an administrator's privilege. What
+ * IS gated is the last route: deciding which of them an investor is
+ * shown changes what the house is offering, and that is an
+ * administrator's.
+ * ==================================================================== */
+const SCEN_FIELDS = {
+  name: str, note: str,
+  le_months: int, insured2_le_months: int, asking_price: num,
+};
+
+router.post('/opportunities/:id/scenarios', blockInvestors, blockMedical, oppEdit,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const { cols, vals } = buildSet(SCEN_FIELDS, req.body);
+    /* A scenario that changes nothing is the deal, and a row saying so
+       is a row somebody has to read and discard. */
+    if (!cols.some((c) => ['le_months', 'insured2_le_months', 'asking_price'].includes(c)))
+      return res.status(400).json({
+        error: 'Change at least one of the life expectancy or the price — '
+          + 'otherwise this is the deal as it stands.' });
+    cols.push('opportunity_id', 'created_by');
+    vals.push(int(req.params.id), req.user.uid);
+    const ph = cols.map((_, i) => `$${i + 1}`).join(',');
+    const { rows } = await q(
+      `INSERT INTO opportunity_scenarios (${cols.join(',')}) VALUES (${ph}) RETURNING id`, vals);
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `added the scenario "${str(req.body.name) || 'unnamed'}"`);
+    res.status(201).json({ id: rows[0].id });
+  }));
+
+/**
+ * Which one the investors see.
+ *
+ * `scenario_id` names it; null puts them back on the deal's own
+ * figures. Administrators only: this is not a working assumption, it is
+ * what the house is offering, and the people who have been shown the
+ * old one are not told it moved.
+ *
+ * Cleared first and set second, in one statement each, because the
+ * unique index will not have two marked at once -- and a failure
+ * between them leaves nothing marked, which is the base case, which is
+ * the safe end to fail towards.
+ */
+router.put('/opportunities/:id/scenarios/shown', blockInvestors, blockMedical,
+  requireRole('admin'), wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const wanted = int(req.body.scenario_id);
+    await q(`UPDATE opportunity_scenarios SET shown_to_investors = false
+              WHERE opportunity_id = $1 AND shown_to_investors`, [int(req.params.id)]);
+    if (!wanted) {
+      await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+        'investors are shown the deal’s own figures');
+      return res.json({ ok: true, shown: null });
+    }
+    const { rows } = await q(
+      `UPDATE opportunity_scenarios SET shown_to_investors = true
+        WHERE id = $1 AND opportunity_id = $2 RETURNING name`,
+      [wanted, int(req.params.id)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That scenario is not on this deal' });
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `investors are shown the scenario "${rows[0].name || 'unnamed'}"`);
+    res.json({ ok: true, shown: wanted });
+  }));
+
+router.put('/opportunities/:id/scenarios/:scenarioId', blockInvestors, blockMedical, oppEdit,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const { sets, vals, next } = buildSet(SCEN_FIELDS, req.body);
+    if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+    const { rows } = await q(
+      `UPDATE opportunity_scenarios SET ${sets.join(',')}
+        WHERE id = $${next} AND opportunity_id = $${next + 1} RETURNING id`,
+      [...vals, int(req.params.scenarioId), int(req.params.id)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That scenario is not on this deal' });
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `changed a scenario — ${sets.join(',')}`);
+    res.json({ ok: true });
+  }));
+
+router.delete('/opportunities/:id/scenarios/:scenarioId', blockInvestors, blockMedical, oppEdit,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const { rows } = await q(
+      `DELETE FROM opportunity_scenarios WHERE id = $1 AND opportunity_id = $2
+       RETURNING name, shown_to_investors`,
+      [int(req.params.scenarioId), int(req.params.id)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That scenario is not on this deal' });
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `deleted the scenario "${rows[0].name || 'unnamed'}"${
+        rows[0].shown_to_investors ? ' — investors are back on the deal’s own figures' : ''}`);
+    res.json({ ok: true });
+  }));
+
+/* ==================================================================== *
+ * The running log on a deal
+ *
+ * Entries rather than a box, because a negotiation arrives one call at
+ * a time and a box makes you choose between overwriting last week and
+ * typing above it. Each entry is stamped with who and when and is not
+ * editable afterwards: a note that can be quietly rewritten is not a
+ * record of anything, and the honest correction is another entry
+ * saying so. Deleting one is allowed -- for the line typed onto the
+ * wrong deal -- and is audited.
+ *
+ * Administrators only, both routes, like the field they sit beside.
+ * ==================================================================== */
+router.post('/opportunities/:id/notes', blockInvestors, blockMedical, requireRole('admin'),
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const body = str(req.body.body).trim().slice(0, 20000);
+    if (!body) return res.status(400).json({ error: 'Nothing to add — type the note first.' });
+    const { rows } = await q(
+      `INSERT INTO opportunity_notes (opportunity_id, body, created_by)
+       VALUES ($1, $2, $3) RETURNING id`, [int(req.params.id), body, req.user.uid]);
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `added a deal note — ${body.slice(0, 80)}${body.length > 80 ? '…' : ''}`);
+    res.status(201).json({ id: rows[0].id, log: await dealNoteLog(int(req.params.id)) });
+  }));
+
+router.delete('/opportunities/:id/notes/:noteId', blockInvestors, blockMedical,
+  requireRole('admin'), wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    /* Scoped to the deal in the URL rather than deleted by id alone, so
+       a note cannot be removed through a deal somebody happens to be
+       allowed to see. */
+    const { rows } = await q(
+      `DELETE FROM opportunity_notes WHERE id = $1 AND opportunity_id = $2 RETURNING body`,
+      [int(req.params.noteId), int(req.params.id)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That note is not on this deal' });
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      `deleted a deal note — ${String(rows[0].body).slice(0, 80)}`);
+    res.json({ ok: true, log: await dealNoteLog(int(req.params.id)) });
+  }));
 
 router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manager'),
   wrap(async (req, res) => {
