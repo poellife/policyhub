@@ -458,6 +458,9 @@ const POLICY_FIELDS = {
   grace_period_days: int,
   acquisition_date: date, acquisition_cost: num, notes: str,
   documents_url: url,
+  /* The folder the investors are given, which is not the case folder.
+     Same guard: http and https only. */
+  investor_url: url,
 };
 
 const INSURED_FIELDS = {
@@ -3070,6 +3073,9 @@ const OPP_FIELDS = {
      survive, so a stored `javascript:` address cannot be clicked into
      somebody's session. */
   documents_url: url,
+  /* The folder the investors are given, which is not the case folder.
+     Same guard: http and https only. */
+  investor_url: url,
 };
 
 /** Everything an opportunity carries, with its analysis. */
@@ -3133,6 +3139,8 @@ async function loadOpportunity(req, id) {
        on this page has had scrubbed to initials. Staff keep it; the people
        the sheet is written for do not get it. */
     o.documents_url = undefined;
+    /* `investor_url` is NOT stripped: it is the one folder on this
+       record that exists to be shown to them. */
     /* Nor the house's own doctor's reading. The sheet quotes the
        provider's report, which is the one the price is built on and the
        one a buyer can ask to see; our internal second opinion is how the
@@ -4924,12 +4932,12 @@ router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'man
         `INSERT INTO policies (policy_number, carrier_name, product_type, face_amount,
                                insured_id, fund_id, status, premium_required, premium_mode,
                                acquisition_date, acquisition_cost, notes, documents_url,
-                               issue_date)
-         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10,$11,$12)
+                               issue_date, investor_url)
+         VALUES ($1,$2,$3,$4,$5,$6,'Inforce',$7,'Annual',$8,$9,$10,$11,$12,$13)
          RETURNING id, policy_number`,
         [o.policy_number, o.carrier_name, o.product_type, o.face_amount, insuredId, o.fund_id,
          o.annual_premium, acquired, o.asking_price, o.notes, o.documents_url || null,
-         o.issue_date || null]);
+         o.issue_date || null, o.investor_url || null]);
       policyId = pol[0].id;
       policyNumber = pol[0].policy_number;
 

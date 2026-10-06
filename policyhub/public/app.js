@@ -2873,8 +2873,15 @@ function overviewTab(p) {
         ${row('Premium on the policy', `${money(scaled(p.premium_required, p))} <span class="muted">${esc(p.premium_mode || '')} · reference</span>`)}
         ${row('Grace period', `${p.grace_period_days || 61} days`)}
         ${row('Values as of', fmtDate(p.value_as_of))}
-        ${row('Case files', p.documents_url
+        ${''/* Two folders, two audiences. The case file is the office's
+               working folder; the investor folder is what the people who
+               own a piece of this policy are given. */}
+        ${isInvestorUser() ? '' : row('Case files', p.documents_url
           ? `<a class="ext-link" href="${esc(p.documents_url)}" target="_blank" rel="noopener noreferrer">
+               Open the folder <span aria-hidden="true">&#8599;</span></a>`
+          : dash)}
+        ${row(isInvestorUser() ? 'Documents' : 'Investor documents', p.investor_url
+          ? `<a class="ext-link" href="${esc(p.investor_url)}" target="_blank" rel="noopener noreferrer">
                Open the folder <span aria-hidden="true">&#8599;</span></a>`
           : dash)}
       </dl>
@@ -4015,9 +4022,15 @@ async function openPolicyDialog(p = null) {
     ${inputField('Case files link', 'documents_url', p?.documents_url, 'url',
       'placeholder="Dropbox, SharePoint or any folder link"')}
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
-      Anyone who can see this policy — including the investors who own a piece of it — gets
-      this link. Who may actually open the folder is decided by the folder's own sharing
-      settings, not here.</span></div>
+      The office's own folder — the illustration, the carrier correspondence, the
+      paperwork. Staff only.</span></div>
+    ${inputField('Investor documents link', 'investor_url', p?.investor_url, 'url',
+      'placeholder="Dropbox folder shared with the investors"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      What the investors who own a piece of this policy are shown — the policy documents
+      and whatever of the health picture you decide they should have. Put in it only what
+      you would hand over, because this is the link they get. Who may actually open the
+      folder is decided by the folder's own sharing settings, not here.</span></div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(p?.notes || '')}</textarea></div>`;
 
   const dlg = openDialog(p ? 'Edit policy' : 'New policy', body, async (v) => {
@@ -5755,7 +5768,13 @@ async function opportunityView() {
   ''/* Desk-only, and the server agrees: an investor's copy of this deal
        does not carry the field at all, so there is nothing here to hide. */}${
   o.documents_url ? ` · <a class="ext-link" href="${esc(o.documents_url)}"
-            target="_blank" rel="noopener noreferrer">Case files <span aria-hidden="true">&#8599;</span></a>` : ''}</div>
+            target="_blank" rel="noopener noreferrer">Case files <span aria-hidden="true">&#8599;</span></a>` : ''}${
+  ''/* And the folder the investors are given, which they see too — it
+       is the one link on this record that exists to be shown to
+       them. */}${
+  o.investor_url ? ` · <a class="ext-link" href="${esc(o.investor_url)}"
+            target="_blank" rel="noopener noreferrer">${staff ? 'Investor documents' : 'Documents'}
+            <span aria-hidden="true">&#8599;</span></a>` : ''}</div>
       </div>
       <div class="spacer"></div>
       ${interestToggle()}
@@ -6403,10 +6422,17 @@ async function openOpportunityDialog(o) {
     ${inputField('Case files link', 'documents_url', o?.documents_url, 'url',
       'placeholder="Dropbox, SharePoint or any folder link"')}
     <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
-      The folder holding this client's documents. The desk sees it, and so does a doctor
-      you send the case to — he is being asked to read the file. Investors do not: a folder
-      is usually named after the client, and their copy of this deal carries initials only.
+      The folder holding this client's documents — the desk's own. Investors do not see it,
+      and neither does a reviewing doctor: he gets the records folder set on his review.
       It travels onto the policy if the deal is funded.</span></div>
+    ${inputField('Investor documents link', 'investor_url', o?.investor_url, 'url',
+      'placeholder="Dropbox folder shared with the investors"')}
+    <div class="field" style="margin-top:-4px"><span class="muted" style="font-size:12px">
+      This one the investors shown this deal <strong>do</strong> see — the policy documents
+      and whatever of the health picture you decide they should have. Put in it only what
+      you would hand over, and remember the folder's own name travels with the link: the
+      sheet keeps the insured to initials, and a folder called "Sommers, Gerald" undoes
+      that. It travels onto the policy if the deal is funded.</span></div>
     <div class="field"><label>Notes for investors</label>
       <textarea name="notes" rows="3">${esc(o?.notes || '')}</textarea></div>
 

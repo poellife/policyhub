@@ -18,4 +18,4 @@
    newer, which is the only comparison a person actually makes.
    ===================================================================== */
 
-export const BUILD = '2026-09-29i';
+export const BUILD = '2026-10-06a';

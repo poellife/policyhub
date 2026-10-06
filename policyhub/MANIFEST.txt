@@ -1,51 +1,39 @@
-PolicyHub — build 2026-09-29i
-Minimal update, on top of 2026-09-17c. Paths are relative to the
-`policyhub` folder of your repo. On Render, Root Directory is `policyhub`.
+PolicyHub — build 2026-10-06a
+The investors' folder
 
-FILES IN THIS PACKAGE
+WHAT THIS ADDS
+A second document link on every opportunity and every policy: an
+investor folder, separate from the office's case folder.
 
-  src/api.js   src/schema.sql   src/server.js   src/mail.js
-  src/opportunity-pdf.js   src/maturity-pdf.js  (NEW FILE)
-  public/app.js  public/reports.js  public/styles.css  public/build.js
+  Case files       — the desk's working folder. Staff only. Investors
+                     never see it, and neither does a reviewing doctor.
+  Investor documents — the link handed to the people who own a piece of
+                     the policy: policy documents and whatever of the
+                     health picture you decide they should have.
 
-  src/maturity-pdf.js is new — copy it in, or the maturity sheet will
-  not load. Everything since 2026-09-17c is in here.
+On an investor's own screen there is only one folder and it is simply
+called "Documents", because they have only the one.
 
-THE TRUNCATED LEDGER — A REAL BUG, NOW FIXED
+The link set on an opportunity travels onto the policy when the deal is
+funded, alongside the case folder and the issue date.
 
-  The transaction table stopped at 26 rows and printed "N earlier
-  entries are not shown". It was wrong twice: the box above it says
-  "list every transaction", and the entries being dropped were the
-  LATEST, not the earliest — it kept the first 26. On a case with more
-  than 26 entries the sheet was quietly leaving off the last premiums
-  before the claim.
+A reviewing doctor is sent neither folder — he sees only the records
+folder attached to his own review.
 
-  Every entry is listed now, running onto a second page with the column
-  headings repeated. The section is called TRANSACTIONS.
+FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
+  src/schema.sql   investor_url on policies and on opportunities
+  src/api.js       the field on both whitelists; stripped for investors
+                   on the case folder only; carried at funding
+  public/app.js    both boxes on both forms, both rows on the policy,
+                   the investor row on the deal header
+  public/build.js  2026-10-06a
+  scripts/investor-folder-test.mjs      11 API checks
+  scripts/investor-folder-ui-test.mjs    9 screen checks
 
-ALSO IN THIS BUILD
+NO MIGRATION TO RUN — schema.sql adds the columns on boot.
 
-  The footer line ("Prepared … by …") is off the sheet, and so is the
-  simple-interest figure — the page gives one rate, the compounded IRR.
-  Simple interest is still solved and is on the register.
-
-  THE COMMISSION IS ADMINISTRATORS' ONLY, properly: a manager's
-  maturities payload no longer carries the commission figures at all,
-  and the two columns are gone from their register. It was hidden from
-  investors but reachable by a manager.
-
-EVERYTHING ELSE, AS BEFORE
-
-  The one-pager is gross throughout; the commission and the
-  after-commission return are read on the Maturities register.
-
-  Compounded is the default on the dashboard, the policy return tiles
-  and the register, with a "Show simple interest" box in the header.
-
-  The report weighting bug is fixed: a document asked for equal-weighted
-  foots with the equal-weighted figure.
-
-  Medical review is administrators only, with its own tab, files and
-  links for the reviewing doctor, and the internal LE.
-
-NOTHING TO RUN. Copy the files in and redeploy.
+TESTS: 113 suites green. Five fail in the sandbox only and are unrelated
+(investor-ui, sample-import, user-admin, valuation-menu, valuation-proxy
+— the last two need the Flask pricing app, which is not running here),
+plus premium-dues, whose dashboard card is crowded out by leftover
+sample fixtures in the sandbox database.

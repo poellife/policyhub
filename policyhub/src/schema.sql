@@ -297,6 +297,24 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
  * a column added below it reaches the table at once and the view only
  * on the next restart — which is a bug that fixes itself overnight and
  * is therefore very hard to believe in. */
+/* The folder the INVESTORS are given.
+ *
+ * Its own column, beside `documents_url`, because the two have
+ * different audiences and a single link cannot be both. The case folder
+ * is the office's working file: the illustration, the offer, the
+ * carrier correspondence, the broker's email. This one is what the
+ * people who own a piece of the policy are shown -- the policy
+ * documents and whatever of the health picture the office decides they
+ * should have.
+ *
+ * What goes in it is a decision somebody makes once per case and not a
+ * rule this application can enforce: nothing here reads the folder, and
+ * who may open it is settled by the folder's own sharing settings.
+ * What this does is make the choice explicit, so the deliberate act of
+ * sharing is a field somebody fills in rather than a link pasted into
+ * an email and forgotten. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS investor_url TEXT;
+
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
 
 /* Whether the one-pager itemises every transaction.
@@ -693,6 +711,11 @@ ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS insured2_le_date    DATE;
  * client's name, which is the one thing the deal sheet exists to keep
  * off an investor's screen. */
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS documents_url TEXT;
+
+/* And the one the investors are given on a deal, which travels onto the
+   policy when it is funded. See `policies.investor_url` above for why it
+   is not the same link as the case folder. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS investor_url TEXT;
 
 /* When the carrier issued the contract.
  *
