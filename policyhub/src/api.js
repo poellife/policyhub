@@ -3266,7 +3266,7 @@ async function loadOpportunity(req, id) {
   const o = rows[0];
   if (!o) return null;
 
-  const [prem, shares, commits] = await Promise.all([
+  const [prem, shares, commits, passes] = await Promise.all([
     q('SELECT * FROM opportunity_premiums WHERE opportunity_id = $1 ORDER BY due_date', [id]),
     /* Who this was shown to, and when. Sharing is the moment an
        opportunity leaves the office, so it is recorded rather than
@@ -3279,6 +3279,9 @@ async function loadOpportunity(req, id) {
     q(`SELECT c.*, i.name AS investor_name FROM opportunity_commitments c
          JOIN investors i ON i.id = c.investor_id
         WHERE c.opportunity_id = $1 ORDER BY c.requested_at`, [id]),
+    q(`SELECT x.investor_id, x.reason, x.passed_at, i.name AS investor_name
+         FROM opportunity_passes x JOIN investors i ON i.id = x.investor_id
+        WHERE x.opportunity_id = $1 ORDER BY x.passed_at`, [id]),
   ]);
 
   o.premiums = prem.rows;
@@ -3309,7 +3312,15 @@ async function loadOpportunity(req, id) {
   if (me === null) {
     o.shares = shares.rows;
     o.commitments = commits.rows;
+    /* Who has looked and said no, and why. The thing the desk could not
+       tell from silence, and the list it works from when deciding whom
+       to chase. */
+    o.passes = passes.rows;
   } else {
+    /* Their own answer only -- whether anybody else passed is nobody's
+       business but the desk's. */
+    const mine = passes.rows.find((x) => x.investor_id === me);
+    o.my_pass = mine ? { reason: mine.reason, passed_at: mine.passed_at } : null;
     // An investor sees their own line and nothing about anybody else —
     // the same rule the policy cap table follows.
     o.shares = undefined;
@@ -3440,7 +3451,11 @@ router.get('/opportunities', wrap(async (req, res) => {
               WHERE c.opportunity_id = o.id AND c.investor_id = $1
                 AND c.status IN ('Requested','Confirmed')) AS my_pct,
             (SELECT c.status FROM opportunity_commitments c
-              WHERE c.opportunity_id = o.id AND c.investor_id = $1) AS my_status
+              WHERE c.opportunity_id = o.id AND c.investor_id = $1) AS my_status,
+            /* Whether they have said "not for me". Null for staff, whose
+               $1 is null and so matches nobody. */
+            (SELECT x.passed_at FROM opportunity_passes x
+              WHERE x.opportunity_id = o.id AND x.investor_id = $1) AS my_passed_at
        FROM opportunities o
        LEFT JOIN funds f ON f.id = o.fund_id
        LEFT JOIN opportunity_taken t ON t.opportunity_id = o.id
@@ -3450,8 +3465,15 @@ router.get('/opportunities', wrap(async (req, res) => {
         AND ($2::int[] IS NULL OR o.fund_id = ANY($2))
         -- A passed deal is on file but off the list, for everybody but an admin.
         AND (o.status <> 'Passed' OR $3::boolean)
+        /* The entity picker, the same one the policies grid and the
+           dashboard read. A narrowing only: $2 above is what this person
+           may see at all, and this can choose among those but never add
+           to them -- a manager who names somebody else's entity gets an
+           empty list rather than a look at it. Ignored for an investor,
+           who holds percentages of deals rather than entities. */
+        AND ($4 = '' OR $1::int IS NOT NULL OR f.code = ANY(string_to_array($4, ',')))
       ORDER BY (o.status = 'Open') DESC, o.offer_closes_on NULLS LAST, o.created_at DESC`,
-    [me, funds, canSeePassed(req)]
+    [me, funds, canSeePassed(req), fundParam(req.query.fund)]
   );
 
   // Pull every schedule in one query: a rate computed from the stated
@@ -3517,10 +3539,15 @@ router.get('/opportunities/summary', wrap(async (req, res) => {
   const funds = oppFundScope(req);
   const { rows } = await q(
     `SELECT COUNT(*)::int AS open,
-            COUNT(*) FILTER (WHERE c.id IS NULL)::int AS undecided
+            /* Undecided means no request AND no pass. A deal somebody has
+               said no to is answered, and a badge that went on counting
+               it would be asking them the same question forever. */
+            COUNT(*) FILTER (WHERE c.id IS NULL AND x.investor_id IS NULL)::int AS undecided
        FROM opportunities o
        LEFT JOIN opportunity_commitments c
               ON c.opportunity_id = o.id AND c.investor_id = $1
+       LEFT JOIN opportunity_passes x
+              ON x.opportunity_id = o.id AND x.investor_id = $1
       WHERE o.status = 'Open'
         AND ($1::int IS NULL OR EXISTS (SELECT 1 FROM opportunity_shares s
               WHERE s.opportunity_id = o.id AND s.investor_id = $1))
@@ -5218,6 +5245,61 @@ router.delete('/opportunities/:id/commit', wrap(async (req, res) => {
   if (!rows[0])
     return res.status(409).json({ error: 'That request has already been decided — speak to your manager.' });
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update', `investor ${me} withdrew`);
+  res.json({ ok: true });
+}));
+
+/* ==================================================================== *
+ * An investor passing on a deal
+ *
+ * The third answer, beside asking for a piece and saying nothing. It
+ * takes the deal off their working list and out of the count on the
+ * menu badge, and it tells the desk the one thing silence never could:
+ * that this person has looked and is not interested, so nobody needs to
+ * chase them.
+ *
+ * Refused while they have a request in. "I would like 20%" and "not for
+ * me" are not both true, and quietly withdrawing the request as a side
+ * effect of a pass would release a slice the desk may be about to
+ * confirm. The screen says to withdraw it first, which is one click.
+ *
+ * Only for a deal that has actually been put in front of them -- the
+ * same rule `oppVisible` applies to reading one.
+ * ==================================================================== */
+router.post('/opportunities/:id/pass', wrap(async (req, res) => {
+  const me = scopeId(req);
+  if (me === null)
+    return res.status(403).json({ error: 'Only an investor account can pass on a deal.' });
+  if (!(await oppVisible(req, req.params.id)))
+    return res.status(404).json({ error: 'Opportunity not found' });
+  const { rows: live } = await q(
+    `SELECT pct FROM opportunity_commitments
+      WHERE opportunity_id = $1 AND investor_id = $2 AND status IN ('Requested','Confirmed')`,
+    [req.params.id, me]);
+  if (live[0])
+    return res.status(409).json({
+      error: 'You have asked for a share of this one. Withdraw that request first if you '
+        + 'would rather pass — or, if it has been confirmed, speak to the office.' });
+  const reason = str(req.body.reason).trim().slice(0, 1000);
+  await q(
+    `INSERT INTO opportunity_passes (opportunity_id, investor_id, reason)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (opportunity_id, investor_id) DO UPDATE SET reason = $3, passed_at = now()`,
+    [int(req.params.id), me, reason]);
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+    `investor ${me} passed${reason ? ` — ${reason.slice(0, 80)}` : ''}`);
+  res.json({ ok: true });
+}));
+
+/** Changing their mind. The deal is back on their list, undecided. */
+router.delete('/opportunities/:id/pass', wrap(async (req, res) => {
+  const me = scopeId(req);
+  if (me === null) return res.status(403).json({ error: 'Not an investor account' });
+  const { rows } = await q(
+    `DELETE FROM opportunity_passes WHERE opportunity_id = $1 AND investor_id = $2
+     RETURNING opportunity_id`, [int(req.params.id), me]);
+  if (!rows[0]) return res.status(404).json({ error: 'You had not passed on this one.' });
+  await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+    `investor ${me} took back their pass`);
   res.json({ ok: true });
 }));
 

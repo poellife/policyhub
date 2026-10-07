@@ -1834,3 +1834,32 @@ CREATE TABLE IF NOT EXISTS mail_templates (
   updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+/* ====================================================================
+   An investor saying "not for me"
+   ====================================================================
+
+   Until now an investor had two answers to a deal -- ask for a piece,
+   or say nothing -- and silence is not an answer anybody can act on.
+   The desk could not tell "has not looked yet" from "looked and is not
+   interested", so it chased both, and the investor's own list kept
+   showing a deal they had already decided against as if it were
+   waiting on them.
+
+   Its own table rather than a status on `opportunity_commitments`,
+   because a commitment is a percentage of a deal (and that table says
+   so with CHECK pct > 0). A pass has no percentage; forcing one in as
+   zero would put a row in every sum that table feeds and rely on every
+   one of them remembering to leave it out.
+
+   One per investor per deal. Taking it back deletes the row: a pass
+   reversed is simply an investor who has not decided, which is what
+   the absence of a row already means. */
+CREATE TABLE IF NOT EXISTS opportunity_passes (
+  opportunity_id  INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  investor_id     INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  reason          TEXT NOT NULL DEFAULT '',
+  passed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (opportunity_id, investor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opppass_investor ON opportunity_passes (investor_id);
