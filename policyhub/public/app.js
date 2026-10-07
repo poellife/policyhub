@@ -5498,9 +5498,23 @@ const fmtPct = (v) => {
 };
 
 async function opportunitiesView() {
-  const rows = await api('/opportunities');
+  /* The same entity selection every other staff screen reads, so
+     choosing LCG1 on the policies grid and then opening Opportunities
+     shows LCG1's deals rather than quietly resetting to the whole book.
+     An investor is sent no picker and the server ignores the parameter
+     for them. */
+  const q = entityQuery();
+  const [rows, funds] = await Promise.all([
+    api(`/opportunities${q ? `?${q}` : ''}`),
+    loadFunds(),
+  ]);
   const staff = !isInvestorUser();
-  const live = rows.filter((o) => o.status === 'Open');
+  /* For an investor, a deal they have passed on is answered. It leaves
+     the working list -- which is the point of passing -- and waits at the
+     bottom under its own heading, so changing their mind is a scroll
+     rather than a support call. */
+  const declined = staff ? [] : rows.filter((o) => o.status === 'Open' && o.my_passed_at);
+  const live = rows.filter((o) => o.status === 'Open' && (staff || !o.my_passed_at));
   const passed = rows.filter((o) => o.status === 'Passed');
   const rest = rows.filter((o) => !['Open', 'Passed'].includes(o.status));
   const funded = rest.filter((o) => o.status === 'Funded');
@@ -5542,6 +5556,8 @@ async function opportunitiesView() {
           ${o.my_pct ? `<div style="font-size:12px;margin-top:6px">
             <span class="badge inforce"><span class="dot"></span>You: ${fmtPct(o.my_pct)} ${esc(o.my_status || '')}</span>
           </div>` : ''}
+          ${!staff && o.my_passed_at ? `<div style="font-size:12px;margin-top:6px">
+            <span class="badge"><span class="dot"></span>You passed</span></div>` : ''}
         </div>
       </div>
 
@@ -5581,8 +5597,10 @@ async function opportunitiesView() {
           ? `${live.length} ${live.length === 1 ? 'offer is' : 'offers are'} open to you`
           : `${live.length} open · ${funded.length} funded${
               rest.length - funded.length ? ` · ${rest.length - funded.length} closed` : ''}${
-              passed.length ? ` · ${passed.length} passed` : ''}`}</div></div>
+              passed.length ? ` · ${passed.length} passed` : ''}${
+              entityCodes().length ? ` · ${esc(entityLabel())} only` : ''}`}</div></div>
       <div class="spacer"></div>
+      ${staff ? entityPicker(funds) : ''}
       ${interestToggle()}
       ${staff && archived ? `<button id="oppShowAll" ${showAll ? 'class="active-toggle"' : ''}>${
         showAll ? 'Hide closed' : `Show all (${archived})`}</button>` : ''}
@@ -5613,7 +5631,18 @@ async function opportunitiesView() {
     ${live.length === 0 ? `
       <div class="card"><div class="card-body"><div class="empty">
         ${isInvestorUser()
-          ? 'Nothing is being offered to you right now. This is where new policies will appear.'
+          ? (declined.length
+            ? `Nothing is waiting on you. You have passed on ${declined.length === 1
+              ? 'the one deal' : `all ${declined.length} deals`} open to you — ${
+              declined.length === 1 ? 'it is' : 'they are'} below if you change your mind.`
+            : 'Nothing is being offered to you right now. This is where new policies will appear.')
+          /* Said before anything else when a filter is on: "No
+             opportunities yet" over a narrowed list reads as an empty
+             book, and the next thing somebody does is go looking for
+             where the deals went. */
+          : entityCodes().length
+            ? `Nothing open for ${esc(entityLabel())}. Choose <strong>All entities</strong>
+               in the picker above to see the whole book.`
           : archived
             ? `Nothing is open at the moment. ${archived} ${archived === 1 ? 'deal has' : 'deals have'}
                been funded, closed or passed on — use <strong>Show all</strong> to see them.`
@@ -5621,6 +5650,10 @@ async function opportunitiesView() {
       </div></div></div>` : ''}
 
     ${live.map(card).join('')}
+
+    ${declined.length ? `<div class="eyebrow" style="margin:26px 0 6px;color:var(--text-muted)">
+      You passed on ${declined.length === 1 ? 'this one' : `these ${declined.length}`}</div>
+      ${declined.map(card).join('')}` : ''}
 
     ${showAll && rest.length ? `<div class="eyebrow" style="margin:26px 0 6px;color:var(--text-muted)">
       No longer open</div>
@@ -5641,6 +5674,7 @@ async function opportunitiesView() {
     after: () => {
       $('#newOppBtn')?.addEventListener('click', () => openOpportunityDialog(null));
       wireInterestToggle();
+      wireEntityPicker();
       $('#oppShowAll')?.addEventListener('click', () => {
         state.oppShowAll = !state.oppShowAll;
         render();
@@ -5838,7 +5872,21 @@ async function opportunityView() {
       </div>
       <div style="padding:16px 20px">${remainingBar(o)}</div>
 
-      ${canTake && myMax > 0 ? `
+      ${''/* Said no. The request box is not offered over a pass -- asking
+             somebody how much they want of a deal they have just declined
+             is the wrong question -- and taking it back is one click. */}
+      ${isInvestorUser() && o.my_pass ? `
+      <div class="opp-take opp-passed">
+        <strong>You passed on this ${fmtDate(o.my_pass.passed_at)}</strong>
+        ${o.my_pass.reason ? `<div class="muted" style="font-size:12.5px;margin-top:4px">
+          You said: ${esc(o.my_pass.reason)}</div>` : ''}
+        <div class="muted" style="font-size:12.5px;margin-top:4px">
+          It is off your list of open offers, and the office knows not to chase you about it.
+          ${canTake ? 'If you change your mind while it is still open, put it back.' : ''}</div>
+        ${canTake ? '<button class="btn-sm" id="unpassBtn" style="margin-top:10px">I have changed my mind</button>' : ''}
+      </div>` : ''}
+
+      ${canTake && myMax > 0 && !o.my_pass ? `
       <div class="opp-take">
         <div class="field-row">
           <div class="field" style="margin:0;max-width:260px">
@@ -5874,6 +5922,14 @@ async function opportunityView() {
           </span>
         </div>
         <div id="takeMsg" style="margin-top:10px"></div>
+        ${''/* The third answer. Offered only while they have no request in
+               -- "I want 20%" and "not for me" cannot both be true, and the
+               server refuses the pair for the same reason. */}
+        ${!mine || !['Requested', 'Confirmed'].includes(mine.status) ? `
+        <div class="opp-pass-row">
+          <span class="muted" style="font-size:12.5px">Not one for you?</span>
+          <button class="btn-sm" id="passBtn">Pass on this deal</button>
+        </div>` : ''}
       </div>` : ''}
 
       ${mine ? `
@@ -6164,16 +6220,23 @@ async function opportunityView() {
       ${(o.shares || []).length === 0
         ? '<div class="card-body"><div class="empty">Not shared with anybody yet — no investor can see this.</div></div>'
         : `<div class="table-wrap"><table class="data">
-            <thead><tr><th>Investor</th><th>Shared on</th><th>Shared by</th><th>Asked for</th></tr></thead>
+            <thead><tr><th>Investor</th><th>Shared on</th><th>Shared by</th><th>Their answer</th></tr></thead>
             <tbody>${o.shares.map((sh) => {
               const c = (o.commitments || []).filter((x) => x.investor_id === sh.investor_id
                 && !['Declined', 'Withdrawn'].includes(x.status));
               const took = c.reduce((sum, x) => sum + Number(x.pct || 0), 0);
+              /* The column this card exists for. "Nothing yet" and "passed"
+                 used to be the same blank, and the difference between them
+                 is the whole of whom to telephone. */
+              const pass = (o.passes || []).find((x) => x.investor_id === sh.investor_id);
               return `<tr>
                 <td class="strong">${esc(sh.name)}</td>
                 <td>${fmtDateTime(sh.shared_at)}</td>
                 <td class="secondary">${esc(sh.shared_by_name || '—')}</td>
-                <td class="${took ? '' : 'muted'}">${took ? fmtPct(took) : 'nothing yet'}</td>
+                <td class="${took ? '' : 'muted'}">${took ? fmtPct(took)
+    : pass ? `<span class="badge"><span class="dot"></span>Passed ${fmtDate(pass.passed_at)}</span>${
+      pass.reason ? `<div class="secondary" style="margin-top:4px">${esc(pass.reason)}</div>` : ''}`
+      : 'nothing yet'}</td>
               </tr>`;
             }).join('')}</tbody>
           </table></div>`}
@@ -6354,6 +6417,43 @@ async function opportunityView() {
         try {
           await api(`/opportunities/${o.id}/commit`, { method: 'DELETE' });
           toast('Request withdrawn');
+          refreshOppCount();
+          render();
+        } catch (err) { alert(err.message); }
+      });
+
+      /* Passing. A reason is asked for and not required: "not for me" is
+         a complete answer, and a box that insists on an explanation is a
+         box people close instead of answering. */
+      $('#passBtn')?.addEventListener('click', () => openDialog('Pass on this deal', `
+        <div class="dlg-note">
+          It comes off your list of open offers and the office will know not to chase you
+          about it. You can change your mind while it is still open.
+        </div>
+        <div class="field"><label>Anything you would like the office to know?</label>
+          <select name="preset">
+            <option value="">— no need to say —</option>
+            <option>The return is too low for me</option>
+            <option>Too long a wait</option>
+            <option>Too large a commitment right now</option>
+            <option>I already have enough with this carrier</option>
+            <option>Not investing at the moment</option>
+          </select></div>
+        <div class="field"><label>Or in your own words</label>
+          <textarea name="reason" rows="2" maxlength="1000"></textarea></div>
+      `, async (v) => {
+        const reason = [v.preset, v.reason].map((x) => String(x || '').trim())
+          .filter(Boolean).join(' — ');
+        await api(`/opportunities/${o.id}/pass`, { method: 'POST', body: { reason } });
+        toast('Passed — it is off your list');
+        refreshOppCount();
+        render();
+      }, 'Pass'));
+
+      $('#unpassBtn')?.addEventListener('click', async () => {
+        try {
+          await api(`/opportunities/${o.id}/pass`, { method: 'DELETE' });
+          toast('It is back on your list');
           refreshOppCount();
           render();
         } catch (err) { alert(err.message); }
