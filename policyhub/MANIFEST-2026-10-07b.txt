@@ -1,0 +1,65 @@
+PolicyHub — build 2026-10-07b
+Opportunities by entity, and an investor passing on a deal
+
+1. OPPORTUNITIES BY OWNER ENTITY
+The same entity picker the dashboard and the policies grid carry is now
+on Opportunities, at the top right. Tick one entity, several, or All.
+
+It is the same selection, not a copy of it: choose LCG1 on the policies
+grid and Opportunities opens on LCG1 too, and the other way round. The
+subheading says "LCG1 only" while it is on, and an empty filtered list
+says "Nothing open for LCG1 — choose All entities to see the whole book"
+rather than reading as an empty book.
+
+It narrows and never widens. A manager who names an entity that is not
+his gets an empty list, not a look at it. Investors are not offered it
+and are not affected by it.
+
+2. AN INVESTOR PASSING ON A DEAL
+Investors had two answers — ask for a piece, or say nothing — and the
+desk could not tell "has not looked" from "looked and is not
+interested". Now there is a third.
+
+On the deal, under the request box: "Not one for you? Pass on this
+deal". A reason is offered and never required — a short list of common
+ones (the return, the wait, the size, the carrier, not investing just
+now) and a box for their own words.
+
+  · For the investor, the deal leaves their open list and moves to a
+    "You passed on" heading at the bottom; the menu badge stops counting
+    it. The deal page says they passed and what they said, and offers
+    "I have changed my mind" while it is still open — which puts them
+    back to undecided.
+  · For the desk, the Shared with card's last column is now "Their
+    answer": a percentage, "Passed" with the date and reason, or
+    "nothing yet". The difference between the last two is whom to
+    telephone.
+  · A pass and a live request cannot both stand. An investor with a
+    request in is asked to withdraw it first; quietly withdrawing it as
+    a side effect would release a slice the desk may be about to confirm.
+  · Nobody passes for them — staff are refused — and no investor is told
+    whether anybody else passed.
+
+FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
+  src/mail.js       unchanged since 07a, included so this zip stands on its
+                    own — src/api.js imports from it, and an api.js from
+                    this build beside a mail.js from before 07a would stop
+                    the server starting
+  src/schema.sql    opportunity_passes (its own table — a commitment is a
+                    percentage and a pass is not)
+  src/api.js        ?fund= on GET /opportunities; POST and DELETE
+                    /opportunities/:id/pass; passes on the deal for the
+                    desk and my_pass for the investor; the badge counts
+                    a pass as an answer
+  public/app.js     the picker on Opportunities; the pass button, dialog,
+                    banner and list heading; "Their answer" for the desk
+  public/styles.css the pass row
+  public/build.js   2026-10-07b
+  scripts/opportunity-entity-filter-test.mjs  17 checks, API and screen
+  scripts/opportunity-pass-test.mjs           29 checks, API and screen
+
+NO MIGRATION TO RUN — schema.sql creates the table on boot.
+
+TESTS: 123 suites green. The same six sandbox-only failures as the last
+build, all unrelated (investor-ui, sample-import, user-admin,
+valuation-menu, valuation-proxy, premium-dues).
