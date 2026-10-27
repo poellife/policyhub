@@ -1,63 +1,73 @@
-PolicyHub — build 2026-10-07a
-Editing the email wording yourself, and who sent us the deal
+PolicyHub — build 2026-10-27a
+Emailing the one-pager to an investor, PDF attached
 
-1. WHAT THE MESSAGES SAY — Settings → The post → "What the messages say"
-Every automated email the portal sends, listed on the left; click one
-and its wording opens on the right.
+WHERE IT IS
+Open a deal, click One-pager, set the participation, and Build it. The
+sheet opens with "Email it to an investor" above it:
 
-  · The subject and body are in boxes you can edit. They start out as
-    the exact wording being sent today — taken from the real template,
-    not retyped — with the variable parts shown as {{fields}}.
-  · The fields that message has are listed as chips under the box.
-    Click one to drop it in where the cursor is.
-  · Beside it, "As it would arrive" shows the message filled in with
-    made-up names and figures, and it changes as you type.
-  · "Send me a specimen" posts it to your own address, before or after
-    saving, marked [Specimen] so it can never be mistaken for a real one.
-  · Save, and the next message of that kind goes out in your words. No
-    deployment. "Revert to the default" puts the application's wording
-    back; "Put the default back in the box" lets you start over from it
-    without saving.
+  To        pick the investor. Those already shown the deal are listed
+            first; anybody else can be chosen too, and sending shares the
+            deal with them so the link in the email opens it. Their name
+            goes at the top of the message when you pick them.
+  Subject   prefilled, editable.
+  Message   the covering note, prefilled from the deal's own figures and
+            editable however you like.
 
-One rule beyond plain substitution: a line whose field has no value for
-a particular message is left out of that message entirely. Write "They
-said: {{note}}" on its own line and it simply disappears from messages
-that carry no note.
+  Send to investor    sends it, with the one-pager attached as a PDF.
+  Send me a preview   sends the identical email to you only, marked
+                      [Preview]. Nothing is shared and nobody else is
+                      written to.
 
-What it cannot do, said plainly: branch. The default says "one policy"
-or "three policies" where it needs to; your wording says what you type.
-And no message has a password, tax number or insured's name among its
-fields, so none can be added.
+No download, no attaching. The PDF is drawn at the moment you press
+Send, from the deal as it stands — the same document Download PDF gives.
 
-Administrators only — managers and investors are refused, both the
-screen and the routes behind it. Every save, revert and specimen is in
-the audit log.
+HOW IT GOES OUT
+From the firm's address (the same "Poel Capital Portal" sender as every
+other message), with replies coming back to YOU — the investor who hits
+Reply reaches whoever sent it. It goes immediately; the screen says
+"Sent to …" or says what went wrong.
 
-2. WHO SENT US THE DEAL — on every opportunity, administrators only
-Three boxes in the deal's edit form under "Where it came from": who sent
-it (the broker or firm), who there (a person and a number), and when it
-arrived. It is the first line on the Deal notes card. Same gate as the
-deal notes: a manager is not sent it, cannot see the boxes, and cannot
-write to it; an investor never sees it.
+Every send is listed on the deal, staff only, under "One-pager emailed":
+who, when, by whom, at what participation, and whether it was delivered
+or bounced.
 
-FILES IN THIS ZIP (drop over the same paths, Render root = policyhub)
-  src/schema.sql    mail_templates table (starts empty — nothing changes
-                    until somebody changes something); source_name,
-                    source_contact, source_on on opportunities
-  src/mail.js       MAIL_FIELDS, defaultTemplate, render, compose; sendMail
-                    now uses the office's wording where there is one
-  src/api.js        GET/PUT/DELETE /mail-templates, POST …/:kind/test;
-                    the source fields behind the admin-only gate
-  public/app.js     the wording screen; the source boxes and card line
-  public/styles.css the wording screen's layout
-  public/build.js   2026-10-07a
-  scripts/mail-templates-test.mjs     26 API checks
-  scripts/mail-templates-ui-test.mjs  20 screen checks
-  scripts/deal-notes-test.mjs         +6 source checks
-  scripts/deal-notes-ui-test.mjs      +5 source checks
+WHAT IT WILL NOT DO
+  · Send an email that names the insured. The note is written in
+    initials, but the box is editable, so the finished text is checked
+    before anything leaves and refused with the word it found. Last
+    names are caught however they are typed; first names as written on
+    the record, so an insured called Will does not stop "we will".
+    Writing to an investor who shares the insured's surname is fine as
+    long as you use her full name; "Ms Coleman" alone is refused, because
+    there is no telling whose name it is.
+  · Send to anyone but an investor on file. You pick the person; the
+    address is the one on their record. Managers can only pick investors
+    in their own book.
+  · Send a closed deal (it is on nobody's portal, so the link would lead
+    nowhere). A preview of one is fine.
 
-NO MIGRATION TO RUN — schema.sql adds the table and columns on boot.
+ALSO FIXED
+The covering note now quotes the scenario investors are shown, when one
+is chosen. It was quoting the deal's own figures while the PDF beside it
+quoted the scenario's.
 
-TESTS: 121 suites green. The same six sandbox-only failures as the last
-build, all unrelated (investor-ui, sample-import, user-admin,
-valuation-menu, valuation-proxy, premium-dues).
+NEEDS EMAIL SET UP ON RENDER
+Sending uses the same mail setup as the other messages (RESEND_API_KEY on
+the Render service). If that is not set, the box says so and the Send
+buttons stay off; Download PDF and "Copy the text instead" still work.
+
+FILES (each goes into the policyhub folder of the repo — policyhub/src
+and policyhub/public, NOT the src folder at the top level of the repo)
+  src/api.js        the send route; one shared "sheet as investors see
+                    it" helper for the download, the note and the email
+  src/mail.js       attachments and reply-to through the queue; Send
+                    pushes that one message rather than the oldest queued
+  src/schema.sql    outbox attachments and reply-to columns; the
+                    opportunity_sends table (added on boot, nothing to run)
+  public/app.js     the email box and the "One-pager emailed" card
+  public/styles.css
+  public/build.js   2026-10-27a
+  scripts/send-sheet-test.mjs   47 checks, run against a stand-in mail
+                    service so the actual email and PDF are inspected
+
+TESTS: no regressions against a baseline taken first on the same database.

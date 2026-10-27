@@ -1912,6 +1912,12 @@ table.data td.risk-note-cell {
 .mail-draft-head h3 { margin: 0 0 3px; font-size: 15px; }
 .mail-draft-head .spacer { flex: 1; }
 .mail-to { max-width: 240px; }
+/* The recipient, now that the email is sent from here rather than copied
+   out: full width, because the address shown beside the name is the
+   thing to check before pressing Send. */
+.mail-to-wide { width: 100%; max-width: 560px; }
+.mail-send-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.mail-send-row .spacer { flex: 1; }
 .mail-label { display: block; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--muted); margin: 12px 0 5px; }
 .mail-subject, .mail-body { width: 100%; font-family: inherit; font-size: 13px;

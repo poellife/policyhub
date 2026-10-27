@@ -190,7 +190,14 @@ export const MAIL_KINDS = [
    not on the preferences screen. `test` is asked for explicitly by the person
    who wants it; there is nothing to opt out of. They still have to be listed
    HERE, or the queue refuses them — which is exactly what it did. */
-const INTERNAL_KINDS = ['test'];
+/* `one_pager` is a deal sheet a person at the firm chose to send to one
+   named investor, from the deal itself. Not a notification anybody
+   subscribes to, so not on the preferences screen -- and not something a
+   preference should be able to swallow either: the sender pressed Send
+   and watched it go, and a message silently Skipped because of a tick
+   box the investor set months ago about something else would be a lie
+   told to the person who sent it. */
+const INTERNAL_KINDS = ['test', 'one_pager'];
 const KIND_SET = new Set([...MAIL_KINDS.map((k) => k.kind), ...INTERNAL_KINDS]);
 /* Kinds no preference can stop: the security ones, which is the point of
    them, and the one-off ones, which have no preference to consult. */
@@ -225,7 +232,8 @@ async function wants(userId, kind) {
  * email has still done its actual job, and saying otherwise would roll back
  * work that succeeded.
  */
-export async function queueMail({ to, userId = null, kind, subject, text, html = '' }) {
+export async function queueMail({ to, userId = null, kind, subject, text, html = '',
+  attachments = [], replyTo = '' }) {
   try {
     if (!KIND_SET.has(kind)) throw new Error(`unknown mail kind ${kind}`);
     const address = String(to || '').trim();
@@ -237,10 +245,23 @@ export async function queueMail({ to, userId = null, kind, subject, text, html =
         [address, userId, kind, subject, text]);
       return { skipped: 'switched off' };
     }
+    /* Attachments are written down with the message, bytes and all, so
+       what the worker sends -- even on its third attempt an hour later --
+       is the document that was previewed, not one redrawn from a record
+       that has moved since. Each is { filename, content (base64),
+       content_type }; anything else is dropped rather than trusted. */
+    const files = (Array.isArray(attachments) ? attachments : [])
+      .filter((f) => f && f.filename && f.content)
+      .map((f) => ({ filename: String(f.filename).slice(0, 200),
+                     content: String(f.content),
+                     content_type: String(f.content_type || 'application/octet-stream') }));
+    const reply = String(replyTo || '').trim();
     const { rows } = await q(
-      `INSERT INTO email_outbox (to_email, to_user_id, kind, subject, body_text, body_html)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [address, userId, kind, subject, text, html || wrapHtml(subject, text)]);
+      `INSERT INTO email_outbox (to_email, to_user_id, kind, subject, body_text, body_html,
+                                 attachments, reply_to)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING id`,
+      [address, userId, kind, subject, text, html || wrapHtml(subject, text),
+       JSON.stringify(files), /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(reply) ? reply : '']);
     return { id: rows[0].id };
   } catch (e) {
     console.error('[mail] could not queue:', e.message);
@@ -259,7 +280,17 @@ async function deliver(row) {
       subject: row.subject,
       text: row.body_text,
       html: row.body_html || undefined,
-      ...(REPLY_TO() ? { reply_to: REPLY_TO() } : {}),
+      /* The person who wrote it, where there is one; the firm's own
+         reply address otherwise. */
+      ...((row.reply_to || REPLY_TO()) ? { reply_to: row.reply_to || REPLY_TO() } : {}),
+      /* Resend's shape: a filename and the bytes as base64. Sent only
+         when there is something to send, so every other message's
+         request is exactly what it was. */
+      ...(Array.isArray(row.attachments) && row.attachments.length
+        ? { attachments: row.attachments.map((f) => ({
+          filename: f.filename, content: f.content,
+          ...(f.content_type ? { content_type: f.content_type } : {}) })) }
+        : {}),
     }),
   });
   const body = await res.json().catch(() => ({}));
@@ -281,12 +312,18 @@ const MAX_ATTEMPTS = 5;
 const backoffMinutes = (attempts) => Math.min(60, 5 ** Math.max(0, attempts - 1) / 5);
 
 /** Send whatever is due. Returns what it did, for the tests and the log. */
-export async function flushMail({ limit = 20 } = {}) {
+export async function flushMail({ limit = 20, ids = null } = {}) {
   if (!mailReady()) return { sent: 0, failed: 0, waiting: await pendingCount(), unconfigured: true };
+  /* `ids` sends those messages and nothing else. A person who pressed
+     Send is waiting on THEIR message; sending the oldest twenty in the
+     queue first -- which is what this did -- made them wait behind
+     somebody else's backlog and then told them theirs was still queued. */
+  const only = Array.isArray(ids) ? ids.map(Number).filter(Number.isInteger) : null;
   const { rows } = await q(
     `SELECT * FROM email_outbox
       WHERE status = 'Queued' AND next_try_at <= now()
-      ORDER BY created_at LIMIT $1`, [limit]);
+        AND ($2::int[] IS NULL OR id = ANY($2))
+      ORDER BY created_at LIMIT $1`, [limit, only]);
 
   let sent = 0, failed = 0;
   for (const row of rows) {

@@ -1863,3 +1863,48 @@ CREATE TABLE IF NOT EXISTS opportunity_passes (
   PRIMARY KEY (opportunity_id, investor_id)
 );
 CREATE INDEX IF NOT EXISTS idx_opppass_investor ON opportunity_passes (investor_id);
+
+/* ====================================================================
+   Sending the one-pager from the portal
+   ====================================================================
+
+   The covering note used to be composed here and sent from somebody's
+   own mail client, with the PDF downloaded and attached by hand. Three
+   steps, two of them outside the application, and the one that most
+   often went wrong -- attaching last week's sheet -- was the one the
+   application could not see.
+
+   So the portal sends it, PDF attached, and these are the pieces that
+   needs.
+
+   `attachments` on the outbox: the message is queued in the request and
+   sent by the worker afterwards, possibly after a retry, and the
+   document it carries has to be the one that was previewed -- so the
+   bytes are written down with the message rather than redrawn at send
+   time from a deal that may have changed in between. Base64 in JSON,
+   because it is a few tens of kilobytes and the outbox is not where
+   documents are kept for long.
+
+   `reply_to` on the outbox: a covering note is a letter from a person.
+   It goes out from the firm's address, which is the one the provider
+   will vouch for, but an investor who presses Reply should reach the
+   person who wrote to them, not a notices@ mailbox nobody reads.
+
+   `opportunity_sends`: who was sent which deal, by whom, when, at what
+   participation. The thing somebody asks a week later -- "did Ada get
+   the Northbank sheet?" -- answered from the deal itself. */
+ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS reply_to TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS opportunity_sends (
+  id              SERIAL PRIMARY KEY,
+  opportunity_id  INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  investor_id     INTEGER REFERENCES investors(id) ON DELETE SET NULL,
+  to_email        TEXT NOT NULL,
+  subject         TEXT NOT NULL DEFAULT '',
+  share_pct       NUMERIC(9,6) NOT NULL DEFAULT 100,
+  outbox_id       INTEGER REFERENCES email_outbox(id) ON DELETE SET NULL,
+  sent_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  sent_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_oppsend_opp ON opportunity_sends (opportunity_id, sent_at DESC);

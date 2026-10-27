@@ -6242,6 +6242,30 @@ async function opportunityView() {
           </table></div>`}
     </div>` : ''}
 
+    ${''/* Who has been emailed the sheet from the portal. Staff only --
+           an investor's copy of the deal has no "sends" at all -- and only
+           once there is something to list. */}
+    ${(o.sends || []).length ? `
+    <div class="card">
+      <div class="card-head"><h2>One-pager emailed</h2><div class="spacer"></div>
+        <button class="btn-sm" id="sheetBtn2">Email it again</button></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>To</th><th>Sent</th><th>By</th><th class="num">Participation</th>
+          <th>Delivery</th></tr></thead>
+        <tbody>${o.sends.map((x) => `<tr>
+          <td class="strong">${esc(x.investor_name || '—')}
+            <div class="secondary">${esc(x.to_email)}</div></td>
+          <td>${fmtDateTime(x.sent_at)}</td>
+          <td class="secondary">${esc(x.sent_by_name || '—')}</td>
+          <td class="num">${fmtPct(x.share_pct)}</td>
+          <td>${x.mail_status === 'Sent' ? '<span class="badge inforce"><span class="dot"></span>Sent</span>'
+    : x.mail_status === 'Failed' ? `<span class="badge lapsed"><span class="dot"></span>Failed</span>
+              <div class="secondary">${esc(x.mail_error || '')}</div>`
+      : '<span class="badge"><span class="dot"></span>Queued</span>'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>` : ''}
+
     ${''/* Staff only, and the server decides that rather than this line:
            an investor's copy of the deal arrives without the field at all. */}
     ${o.valuations === undefined ? '' : valuationPanel(o.valuations, 'opportunity', o.id)}
@@ -6273,6 +6297,7 @@ async function opportunityView() {
       $('#editOppBtn')?.addEventListener('click', () => openOpportunityDialog(o));
       $('#scheduleBtn')?.addEventListener('click', () => openScheduleDialog(o));
       $('#sheetBtn')?.addEventListener('click', () => openSheetDialog(o));
+      $('#sheetBtn2')?.addEventListener('click', () => openSheetDialog(o));
       $('#passOppBtn')?.addEventListener('click', () => openPassDialog(o));
       $('#deleteOppBtn')?.addEventListener('click', () => openDeleteOppDialog(o));
       $('#reopenOppBtn')?.addEventListener('click', async () => {
@@ -7073,6 +7098,8 @@ function openSheetDialog(o) {
       At 100% the sheet shows the whole policy. Below that it shows the full premium and that
       participation's share side by side, with the cost and death benefit for that slice.
       The return is the same at any percentage — every cash flow scales together.
+      <br><br>The next screen shows the sheet with a covering email above it: download the
+      PDF, or pick an investor and send it to them from there with the PDF attached.
       ${!o.impairments && !o.thesis ? '<br><br><strong>Nothing has been written for the medical '
         + 'or investment-case sections yet.</strong> Use <strong>Edit</strong> to add them, or '
         + 'the sheet will print with the numbers alone.' : ''}
@@ -7273,12 +7300,18 @@ async function opportunitySheetView() {
 }
 
 /**
- * The covering email, on the one-pager screen.
+ * The covering email, on the one-pager screen — and the send.
  *
  * Composed by the server from the same record the sheet is drawn from,
- * shown as plain editable text, and left for a person to send. Not sent
- * from here: a covering note is a letter, it should go from the sender's
- * own mailbox, and the reply should come back to them.
+ * shown as plain editable text, and sent from here with the PDF attached:
+ * pick the investor, read it, press Send. It used to be copied into a mail
+ * client with the sheet downloaded and attached by hand, which is three
+ * steps outside the application and the place last week's sheet got
+ * attached to this week's note.
+ *
+ * It goes out from the firm's address with replies coming back to whoever
+ * sent it, so it is still a letter from a person. "Send me a preview"
+ * sends the identical message to that person first.
  *
  * Fetched after the sheet rather than with it, so a slow round trip never
  * holds up the document itself.
@@ -7296,64 +7329,124 @@ async function loadCoveringEmail(o, share) {
       ${esc(err.message)}</div>`;
     return;
   }
-  /* Rendered as an option list rather than pre-filled: the draft opens
-     with no name on it, because the same draft goes to four people and
-     the worst thing this screen could do is send one addressed to
-     somebody else. */
+  /* Nobody is chosen to begin with. The same draft goes to four people,
+     and the worst thing this screen could do is send one addressed to
+     somebody else because the list happened to open on them. */
   const people = draft.recipients || [];
+  const shown = people.filter((r) => r.shown);
+  const others = people.filter((r) => !r.shown);
+  const opt = (r) => `<option value="${r.id}" data-name="${esc(r.name)}"
+      data-email="${esc(r.email || '')}" ${r.email ? '' : 'disabled'}>${esc(r.name)}${
+    r.email ? ` — ${esc(r.email)}` : ' (no email on file)'}</option>`;
+  const ready = !!draft.mail_ready;
+  const open = o.status === 'Open';
+
   box.innerHTML = `
     <div class="mail-draft">
       <div class="mail-draft-head">
-        <div><h3>Covering email</h3>
-          <div class="muted" style="font-size:12px">Attach the PDF above, then copy this
-            across. Initials only — no name, no date of birth, no diagnosis leaves in an
-            email.</div></div>
-        <div class="spacer"></div>
-        ${people.length ? `<select id="mailTo" class="mail-to">
-          <option value="">No name at the top</option>
-          ${people.map((r) => `<option value="${esc(r.name)}" data-email="${esc(r.email || '')}"
-            >${esc(r.name)}${r.email ? '' : ' (no email on file)'}</option>`).join('')}
-        </select>` : ''}
-        <button type="button" class="btn" id="mailCopy">Copy</button>
-        <button type="button" class="btn btn-primary" id="mailOpen">Open in mail</button>
+        <div><h3>Email it to an investor</h3>
+          <div class="muted" style="font-size:12px">The PDF below goes with it, attached.
+            Initials only — the portal will not send an email that names the insured.</div></div>
       </div>
       ${(draft.warnings || []).length ? `<div class="error-box" style="margin:0 0 12px">
         ${draft.warnings.map((w) => `<div>${esc(w)}</div>`).join('')}</div>` : ''}
+      ${!ready ? `<div class="error-box" style="margin:0 0 12px">Email is not set up on the
+        server yet, so this cannot send. Use <strong>Download PDF</strong> above and
+        <strong>Copy</strong> the message into your own mail for now.</div>` : ''}
+      ${ready && !open ? `<div class="error-box" style="margin:0 0 12px">This deal is
+        ${esc(String(o.status).toLowerCase())}, so it is on nobody's portal and the link in the
+        email would lead nowhere. You can still send yourself a preview.</div>` : ''}
+
+      <label class="mail-label">To</label>
+      <select id="mailTo" class="mail-to-wide">
+        <option value="">Choose an investor…</option>
+        ${shown.length ? `<optgroup label="Already shown this deal">${shown.map(opt).join('')}</optgroup>` : ''}
+        ${others.length ? `<optgroup label="Not shown it yet — sending shares it with them">${
+    others.map(opt).join('')}</optgroup>` : ''}
+      </select>
+      <div class="muted" id="mailToNote" style="font-size:12px;margin-top:4px"></div>
+
       <label class="mail-label">Subject</label>
       <input type="text" id="mailSubject" class="mail-subject" value="${esc(draft.subject)}">
       <label class="mail-label">Message</label>
-      <textarea id="mailBody" class="mail-body" rows="18">${esc(draft.body)}</textarea>
+      <textarea id="mailBody" class="mail-body" rows="16">${esc(draft.body)}</textarea>
       <div class="muted" style="font-size:12px;margin-top:8px">
-        Attachment: <strong>${esc(draft.attachment || 'the one-pager')}</strong> — use
-        <strong>Download PDF</strong> above, then attach the file you saved.</div>
+        Attached: <strong>${esc(draft.attachment || 'the one-pager')}</strong>${
+    Number(share) < 100 ? ` — at ${esc(String(share))}% participation` : ''}, exactly as shown
+        below. Replies come back to you${draft.sender_email
+    ? ` at ${esc(draft.sender_email)}` : ''}.</div>
+
+      <div class="mail-send-row">
+        <button type="button" class="btn btn-primary" id="mailSend" ${ready && open ? '' : 'disabled'}
+          >Send to investor</button>
+        <button type="button" class="btn" id="mailPreview" ${ready ? '' : 'disabled'}
+          >Send me a preview</button>
+        <div class="spacer"></div>
+        <button type="button" class="btn-link" id="mailCopy">Copy the text instead</button>
+      </div>
+      <div id="mailResult" style="margin-top:10px"></div>
     </div>`;
 
   const body = $('#mailBody');
   const subject = $('#mailSubject');
   const sel = $('#mailTo');
-  /* Retyping the salutation in the draft when a recipient is picked, and
-     only the salutation: whatever the sender has edited below it is
-     theirs and must survive. */
+  const result = $('#mailResult');
+  const say = (html, bad = false) => {
+    result.innerHTML = `<div class="${bad ? 'error-box' : 'ok-box'}">${html}</div>`;
+  };
+
+  /* Retyping the salutation when a recipient is picked, and only the
+     salutation: whatever the sender has edited below it is theirs and
+     must survive. */
   sel?.addEventListener('change', () => {
-    const name = sel.value;
+    const picked = sel.selectedOptions?.[0];
+    const name = sel.value ? (picked?.dataset?.name || '') : '';
     const lines = body.value.split('\n');
     const greeted = /^[^\n]{1,60},$/.test(lines[0] || '') && lines[1] === '';
     if (greeted) lines.splice(0, name ? 1 : 2, ...(name ? [`${name},`] : []));
     else if (name) lines.unshift(`${name},`, '');
     body.value = lines.join('\n');
+    const r = people.find((x) => String(x.id) === sel.value);
+    $('#mailToNote').textContent = !r ? ''
+      : r.shown ? `${r.name} can already see this deal on the portal.`
+        : `Sending shares this deal with ${r.name}, so the link in the email opens it.`;
   });
+
+  const send = async (preview) => {
+    if (!preview && !sel.value) { say('Choose who to send it to.', true); sel.focus(); return; }
+    const r = people.find((x) => String(x.id) === sel.value);
+    if (!preview && !confirm(`Send this to ${r?.name} at ${r?.email}, with the one-pager attached?`))
+      return;
+    const btn = preview ? $('#mailPreview') : $('#mailSend');
+    btn.disabled = true;
+    try {
+      const out = await api(`/opportunities/${o.id}/send-sheet`, { method: 'POST', body: {
+        preview, investor_id: preview ? undefined : Number(sel.value),
+        subject: subject.value, body: body.value,
+        share, interest: interestShown() } });
+      if (out.status === 'Failed')
+        say(`The email to ${esc(out.to)} was refused by the mail service: ${esc(out.error || '')}`, true);
+      else if (preview)
+        say(`Preview sent to <strong>${esc(out.to)}</strong>. Nothing has been shared and nobody
+          else has been written to.`);
+      else {
+        say(`Sent to <strong>${esc(r?.name || out.to)}</strong> at ${esc(out.to)}${
+          out.status === 'Queued' ? ' — queued, it will go out within a minute' : ''}.${
+          r && !r.shown ? ' The deal is now shared with them.' : ''}`);
+        if (r) r.shown = true;
+        toast('Sent');
+      }
+    } catch (err) {
+      say(esc(err.message), true);
+    } finally { btn.disabled = false; }
+  };
+  $('#mailSend')?.addEventListener('click', () => send(false));
+  $('#mailPreview')?.addEventListener('click', () => send(true));
   $('#mailCopy')?.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(`${subject.value}\n\n${body.value}`);
       toast('Copied — subject and message');
     } catch { body.select(); toast('Press ⌘C or Ctrl+C to copy'); }
-  });
-  $('#mailOpen')?.addEventListener('click', () => {
-    const to = sel?.selectedOptions?.[0]?.dataset?.email || '';
-    /* mailto has no attachment field, which is the whole reason the hint
-       above says to attach the PDF by hand. */
-    window.location.href = `mailto:${encodeURIComponent(to)}?subject=${
-      encodeURIComponent(subject.value)}&body=${encodeURIComponent(body.value)}`;
   });
 }
 

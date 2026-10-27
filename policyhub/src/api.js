@@ -10,7 +10,7 @@ import { cleanArrangement } from '../public/policy-fields.js';
 /* The same initials rule the one-pager and the covering email use. One
    implementation, so a name cannot leak from one of them and not the
    others. */
-import { initialsOf } from '../public/initials.js';
+import { initialsOf, namesLeftIn } from '../public/initials.js';
 import { recordExport, describeOrigin, clientIp } from './security.js';
 import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
@@ -3316,6 +3316,18 @@ async function loadOpportunity(req, id) {
        tell from silence, and the list it works from when deciding whom
        to chase. */
     o.passes = passes.rows;
+    /* Who was emailed the sheet from here, and whether it went. The
+       outbox status rides along so a bounced address shows on the deal
+       rather than only in the mail log nobody opens. */
+    o.sends = (await q(
+      `SELECT s.id, s.investor_id, s.to_email, s.subject, s.share_pct, s.sent_at,
+              i.name AS investor_name, u.full_name AS sent_by_name,
+              e.status AS mail_status, e.last_error AS mail_error
+         FROM opportunity_sends s
+         LEFT JOIN investors i ON i.id = s.investor_id
+         LEFT JOIN users u ON u.id = s.sent_by
+         LEFT JOIN email_outbox e ON e.id = s.outbox_id
+        WHERE s.opportunity_id = $1 ORDER BY s.sent_at DESC`, [id])).rows;
   } else {
     /* Their own answer only -- whether anybody else passed is nobody's
        business but the desk's. */
@@ -3584,42 +3596,61 @@ router.get('/opportunities/:id', wrap(async (req, res) => {
  * leaving the building is worth a line in the log even when the person
  * taking it is entitled to it.
  */
+/**
+ * The deal as an investor is shown it.
+ *
+ * The one-pager is the thing that actually reaches an investor, so it is
+ * built on whichever scenario they are shown -- including when a member
+ * of staff is the one pressing the button. An investor's own copy already
+ * carries the override from `loadOpportunity`; this is the desk's, and
+ * without it the paper going out of the office would quote figures nobody
+ * on the portal can see.
+ *
+ * One function for the three things that put this deal in front of an
+ * investor -- the download, the covering note and the email that carries
+ * both -- because three copies of this rule is how the figure in the
+ * email came to disagree with the figure on the paper the first time.
+ */
+function sheetFor(o) {
+  const picked = (o.scenarios || []).find((x) => x.shown_to_investors) || null;
+  if (!picked) return o;
+  const sheet = applyScenario(o, picked);
+  try {
+    sheet.analysis = analyseOpportunity(sheet, 1, 0);
+  } catch { /* the sheet copes with a null analysis as the page does */ }
+  return sheet;
+}
+
+/** The participation and the interest convention, read the same way everywhere. */
+const sheetOptions = (src) => {
+  const asked = Number(src.share);
+  const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
+  const interest = ['simple', 'compound', 'both'].includes(str(src.interest))
+    ? str(src.interest) : 'simple';
+  return { share, interest };
+};
+
+/* Named for the deal rather than "sheet.pdf", because it lands in a
+   downloads folder beside forty other files. No insured name in it, for
+   the same reason there is none on the page. */
+const sheetFilename = (o) => `${String(o.policy_number || `opportunity-${o.id}`)
+  .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60)}-one-pager.pdf`;
+
 router.get('/opportunities/:id/sheet.pdf', wrap(async (req, res) => {
   if (!(await oppVisible(req, req.params.id)))
     return res.status(404).json({ error: 'Opportunity not found' });
   const o = await loadOpportunity(req, req.params.id);
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
 
-  /* The one-pager is the thing that actually reaches an investor, so it
-     is built on whichever scenario they are shown -- including when a
-     member of staff is the one pressing the button. An investor's own
-     copy already carries the override from `loadOpportunity`; this is
-     the desk's, and without it the paper going out of the office would
-     quote figures nobody on the portal can see. */
-  const picked = (o.scenarios || []).find((x) => x.shown_to_investors) || null;
-  const sheet = picked ? applyScenario(o, picked) : o;
-  if (picked) {
-    try {
-      sheet.analysis = analyseOpportunity(sheet, 1, 0);
-    } catch { /* the sheet copes with a null analysis as the page does */ }
-  }
-
-  const asked = Number(req.query.share);
-  const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
-  const interest = ['simple', 'compound', 'both'].includes(str(req.query.interest))
-    ? str(req.query.interest) : 'simple';
+  const sheet = sheetFor(o);
+  const { share, interest } = sheetOptions(req.query);
 
   const pdf = opportunityPdf(sheet, { share, interest });
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'read',
     `downloaded the one-pager${share < 100 ? ` at ${share}%` : ''} · ${describeOrigin(req)}`);
 
-  /* Named for the deal rather than "sheet.pdf", because it lands in a
-     downloads folder beside forty other files. No insured name in it,
-     for the same reason there is none on the page. */
-  const slug = String(o.policy_number || `opportunity-${o.id}`)
-    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${slug}-one-pager.pdf"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${sheetFilename(o)}"`);
   res.send(pdf);
 }));
 
@@ -3648,29 +3679,197 @@ router.get('/opportunities/:id/email', blockInvestors, wrap(async (req, res) => 
   const o = await loadOpportunity(req, req.params.id);
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
 
-  const asked = Number(req.query.share);
-  const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
-  const interest = ['simple', 'compound', 'both'].includes(str(req.query.interest))
-    ? str(req.query.interest) : 'simple';
-
-  const ids = (o.shares || []).map((x) => x.investor_id);
-  const { rows: people } = ids.length ? await q(
-    `SELECT i.id, i.name, COALESCE(u.email, i.email) AS email
-       FROM investors i
-       LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
-      WHERE i.id = ANY($1) ORDER BY i.name`, [ids]) : { rows: [] };
+  const { share, interest } = sheetOptions(req.query);
 
   /* Signed by whoever is composing it, not by "the system". */
   const from = [req.user.name || '', 'Poel Capital'].filter(Boolean).join('\n');
-  const draft = opportunityEmail(o, {
+  /* From the same sheet the PDF is drawn from -- including the scenario
+     investors are shown, which this used to skip, so a deal on its
+     "If we get him to 260" case went out with 260 on the paper and 300
+     in the note. */
+  const draft = opportunityEmail(sheetFor(o), {
     share, interest, from,
     to: str(req.query.to) || '',
   });
 
-  const slug = String(o.policy_number || `opportunity-${o.id}`)
-    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
-  res.json({ ...draft, attachment: `${slug}-one-pager.pdf`, recipients: people });
+  res.json({ ...draft, attachment: sheetFilename(o),
+    recipients: await sheetRecipients(req, o),
+    mail_ready: mailReady(),
+    sender_email: req.user.email || '' });
 }));
+
+/**
+ * Who this deal can be sent to.
+ *
+ * Every investor the caller may write to, not only the ones already shown
+ * it: sending a sheet to somebody new is the ordinary way a deal reaches
+ * them, and sending it shares it (see below). Those already shown it come
+ * first, because they are who the covering note is usually for.
+ *
+ * The address is the one they sign in with where they have a login, and
+ * the one on their record otherwise -- the same rule the draft has always
+ * used, so a person is not written to at an address the portal does not
+ * think is theirs.
+ */
+async function sheetRecipients(req, o) {
+  const shown = new Set((o.shares || []).map((x) => x.investor_id));
+  const { rows } = await q(
+    `SELECT i.id, i.name, COALESCE(u.email, i.email) AS email
+       FROM investors i
+       LEFT JOIN users u ON u.investor_id = i.id AND u.is_active = TRUE
+      ORDER BY i.name`);
+  const barred = new Set(await investorsOutOfScope(req, rows.map((r) => r.id)));
+  return rows.filter((r) => !barred.has(r.id))
+    .map((r) => ({ id: r.id, name: r.name, email: r.email || '', shown: shown.has(r.id) }))
+    .sort((a, b) => Number(b.shown) - Number(a.shown) || a.name.localeCompare(b.name));
+}
+
+/* ==================================================================== *
+ * Sending the one-pager from the portal
+ *
+ * The covering note, edited on screen, sent to one investor with the
+ * PDF attached. No download, no mail client, no attaching last week's
+ * sheet by mistake -- the document is drawn here, from the deal as it
+ * stands, at the moment Send is pressed.
+ *
+ * What it will not do:
+ *
+ *   Put the insured's name in an email. The draft is written in
+ *   initials, but the box is editable, and a sender who types "re James
+ *   Coleman" has undone the rule in one keystroke. So the finished text
+ *   is checked before anything is queued, and refused with the word it
+ *   found. Last names are matched however they are typed; first names
+ *   only as written on the record, capitalised, so that an insured
+ *   called Will does not stop anybody writing "we will".
+ *
+ *   Send to an address the caller could not otherwise reach. The
+ *   recipient is named by investor, not typed, and must be one of the
+ *   investors this person may write to.
+ *
+ *   Send a deal nobody can open. A closed deal is not on an investor's
+ *   portal, so the link in the note would lead nowhere; an open one is
+ *   shared with them as it is sent, so the link works when they click it.
+ *
+ * `preview: true` sends the same thing to the sender's own address
+ * instead, marked as a preview, shares nothing and records nothing --
+ * the way to read it as the investor will before committing.
+ * ==================================================================== */
+router.post('/opportunities/:id/send-sheet', blockInvestors, blockMedical, oppEdit,
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const o = await loadOpportunity(req, req.params.id);
+    if (!o) return res.status(404).json({ error: 'Opportunity not found' });
+    if (!mailReady())
+      return res.status(503).json({
+        error: 'Email is not set up on the server yet, so nothing can be sent from here. '
+          + 'Use Download PDF and your own mail for now.' });
+
+    const preview = !!req.body.preview;
+    const subject = str(req.body.subject).trim().slice(0, 300);
+    const body = str(req.body.body).replace(/\r\n/g, '\n').trim().slice(0, 20000);
+    if (!subject || !body)
+      return res.status(400).json({ error: 'The email needs a subject and a message.' });
+
+    /* Who it is going to. Named by investor id, never typed, so the
+       address is one the portal already holds for that person. */
+    let to = '', investor = null;
+    if (preview) {
+      to = req.user.email || '';
+      if (!to) return res.status(400).json({ error: 'Your own account has no email address.' });
+    } else {
+      const id = int(req.body.investor_id);
+      if (!id) return res.status(400).json({ error: 'Choose who to send it to.' });
+      investor = (await sheetRecipients(req, o)).find((r) => r.id === id) || null;
+      if (!investor) return res.status(404).json({ error: 'That investor is not one you can write to.' });
+      if (!investor.email)
+        return res.status(400).json({
+          error: `There is no email address on file for ${investor.name}. `
+            + 'Add one on their investor record first.' });
+      to = investor.email;
+      if (o.status !== 'Open')
+        return res.status(409).json({
+          error: `This deal is ${String(o.status).toLowerCase()}, so it is not on any investor's `
+            + 'portal and the link in the email would lead nowhere. Reopen it first, or send '
+            + 'yourself a preview.' });
+    }
+
+    /* The rule with no exceptions. The recipient's own name is taken out
+       before looking, so writing to Ada Coleman about a James Coleman is
+       not mistaken for naming him -- but her name WHOLE, never word by
+       word. Taking out every "Coleman" would take out his as well, which
+       is the one case this check exists for. "Ms Coleman" on its own is
+       therefore refused: there is no telling from the word whose it is,
+       and the error says to write her name in full. */
+    const own = investor ? String(investor.name || '').trim() : '';
+    const text = `${subject}\n${body}`.replace(own.length >= 3
+      ? new RegExp(own.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi')
+      : /$^/, '');
+    const found = [
+      ...namesLeftIn(text, { insured_last_name: o.insured_last_name,
+        insured2_last_name: o.insured2_last_name }),
+      ...[o.insured_first_name, o.insured2_first_name]
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length >= 3
+          && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(text)),
+    ];
+    if (found.length)
+      return res.status(400).json({
+        error: `The email names the insured (${[...new Set(found)].join(', ')}). `
+          + 'Use initials — a name never goes out by email.'
+          + (own && found.some((w) => new RegExp(`\\b${w}\\b`, 'i').test(own))
+            ? ` If that is ${own}'s own name, write it in full.` : ''),
+        names: [...new Set(found)] });
+
+    /* The document, drawn now, from the deal as it stands. */
+    const sheet = sheetFor(o);
+    const { share, interest } = sheetOptions(req.body);
+    const pdf = opportunityPdf(sheet, { share, interest });
+    const filename = sheetFilename(o);
+
+    const queued = await queueMail({
+      to,
+      userId: null,
+      kind: 'one_pager',
+      subject: preview ? `[Preview] ${subject}` : subject,
+      text: preview
+        ? `${body}\n\n— — —\nThis is a preview, sent only to you. Nothing has been shared `
+          + 'and nobody else has been written to.'
+        : body,
+      attachments: [{ filename, content: Buffer.from(pdf).toString('base64'),
+        content_type: 'application/pdf' }],
+      /* Replies go to the person who wrote it. */
+      replyTo: req.user.email || '',
+    });
+    if (queued.error) return res.status(500).json({ error: 'The email could not be queued.' });
+
+    if (!preview) {
+      /* Shared as it is sent, so the link in the note opens the deal.
+         Quietly: no "a new opportunity is available" message on top of
+         the one they are about to read. */
+      await q(
+        `INSERT INTO opportunity_shares (opportunity_id, investor_id, shared_by)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [o.id, investor.id, req.user.uid]);
+      await q(
+        `INSERT INTO opportunity_sends (opportunity_id, investor_id, to_email, subject,
+                                        share_pct, outbox_id, sent_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [o.id, investor.id, to, subject, share, queued.id || null, req.user.uid]);
+    }
+    await audit(req.user.uid, 'opportunity', o.id, preview ? 'read' : 'update',
+      preview ? 'sent themselves a preview of the one-pager email'
+        : `emailed the one-pager to ${investor.name}${share < 100 ? ` at ${share}%` : ''}`);
+
+    /* Sent now rather than at the worker's next minute, so the screen can
+       say "sent" and mean it -- or say what went wrong while the person
+       is still looking at it. */
+    if (queued.id) await flushMail({ ids: [queued.id] });
+    const { rows: st } = queued.id
+      ? await q('SELECT status, last_error FROM email_outbox WHERE id = $1', [queued.id])
+      : { rows: [] };
+    res.json({ ok: true, to, preview, status: st[0]?.status || 'Queued',
+      error: st[0]?.status === 'Failed' ? st[0].last_error : undefined });
+  }));
 
 router.post('/opportunities', blockInvestors, oppEdit, wrap(async (req, res) => {
   const funds = oppFundScope(req);
