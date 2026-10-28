@@ -659,17 +659,38 @@ export const TEMPLATES = {
       + `promise rather than a list. It is on the Investors page. ${link()}`,
   }),
 
-  mortality_alert: ({ likely, possible, checked, matches }) => ({
-    subject: Number(likely) > 0
-      ? `Mortality Watch: ${likely} likely ${Number(likely) === 1 ? 'match' : 'matches'} to review`
-      : `Mortality Watch: ${possible} possible ${Number(possible) === 1 ? 'match' : 'matches'} to review`,
-    text: `The latest Mortality Watch sweep filed notices for review.\n\n`
-      + `${matches}\n\n`
-      + `${checked} people were checked. The notices, the scoring and the Confirm and `
-      + `Dismiss buttons are on the Mortality Watch tab. ${link()}\n\n`
-      + 'An obituary is a lead, not proof. Confirm with a death certificate or the carrier '
-      + 'before filing a claim.',
-  }),
+  /* Three things a sweep can have to say, in order of urgency: death
+     notices, people gone too long without proof of life, and public
+     mentions suggesting somebody is alive. Each part only when there is
+     something in it. */
+  mortality_alert: ({ likely, possible, checked, matches, overdue_count, overdue, overdue_days,
+    life_count }) => {
+    /* A count is "there" when it is above zero -- or when it is a
+       {{placeholder}}, which is how the wording editor asks for the whole
+       template at once. */
+    const has = (v) => /^\{\{/.test(String(v)) || Number(v) > 0;
+    const plural = (v, one, many) => `${v} ${Number(v) === 1 ? one : many}`;
+    const nL = has(likely);
+    const nP = has(possible);
+    const nO = has(overdue_count);
+    const nLife = has(life_count);
+    const subject = nL ? `Mortality Watch: ${plural(likely, 'likely match', 'likely matches')} to review`
+      : nP ? `Mortality Watch: ${plural(possible, 'possible match', 'possible matches')} to review`
+        : nO ? `Mortality Watch: ${plural(overdue_count, 'person', 'people')} overdue for proof of life`
+          : `Mortality Watch: ${plural(life_count, 'sign', 'signs')} of life to review`;
+    return {
+      subject,
+      text: [
+        nL || nP ? `Death notices filed for review:\n\n${matches}` : null,
+        nO ? `No proof of life in over ${overdue_days} days:\n\n${overdue}` : null,
+        nLife ? `${plural(life_count, 'public mention', 'public mentions')} suggesting somebody is alive `
+          + 'can be accepted as proof of life on the tab.' : null,
+        `${checked} people were checked. Everything is on the Mortality Watch tab. ${link()}`,
+        nL || nP ? 'An obituary is a lead, not proof. Confirm with a death certificate or the '
+          + 'carrier before filing a claim.' : null,
+      ].filter(Boolean).join('\n\n'),
+    };
+  },
 
   test: ({ who }) => ({
     subject: 'Test message from the Poel Capital portal',
@@ -746,7 +767,10 @@ export const MAIL_FIELDS = {
     entity: 'Sommers Family Trust', when: '6 October 2026' },
   mortality_alert: { likely: '1', possible: '2', checked: '48',
     matches: '· M.K. — 92, likely · died 10/21/2026 · Dearborn, MI\n'
-      + '· H.W. — 63, possible · Sarasota, FL\n· B.F. — 55, possible' },
+      + '· H.W. — 63, possible · Sarasota, FL\n· B.F. — 55, possible',
+    overdue_count: '2', overdue_days: '90',
+    overdue: '· C.E. — last confirmed alive 6/2/2026\n· M.E. — nothing recorded yet',
+    life_count: '1' },
   test: { who: 'Jonathan Polter' },
 };
 

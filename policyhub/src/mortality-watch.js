@@ -598,6 +598,27 @@ export function buildQueries(p, maxQueries = 5) {
   return [...new Set(qs)].slice(0, maxQueries);
 }
 
+/**
+ * Searches for signs of life: the person named, recently, somewhere that
+ * is not an obituary. Fewer and plainer than the death queries -- a
+ * birthday, a community listing, a local news item -- because the point
+ * is a dated public trace, not a dossier.
+ */
+export function buildLifeQueries(p, maxQueries = 2) {
+  const place = [p.city, p.state].filter(Boolean).join(' ');
+  const qs = [
+    `"${p.first} ${p.last}" ${place} -obituary -obituaries`.replace(/\s+/g, ' ').trim(),
+    `"${p.first} ${p.last}" (birthday OR anniversary OR celebrates OR honored) -obituary`,
+  ];
+  if (p.nicknames[0]) qs.push(`"${p.nicknames[0]} ${p.last}" ${p.state} -obituary`.trim());
+  return [...new Set(qs)].slice(0, maxQueries);
+}
+
+/* Words that make a page a death notice, which a sign of life must not
+   be. A page that says "passed away" is the death search's business. */
+const DEATH_WORDS = /\b(obituar(?:y|ies)|passed away|died|in loving memory|funeral|shiva|memorial service|survived by|predeceased|interment|entered into rest|levaya|aveilim)\b/i;
+export const readsAsDeathNotice = (text) => DEATH_WORDS.test(String(text || ''));
+
 export const PROVIDERS = {
   brave: { env: 'BRAVE_API_KEY', label: 'Brave Search' },
   google_cse: { env: 'GOOGLE_API_KEY', label: 'Google Programmable Search' },
@@ -615,19 +636,20 @@ const ENDPOINT = {
 export const keyPresent = (provider) => !!process.env[PROVIDERS[provider]?.env || ''];
 
 class WebSearch {
-  constructor(row, log) {
+  constructor(row, log, life = false) {
     const o = row.options || {};
     this.name = row.name;
     this.log = log;
+    this.life = life;
     this.provider = o.provider || 'brave';
     this.key = process.env[PROVIDERS[this.provider]?.env || ''] || '';
     this.cx = o.cx || '';
     this.domains = Array.isArray(o.domains) ? o.domains.filter(Boolean) : [];
     this.maxResults = Number(o.max_results) || 8;
-    this.maxQueries = Number(o.max_queries) || (this.domains.length ? 2 : 5);
+    this.maxQueries = Number(o.max_queries) || (this.domains.length || life ? 2 : 5);
     this.fetchPages = o.fetch_pages !== false;
     this.maxFetch = Number(o.max_fetch) || 4;
-    this.freshnessDays = Number(o.freshness_days) || 120;
+    this.freshnessDays = Number(o.freshness_days) || (life ? 60 : 120);
     this.queries = 0;
   }
 
@@ -667,7 +689,8 @@ class WebSearch {
   async search(p) {
     if (!this.key) return [];
     const hits = new Map();
-    for (const qtext of buildQueries(p, this.maxQueries)) {
+    const queries = this.life ? buildLifeQueries(p, this.maxQueries) : buildQueries(p, this.maxQueries);
+    for (const qtext of queries) {
       try {
         for (const r of await this.query(qtext)) if (r.url && !hits.has(r.url)) hits.set(r.url, r);
       } catch (e) {
@@ -687,7 +710,8 @@ class WebSearch {
           fetched += 1;
         } catch { /* the snippet alone is still worth scoring */ }
       }
-      out.push({ url, source_name: this.name, title: r.title, text, published: r.date });
+      out.push({ url, source_name: this.name, title: r.title, text, published: r.date,
+        life: this.life });
     }
     return out;
   }
@@ -845,6 +869,7 @@ export class VendorFile {
 
 export const SOURCE_KINDS = {
   web_search: { label: 'Web search', make: (row, log) => new WebSearch(row, log) },
+  life_search: { label: 'Signs of life search', make: (row, log) => new WebSearch(row, log, true) },
   rss: { label: 'RSS / Atom feed', make: (row, log) => new Rss(row, log) },
   page: { label: 'Listing page', make: (row, log) => new ListingPage(row, log) },
 };
@@ -853,13 +878,14 @@ export const SOURCE_KINDS = {
 export function estimateQueries(rows, people) {
   let n = 0;
   for (const r of rows) {
-    if (!r.enabled || r.kind !== 'web_search') continue;
+    if (!r.enabled || !['web_search', 'life_search'].includes(r.kind)) continue;
     const o = r.options || {};
     const states = (r.states || []).map((s) => s.toUpperCase());
-    const max = Number(o.max_queries) || ((o.domains || []).length ? 2 : 5);
+    const life = r.kind === 'life_search';
+    const max = Number(o.max_queries) || ((o.domains || []).length || life ? 2 : 5);
     for (const p of people) {
       if (states.length && !states.includes(String(p.state || '').toUpperCase())) continue;
-      n += Math.min(max, buildQueries(person(p), max).length);
+      n += Math.min(max, (life ? buildLifeQueries(person(p), max) : buildQueries(person(p), max)).length);
     }
   }
   return n;
@@ -948,6 +974,63 @@ export async function watchedPeople() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Proof of life: who has gone too long without any
+ * ------------------------------------------------------------------ */
+
+export const LIFE_KINDS = {
+  call_insured: 'Spoke with the insured',
+  call_contact: 'Spoke with a family member or contact',
+  carrier: 'Carrier confirmation',
+  medical: 'New medical records',
+  tracking_form: 'Signed tracking or HIPAA form',
+  seen_online: 'Seen online by staff',
+  web_mention: 'Public web mention',
+  other: 'Other',
+};
+
+export async function overdueDays() {
+  const { rows } = await q("SELECT v FROM watch_meta WHERE k = 'life_overdue_days'");
+  const n = Number(rows[0]?.v);
+  return Number.isFinite(n) && n >= 1 ? Math.round(n) : 90;
+}
+
+/**
+ * Everybody watched whose last proof of life is older than the setting.
+ * Counted from when they were first watched if nothing has ever been
+ * recorded, so a new deployment does not declare the whole book overdue
+ * on its first morning.
+ */
+export async function overduePeople() {
+  const days = await overdueDays();
+  const { rows } = await q(
+    `SELECT w.id, w.name, w.insured_id, w.overdue_notified_at, w.created_at,
+            (SELECT MAX(e.observed_on) FROM watch_life_evidence e WHERE e.person_id = w.id) AS last_alive
+       FROM watch_people w
+       JOIN insureds i ON i.id = w.insured_id
+      WHERE w.watching AND w.status <> 'confirmed' AND i.date_of_death IS NULL
+        AND EXISTS (SELECT 1 FROM policies p WHERE p.insured_id = i.id AND p.status = ANY($1))`,
+    [ACTIVE_STATUSES]);
+  const cutoff = new Date(Date.now() - days * 864e5);
+  return rows.filter((r) => new Date(r.last_alive || r.created_at) < cutoff)
+    .map((r) => ({ ...r, days }));
+}
+
+/**
+ * Those who have gone overdue since the email last mentioned them --
+ * once per lapse, not every morning -- marked as mentioned.
+ */
+async function newlyOverdue() {
+  const out = [];
+  for (const r of await overduePeople()) {
+    const since = new Date(r.last_alive || r.created_at);
+    if (r.overdue_notified_at && new Date(r.overdue_notified_at) > since) continue;
+    out.push(r);
+    await q('UPDATE watch_people SET overdue_notified_at = now() WHERE id = $1', [r.id]);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
  * The sweep
  * ------------------------------------------------------------------ */
 
@@ -964,20 +1047,26 @@ async function fileMatches(p, row, cands, seen, known, on) {
   for (const c of cands) {
     if (!c.url || seen.has(c.url) || known.has(c.url)) continue;
     seen.add(c.url);
+    /* A sign of life is the same question -- is this our person? -- asked
+       of a page that must not be a death notice. One that reads as one is
+       left to the death search, which will find it on its own terms. */
+    if (c.life && readsAsDeathNotice(`${c.title}\n${c.text}`)) continue;
     const r = score(p, c, on);
     if (r.discarded_reason || r.score < POSSIBLE) continue;
+    const kind = c.life ? 'life' : 'death';
     const { rows } = await q(
       `INSERT INTO watch_matches (person_id, source_url, source_name, obit_name, obit_dod,
-                                  obit_place, score, factors, excerpt)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+                                  obit_place, score, factors, excerpt, kind, published)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)
        ON CONFLICT (person_id, source_url) DO NOTHING RETURNING id`,
-      [row.id, c.url.slice(0, 2000), c.source_name, r.obit_name, r.dod, r.place, r.score,
-        JSON.stringify(r.factors), String(c.text || '').slice(0, 600)]);
+      [row.id, c.url.slice(0, 2000), c.source_name, c.life ? String(c.title || '').slice(0, 200) : r.obit_name,
+        c.life ? null : r.dod, r.place, r.score, JSON.stringify(r.factors),
+        String(c.text || '').slice(0, 600), kind, c.published ? String(c.published).slice(0, 60) : null]);
     if (!rows[0]) continue;
     filed.push({ id: rows[0].id, person_id: row.id, insured_id: row.insured_id, name: p.name,
-      score: r.score, obit_dod: r.dod, obit_place: r.place });
+      score: r.score, obit_dod: c.life ? null : r.dod, obit_place: r.place, kind });
   }
-  if (filed.length)
+  if (filed.some((f) => f.kind === 'death'))
     await q(`UPDATE watch_people SET status = 'under_review' WHERE id = $1 AND status = 'active'`,
       [row.id]);
   return filed;
@@ -1045,7 +1134,8 @@ export async function runSweep({ trigger = 'manual', userId = null, onDone = nul
       `UPDATE watch_runs SET finished_at = now(), new_matches = $1, errors = $2::jsonb,
               queries = $3 WHERE id = $4`,
       [filed.length, JSON.stringify(errors), queries, runId]);
-    const result = { id: runId, checked: people.length, filed, errors, queries };
+    const overdue = await newlyOverdue();
+    const result = { id: runId, checked: people.length, filed, errors, queries, overdue };
     if (onDone) {
       try { await onDone(result); } catch (e) { console.error('[mortality] after the sweep:', e.message); }
     }
@@ -1103,8 +1193,10 @@ export async function checkOnce(input, on = today()) {
       for (const c of await impl.search(p)) {
         if (seen.has(c.url)) continue;
         seen.add(c.url);
+        if (c.life && readsAsDeathNotice(`${c.title}\n${c.text}`)) continue;
         const s = score(p, c, on);
-        out.push({ url: c.url, source_name: c.source_name, title: c.title, ...s, tier: tierOf(s) });
+        out.push({ url: c.url, source_name: c.source_name, title: c.title, ...s, tier: tierOf(s),
+          kind: c.life ? 'life' : 'death' });
       }
     } catch (e) { log(`${r.name}: ${e.message}`); }
   }

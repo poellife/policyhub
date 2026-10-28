@@ -2028,3 +2028,100 @@ SELECT x.kind, x.name, x.options::jsonb FROM (VALUES
 ) AS x(kind, name, options)
 WHERE NOT EXISTS (SELECT 1 FROM watch_meta WHERE k = 'sources_seeded');
 INSERT INTO watch_meta (k, v) VALUES ('sources_seeded', '1') ON CONFLICT DO NOTHING;
+
+/* ====================================================================
+   A request taken down by the office, and a deal lent to a manager
+   ====================================================================
+
+   Two small additions to how a deal is worked.
+
+   `opportunity_commitments.entered_by`: an investor who says "put me
+   down for 20%" on the telephone has made a request as surely as one
+   who typed it into the portal, and it should hold the space the same
+   way. An administrator or a portfolio manager can now enter it for
+   them. The column is the difference between the two -- empty when the
+   investor asked through the portal, the person who took it down when
+   they did not -- so nobody later mistakes a request taken by telephone
+   for one the investor typed.
+
+   `opportunity_access`: a portfolio manager sees the deals in his own
+   owner entities and nothing else. Sometimes one deal from somebody
+   else's entity needs his clients, or his eye. This lends him that one
+   deal, by name, without widening his entities -- he works it like one
+   of his own (reads it, edits it, shares it, takes requests on it) but
+   does not fund it, reopen it or delete it, because each of those acts
+   on an entity that is not his. An administrator grants and takes it
+   back. */
+ALTER TABLE opportunity_commitments ADD COLUMN IF NOT EXISTS entered_by INTEGER
+  REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS opportunity_access (
+  opportunity_id  INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  granted_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (opportunity_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opp_access_user ON opportunity_access (user_id);
+
+/* ====================================================================
+   Mortality Watch: proof of life
+   ====================================================================
+
+   Looking for a death notice answers half the question. The other half
+   -- when did we last know this person was alive? -- was answered from
+   memory, or from a spreadsheet, or not at all, and a person nobody has
+   heard from in a year is exactly the one whose death is likely to go
+   unnoticed.
+
+   watch_life_evidence   one dated piece of evidence that a person was
+                         alive on a day: a call with them or their
+                         contact, the carrier, new medical records, a
+                         signed tracking form, something seen online by
+                         a member of staff, or a public web mention the
+                         sweep found and an administrator accepted. The
+                         latest `observed_on` is their "last confirmed
+                         alive".
+
+   watch_matches.kind    'death' (an obituary, as before) or 'life' (a
+                         recent public mention suggesting they are alive,
+                         filed for an administrator to accept or reject).
+                         One table so a URL is never filed twice for the
+                         same person whichever way it was read.
+
+   watch_people.overdue_notified_at
+                         when the daily email last said this person had
+                         gone without proof of life too long, so it says
+                         so once per lapse rather than every morning.
+
+   The threshold itself ("flag after N days") is a setting on the tab,
+   kept in watch_meta. Nobody's social media is collected: an
+   administrator who looks at a profile by hand records that as
+   evidence like any other. */
+CREATE TABLE IF NOT EXISTS watch_life_evidence (
+  id            SERIAL PRIMARY KEY,
+  person_id     INTEGER NOT NULL REFERENCES watch_people(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL DEFAULT 'other',
+  observed_on   DATE NOT NULL,
+  note          TEXT NOT NULL DEFAULT '',
+  source_url    TEXT,
+  match_id      INTEGER REFERENCES watch_matches(id) ON DELETE SET NULL,
+  recorded_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_life_evidence_person ON watch_life_evidence (person_id, observed_on DESC);
+
+ALTER TABLE watch_matches ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'death';
+ALTER TABLE watch_matches ADD COLUMN IF NOT EXISTS published TEXT;
+ALTER TABLE watch_people ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMPTZ;
+
+INSERT INTO watch_meta (k, v) VALUES ('life_overdue_days', '90') ON CONFLICT DO NOTHING;
+
+/* The signs-of-life search, put in once, the same way the starting
+   sources were -- its own marker, so it reaches a database that already
+   has the others and is not put back if somebody deletes it. */
+INSERT INTO watch_sources (kind, name, options)
+SELECT 'life_search', 'Signs of life (Brave)',
+       '{"provider":"brave","max_queries":2,"fetch_pages":true,"freshness_days":60}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM watch_meta WHERE k = 'life_source_seeded');
+INSERT INTO watch_meta (k, v) VALUES ('life_source_seeded', '1') ON CONFLICT DO NOTHING;

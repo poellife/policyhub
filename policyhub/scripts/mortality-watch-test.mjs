@@ -85,7 +85,14 @@ const web = http.createServer((req, res) => {
     searches.push({ q: u.searchParams.get('q'), key: req.headers['x-subscription-token'] });
     const q = u.searchParams.get('q') || '';
     const results = [];
-    if (q.includes(KOW)) {
+    if (q.includes(KOW) && q.includes('-obituary')) {
+      /* A signs-of-life search: a birthday page, which counts, and a
+         memorial page, which reads as a death notice and must not. */
+      results.push({ title: `Margaret Ann ${KOW} celebrates 88th birthday`, url: `${WEB}/life/peggy`,
+        description: `Margaret Ann ${KOW} of Dearborn turned 88 this month.`, age: '2026-10-12' });
+      results.push({ title: `${KOW} family memorial`, url: `${WEB}/life/memorial`,
+        description: `In loving memory — the ${KOW} family of Dearborn.` });
+    } else if (q.includes(KOW)) {
       results.push({ title: `Margaret Ann ${KOW} Obituary - Dearborn, MI`, url: `${WEB}/obit/peggy`,
         description: `Margaret Ann ${KOW} of Dearborn passed away October 21, 2026.` });
       results.push({ title: `Margaret ${KOW}`, url: `${WEB}/obit/namesake`,
@@ -93,6 +100,9 @@ const web = http.createServer((req, res) => {
     }
     return send(200, JSON.stringify({ web: { results } }), 'application/json');
   }
+  if (u.pathname === '/life/peggy') return send(200, `<html><body><h1>Margaret Ann ${KOW} celebrates 88th birthday</h1>
+    <p>Margaret Ann ${KOW}, 88, of Dearborn, Michigan, celebrated with her daughter Linda on October 12.</p></body></html>`);
+  if (u.pathname === '/life/memorial') return send(200, `<p>In loving memory of the ${KOW} family of Dearborn, MI.</p>`);
   if (u.pathname === '/obit/peggy') return send(200, PEGGY_OBIT);
   if (u.pathname === '/obit/namesake') return send(200, NAMESAKE_OBIT);
   if (u.pathname === '/obit/claire') return send(200, CLAIRE_OBIT);
@@ -162,6 +172,8 @@ const wipe = async () => {
   await pool.query(`DELETE FROM watch_sources WHERE name LIKE $1`, [`${PREFIX}%`]);
 };
 
+let lastSummary = null;
+const whitPerson = () => (lastSummary?.people || []).find((p) => p.name === `Harold ${WHIT}`) || { id: -1 };
 const sweep = async () => {
   const started = await json(await api('/mortality-watch/run', { method: 'POST' }));
   if (started?.finished) return started.finished;
@@ -230,6 +242,10 @@ try {
     kind: 'page', name: `${PREFIX} listing`, options: { url: `${WEB}/listing` } } }));
   const s3 = await json(await api('/mortality-watch/sources', { method: 'POST', body: {
     kind: 'rss', name: `${PREFIX} feed`, options: { url: `${WEB}/feed.xml` }, states: 'fl, NY, xx1' } }));
+  const s4 = await json(await api('/mortality-watch/sources', { method: 'POST', body: {
+    kind: 'life_search', name: `${PREFIX} signs of life`, options: { provider: 'brave' } } }));
+  check('a signs-of-life search can be added, two searches a person by default',
+    !!s4?.id && s4.options?.max_queries === 2, JSON.stringify(s4?.options || s4));
   check('a search, a listing page and a feed can be added', !!s1?.id && !!s2?.id && !!s3?.id,
     JSON.stringify([s1, s2, s3].map((s) => s?.error || s?.id)));
   check('states are cleaned to two-letter codes', JSON.stringify(s3.states) === '["FL","NY"]',
@@ -276,6 +292,15 @@ try {
   check('the deal’s policies come with it, to say what is at stake',
     (pPeggy[0]?.policies || []).some((p) => p.policy_number === `${PREFIX}-PEGGY`));
 
+  console.log('\nSIGNS OF LIFE ARE FILED APART FROM DEATH NOTICES');
+  const life = d.life_pending.filter((m) => m.person_id === peggy.id);
+  check('a recent public mention is filed as a sign of life', life.length === 1
+    && life[0].source_url.endsWith('/life/peggy') && life[0].score >= 75,
+    JSON.stringify(life.map((m) => [m.score, m.source_url])));
+  check('and not in the death queue', !d.pending.some((m) => m.source_url.includes('/life/')));
+  check('a page that reads as a death notice is never filed as a sign of life',
+    !d.life_pending.some((m) => m.source_url.endsWith('/life/memorial')));
+
   console.log('\nTHE EMAIL');
   /* Read from the outbox rather than waited for: the portal's mail worker
      sends within a minute, and what matters here is what it was given. */
@@ -291,6 +316,7 @@ try {
   check('saying how many are likely', /1 likely match/.test(alert?.subject || ''), alert?.subject);
   check('in initials', /M\.K\. — 100, likely/.test(alert?.text || ''), (alert?.text || '').slice(0, 200));
   check('never the name', !new RegExp(`${KOW}|${ENG}|Margaret|Claire`).test(`${alert?.subject}\n${alert?.text}`));
+  check('and it mentions the sign of life waiting', /public mention/.test(alert?.text || ''));
   check('and never the notice’s own address', !(alert?.text || '').includes('/obit/'));
 
   console.log('\nTHE SAME NOTICE IS NEVER FILED TWICE');
@@ -332,6 +358,74 @@ try {
     && (await json(await api('/mortality-watch'))).pending.some((m) => m.id === pPeggy[0].id));
   check('a decided notice cannot be decided twice',
     (await api(`/mortality-watch/matches/${pClaire[0].id}/confirm`, { method: 'POST', body: {} })).status === 409);
+
+  console.log('\nPROOF OF LIFE');
+  check('a sign of life cannot be "confirmed" as a death',
+    (await api(`/mortality-watch/matches/${life[0].id}/confirm`, { method: 'POST', body: {} })).status === 400);
+  check('accepting one needs the date it shows them alive',
+    (await api(`/mortality-watch/matches/${life[0].id}/accept-life`, { method: 'POST', body: {} })).status === 400);
+  const acc = await api(`/mortality-watch/matches/${life[0].id}/accept-life`, { method: 'POST',
+    body: { observed_on: '2026-10-25', note: 'Birthday party' } });
+  check('it is accepted as proof of life', acc.status === 200, String(acc.status));
+  d = await json(await api('/mortality-watch'));
+  check('and becomes their last confirmed alive date',
+    String(d.people.find((p) => p.id === peggy.id)?.last_alive?.observed_on).startsWith('2026-10-25'),
+    JSON.stringify(d.people.find((p) => p.id === peggy.id)?.last_alive));
+  const dn = d.pending.find((m) => m.id === pPeggy[0].id);
+  check('which the death notice for her now shows, dated after the death it reports',
+    String(dn?.last_alive?.observed_on).startsWith('2026-10-25') && String(dn?.obit_dod).startsWith('2026-10-21'),
+    JSON.stringify([dn?.last_alive, dn?.obit_dod]));
+  check('it cannot be accepted twice',
+    (await api(`/mortality-watch/matches/${life[0].id}/accept-life`, { method: 'POST',
+      body: { observed_on: '2026-10-25' } })).status === 409);
+  await api(`/mortality-watch/matches/${life[0].id}/reopen`, { method: 'POST' });
+  check('reopening it takes the evidence back off',
+    !(await json(await api('/mortality-watch'))).people.find((p) => p.id === peggy.id)?.last_alive);
+  await api(`/mortality-watch/matches/${life[0].id}/accept-life`, { method: 'POST',
+    body: { observed_on: '2026-10-25' } });
+
+  const ev = (body) => api(`/mortality-watch/people/${claire.id}/evidence`, { method: 'POST', body });
+  check('evidence can be recorded by hand', (await ev({ kind: 'call_contact', observed_on: '2026-10-27',
+    note: 'Spoke with her son' })).status === 201);
+  check('not with a date in the future', (await ev({ kind: 'call_contact', observed_on: '2099-01-01' })).status === 400);
+  check('not as a "web mention", which only the sweep files',
+    (await ev({ kind: 'web_mention', observed_on: '2026-10-27' })).status === 400);
+  check('not with a link that is not a web address',
+    (await ev({ kind: 'seen_online', observed_on: '2026-10-27', source_url: 'javascript:alert(1)' })).status === 400);
+  const hist = await json(await api(`/mortality-watch/people/${claire.id}/evidence`));
+  check('and the history says who recorded what', hist.length === 1 && !!hist[0].recorded_by_name
+    && hist[0].kind === 'call_contact', JSON.stringify(hist.map((h) => [h.kind, h.recorded_by_name])));
+
+  console.log('\nOVERDUE FOR PROOF OF LIFE');
+  check('the warning cannot be set below a week',
+    (await api('/mortality-watch/settings', { method: 'PUT', body: { life_overdue_days: 3 } })).status === 400);
+  check('it can be set', (await api('/mortality-watch/settings', { method: 'PUT',
+    body: { life_overdue_days: 30 } })).status === 200);
+  const moe = eng.find((p) => p.name.startsWith('Moe'));
+  await pool.query("UPDATE watch_people SET created_at = now() - interval '60 days', overdue_notified_at = NULL WHERE id = $1", [moe.id]);
+  d = await json(await api('/mortality-watch'));
+  lastSummary = d;
+  check('somebody watched for 60 days with nothing recorded is overdue', d.people.find((p) => p.id === moe.id)?.overdue === true);
+  check('somebody with evidence from last week is not', d.people.find((p) => p.id === claire.id)?.overdue === false);
+  check('somebody only just added is not, however empty their record',
+    d.people.find((p) => p.id === whitPerson().id)?.overdue === false);
+  const t2 = new Date();
+  await sweep();
+  const { rows: od } = await pool.query(
+    "SELECT subject, body_text FROM email_outbox WHERE kind = 'mortality_alert' AND created_at >= $1", [t2]);
+  check('the next sweep emails that they are overdue, in initials',
+    od.some((m) => /No proof of life in over 30 days/.test(m.body_text) && /M\.E\. — nothing recorded yet/.test(m.body_text)),
+    (od[0]?.body_text || 'no email').slice(0, 200));
+  const t3 = new Date();
+  await sweep();
+  const { rows: od2 } = await pool.query(
+    "SELECT body_text FROM email_outbox WHERE kind = 'mortality_alert' AND created_at >= $1", [t3]);
+  check('and says so once, not every morning', !od2.some((m) => /M\.E\./.test(m.body_text)),
+    String(od2.length));
+  await api(`/mortality-watch/people/${moe.id}/evidence`, { method: 'POST',
+    body: { kind: 'tracking_form', observed_on: new Date().toISOString().slice(0, 10) } });
+  check('recording evidence clears it',
+    (await json(await api('/mortality-watch'))).people.find((p) => p.id === moe.id)?.overdue === false);
 
   console.log('\nA VENDOR FILE IS SCORED ON ARRIVAL');
   const whit = d.people.find((p) => p.name === `Harold ${WHIT}`);
@@ -408,6 +502,9 @@ try {
     page.slice(0, 200));
   check('and the reasons as ticks', await p.locator('.mw-factor.hit').count() > 0);
   check('and says plainly that confirming is not a date of death', /does not record a death/i.test(page));
+  check('a death notice shows proof of life dated after the death it reports',
+    /after the date of death in this notice/i.test(page));
+  check('the people list has a last-confirmed-alive column', /Last confirmed alive/i.test(page));
   check('the joint insured is listed as needing a date of birth', /Joint insured/.test(page) || /date of birth/.test(page));
   await p.locator(`[data-mw-confirm="${pPeggy[0].id}"]`).click();
   await p.waitForSelector('dialog[open]', { timeout: 10000 });
@@ -425,6 +522,7 @@ try {
 } catch (e) {
   check('the suite ran to the end', false, `${e.stack}\n${serverLog.slice(-800)}`);
 } finally {
+  await api('/mortality-watch/settings', { method: 'PUT', body: { life_overdue_days: 90 } }).catch(() => {});
   for (const id of restoreSources)
     await api(`/mortality-watch/sources/${id}`, { method: 'PUT', body: { enabled: true } }).catch(() => {});
   await wipe().catch(() => {});

@@ -1,0 +1,76 @@
+PolicyHub — all updates since 2026-10-07b, in one zip (build 2026-10-28c)
+
+WHAT'S IN IT
+  1. Email the one-pager to an investor, PDF attached, from the deal
+  2. Mortality Watch tab (admins only) — death-notice monitoring
+  3. Enter a request for an investor; lend one deal to a portfolio manager
+  4. Proof of life in Mortality Watch — evidence log, overdue flag,
+     signs of life from the web
+
+HOW TO UPLOAD (one folder at a time — loose files, not folders)
+  1. GitHub → your repo → open  policyhub → src
+     Add file → Upload files → drag in the 5 files from this zip's src folder:
+       api.js, mail.js, mortality-watch.js (new), schema.sql, server.js
+     Commit changes.
+  2. Go back → open  policyhub → public
+     Add file → Upload files → drag in the 3 files from this zip's public folder:
+       app.js, build.js, styles.css
+     Commit changes.
+  3. (Optional) policyhub → scripts: the 4 test files. Render does not use them.
+
+  Use the src folder INSIDE policyhub, not the src folder at the top level
+  of the repo.
+  Wait for each upload bar to finish before pressing Commit.
+  Render redeploys after each commit; the site may look half-updated for a
+  minute or two between the two commits.
+
+AFTER IT DEPLOYS
+  · Hard-refresh the portal (Cmd + Shift + R).
+  · Nothing to run on the database — new tables and columns are added
+    when the server starts.
+  · Render → Environment:
+      BRAVE_API_KEY     needed for Mortality Watch's web searches
+      RESEND_API_KEY    needed to send the one-pager by email
+                        (already set if other portal emails go out)
+      Optional: MW_RUN_HOUR (default 6), MW_TIMEZONE (default
+      America/Detroit), MW_SCHEDULE=off to stop the daily sweep.
+  · On the Mortality Watch tab, untick "Misaskim aveilim listings" (the
+    site blocks automated visits); keep "Misaskim (site search)" on.
+
+-------------------------------------------------------------------------
+1. EMAILING THE ONE-PAGER
+Deal → One-pager → Build it. Above the sheet: "Email it to an investor".
+Pick the investor (anyone on file; sending shares the deal with them),
+edit the subject and message, and Send — the PDF is attached. "Send me a
+preview" sends it only to you. Replies come back to you. Every send is
+listed on the deal under "One-pager emailed". It refuses to send an email
+that names the insured, and won't send a closed deal. The covering note
+now matches the scenario investors are shown.
+
+2. MORTALITY WATCH (menu, after Med Review; admins only)
+Watches everybody insured under a live policy, straight from the portal;
+a joint insured is two people. Daily sweep after 6 AM Eastern plus "Run a
+sweep now". Notices scored 50+ wait for "It's them — confirm" / "Not them —
+dismiss". Confirming does NOT record a date of death — enter that on the
+insured once certified. Sources are set on the tab; vendor death files are
+uploaded there; "Check a name" is a one-off lookup. Admins are emailed when
+anything is filed — initials only, never the name or the notice's link.
+
+3. ENTERING A REQUEST / LENDING A DEAL
+Deal → Investor interest → "Enter a request for an investor" (admins and
+portfolio managers): investor, percentage, request or confirmed. Same rules
+as the investor's own request; marked "entered by". A manager can do it
+only for his own investors.
+Deal → "Portfolio managers" card (admins): "Lend this deal" gives one
+manager this one deal. He works it like his own, but funding, reopening,
+deleting and moving it to another entity stay with its own entity.
+"Take it back" is immediate.
+
+4. PROOF OF LIFE (Mortality Watch)
+Each person has "Last confirmed alive", built from dated evidence you
+record ("Proof of life" button): calls, carrier, medical records, tracking
+forms, something seen online by staff. Overdue after 90 days (setting on
+the tab), named once in the daily email. A "Signs of life" search files
+recent public mentions that aren't death notices for you to accept. Each
+death notice shows the last proof of life, in red if it is dated after the
+death the notice reports. No automated social-media collection.

@@ -2108,3 +2108,13 @@ tr.mw-dim > td { opacity: 0.55; }
 /* Long source descriptions and family lists wrap rather than pushing the
    table off the side of the card. */
 td.mw-wrap { white-space: normal; }
+/* Proof of life. The line under each death notice turns red when the last
+   evidence of life is dated after the death the notice reports. */
+.mw-alive { font-size: 12.5px; margin: 0 0 8px; }
+.mw-alive.conflict { color: var(--critical); }
+.mw-life .mw-score-n { color: var(--success-text); }
+.mw-setting { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.mw-setting input { width: 80px; }
+.mw-life-history { max-height: 220px; overflow: auto; margin-bottom: 6px; }
+.mw-life-row { font-size: 13px; padding: 7px 0; border-bottom: 1px solid var(--grid); }
+.mw-rowbtns { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }

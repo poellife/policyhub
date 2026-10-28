@@ -20,6 +20,7 @@ import { parse as parseCsv } from 'csv-parse/sync';
 import {
   runSweep, runVendorFile, checkOnce, currentRun, syncPeople, estimateQueries, person as mwPerson,
   keyPresent, PROVIDERS, SOURCE_KINDS, VENDOR_FIELDS, scheduleSettings, LIKELY,
+  LIFE_KINDS, overdueDays, overduePeople,
 } from './mortality-watch.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
@@ -3103,8 +3104,23 @@ async function oppVisible(req, id) {
   if (o.status === 'Passed' && !canSeePassed(req)) return null;
   if (isInvestor(req)) return o.shared && o.status === 'Open' ? o : null;
   const funds = oppFundScope(req);
-  if (funds && !funds.includes(o.fund_id)) return null;
+  if (funds && !funds.includes(o.fund_id)) {
+    /* Not in his entities, but lent to him by name. He works it like one
+       of his own; `o.by_grant` is how the few routes that act on the
+       ENTITY (funding, reopening, deleting) tell the difference. */
+    if (!(await hasOppGrant(req, o.id))) return null;
+    o.by_grant = true;
+  }
   return o;
+}
+
+/** Has an administrator lent this one deal to this manager? */
+async function hasOppGrant(req, oppId) {
+  if (!req.user?.uid) return false;
+  const { rows } = await q(
+    'SELECT 1 FROM opportunity_access WHERE opportunity_id = $1 AND user_id = $2',
+    [oppId, req.user.uid]);
+  return !!rows[0];
 }
 
 /* Open → live. Passed → we said no; admin-only. Closed/Withdrawn → off the
@@ -3292,8 +3308,10 @@ async function loadOpportunity(req, id) {
          JOIN investors i ON i.id = s.investor_id
          LEFT JOIN users u ON u.id = s.shared_by
         WHERE s.opportunity_id = $1 ORDER BY s.shared_at, i.name`, [id]),
-    q(`SELECT c.*, i.name AS investor_name FROM opportunity_commitments c
+    q(`SELECT c.*, i.name AS investor_name, eu.full_name AS entered_by_name
+         FROM opportunity_commitments c
          JOIN investors i ON i.id = c.investor_id
+         LEFT JOIN users eu ON eu.id = c.entered_by
         WHERE c.opportunity_id = $1 ORDER BY c.requested_at`, [id]),
     q(`SELECT x.investor_id, x.reason, x.passed_at, i.name AS investor_name
          FROM opportunity_passes x JOIN investors i ON i.id = x.investor_id
@@ -3332,6 +3350,27 @@ async function loadOpportunity(req, id) {
        tell from silence, and the list it works from when deciding whom
        to chase. */
     o.passes = passes.rows;
+    /* Which managers can work this deal, and why: their entity, or a loan
+       of this one deal. Administrators only -- it is who-has-access, and
+       granting is theirs. A manager is told only whether he himself is
+       here on loan. */
+    if (isAdmin(req)) {
+      o.manager_access = (await q(
+        `SELECT u.id AS user_id, u.full_name, u.email,
+                (o.fund_id = ANY(COALESCE(
+                  (SELECT array_agg(mf.fund_id) FROM user_funds mf WHERE mf.user_id = u.id),
+                  '{}'))) AS via_entity,
+                g.granted_at, gb.full_name AS granted_by_name
+           FROM users u
+           JOIN opportunities o ON o.id = $1
+           LEFT JOIN opportunity_access g ON g.opportunity_id = o.id AND g.user_id = u.id
+           LEFT JOIN users gb ON gb.id = g.granted_by
+          WHERE u.role = 'manager' AND u.is_active = TRUE
+          ORDER BY u.full_name, u.email`, [id])).rows;
+    } else if (isManager(req)) {
+      const funds = oppFundScope(req) || [];
+      o.by_grant = !funds.includes(o.fund_id);
+    }
     /* Who was emailed the sheet from here, and whether it went. The
        outbox status rides along so a bounced address shows on the deal
        rather than only in the mail log nobody opens. */
@@ -3490,7 +3529,10 @@ router.get('/opportunities', wrap(async (req, res) => {
       WHERE ($1::int IS NULL OR (o.status = 'Open' AND EXISTS (
                SELECT 1 FROM opportunity_shares s
                 WHERE s.opportunity_id = o.id AND s.investor_id = $1)))
-        AND ($2::int[] IS NULL OR o.fund_id = ANY($2))
+        AND ($2::int[] IS NULL OR o.fund_id = ANY($2)
+             -- or lent to this manager by name, one deal at a time
+             OR EXISTS (SELECT 1 FROM opportunity_access g
+                         WHERE g.opportunity_id = o.id AND g.user_id = $5))
         -- A passed deal is on file but off the list, for everybody but an admin.
         AND (o.status <> 'Passed' OR $3::boolean)
         /* The entity picker, the same one the policies grid and the
@@ -3501,7 +3543,7 @@ router.get('/opportunities', wrap(async (req, res) => {
            who holds percentages of deals rather than entities. */
         AND ($4 = '' OR $1::int IS NOT NULL OR f.code = ANY(string_to_array($4, ',')))
       ORDER BY (o.status = 'Open') DESC, o.offer_closes_on NULLS LAST, o.created_at DESC`,
-    [me, funds, canSeePassed(req), fundParam(req.query.fund)]
+    [me, funds, canSeePassed(req), fundParam(req.query.fund), req.user?.uid ?? -1]
   );
 
   // Pull every schedule in one query: a rate computed from the stated
@@ -3579,8 +3621,10 @@ router.get('/opportunities/summary', wrap(async (req, res) => {
       WHERE o.status = 'Open'
         AND ($1::int IS NULL OR EXISTS (SELECT 1 FROM opportunity_shares s
               WHERE s.opportunity_id = o.id AND s.investor_id = $1))
-        AND ($2::int[] IS NULL OR o.fund_id = ANY($2))`,
-    [me, funds]
+        AND ($2::int[] IS NULL OR o.fund_id = ANY($2)
+             OR EXISTS (SELECT 1 FROM opportunity_access g
+                         WHERE g.opportunity_id = o.id AND g.user_id = $3))`,
+    [me, funds, req.user?.uid ?? -1]
   );
   // For an investor the badge counts what they have not answered yet; for
   // staff it counts what is live.
@@ -3982,8 +4026,15 @@ async function syncScheduleToBenefit(oppId, faceAmount) {
 }
 
 router.put('/opportunities/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
-  if (!(await oppVisible(req, req.params.id)))
-    return res.status(404).json({ error: 'Opportunity not found' });
+  const seen = await oppVisible(req, req.params.id);
+  if (!seen) return res.status(404).json({ error: 'Opportunity not found' });
+  /* A deal lent to a manager stays in the entity it belongs to. Without
+     this, the rule below -- "the new entity must be one of yours" -- would
+     let him move it into his own book, which turns a loan into a transfer. */
+  if (seen.by_grant && 'fund_id' in req.body && int(req.body.fund_id) !== seen.fund_id)
+    return res.status(403).json({
+      error: 'This deal was lent to you to work on and stays in its own owner entity. '
+        + 'An administrator can move it.' });
   const funds = oppFundScope(req);
   if (funds && 'fund_id' in req.body && !funds.includes(int(req.body.fund_id)))
     return res.status(403).json({ error: 'That owner entity is not one of yours' });
@@ -4173,8 +4224,14 @@ router.delete('/opportunities/:id/notes/:noteId', blockInvestors, blockMedical,
 
 router.delete('/opportunities/:id', blockInvestors, requireRole('admin', 'manager'),
   wrap(async (req, res) => {
-    if (!(await oppVisible(req, req.params.id)))
-      return res.status(404).json({ error: 'Opportunity not found' });
+    const seen = await oppVisible(req, req.params.id);
+    if (!seen) return res.status(404).json({ error: 'Opportunity not found' });
+    /* A deal lent to a manager is worked, not owned: deleting it would
+       take a record out of somebody else's entity. */
+    if (seen.by_grant)
+      return res.status(403).json({
+        error: 'This deal belongs to another owner entity and was lent to you to work on. '
+          + 'Ask an administrator to delete it.' });
     const { rows } = await q('SELECT * FROM opportunities WHERE id = $1', [req.params.id]);
     await audit(req.user.uid, 'opportunity', Number(req.params.id), 'delete',
       `${rows[0].policy_number || rows[0].insured_last_name} · ${rows[0].carrier_name}`);
@@ -5518,6 +5575,141 @@ router.delete('/opportunities/:id/pass', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* ==================================================================== *
+ * A request taken down for an investor
+ *
+ * An investor who rings and says "put me down for 20%" has asked as
+ * surely as one who typed it into the portal, and the request should
+ * hold the space the same way -- so an administrator or a portfolio
+ * manager can enter it for them, as a request still to be confirmed or
+ * as already confirmed.
+ *
+ * Every rule the investor's own request is held to holds here too: the
+ * deal must be open, the slice must fit in what is left, and it must
+ * clear the minimum take. The one difference is recorded rather than
+ * hidden: `entered_by` says who took it down, so nobody later mistakes
+ * a telephone request for one the investor typed.
+ *
+ * Entering it also shares the deal with the investor if it was not
+ * already -- they have a piece of it, so they should be able to see it
+ * -- and clears a "not for me" they had given, since they have plainly
+ * changed their mind.
+ * ==================================================================== */
+router.post('/opportunities/:id/commitments', blockInvestors, requireRole('admin', 'manager'),
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const investorId = int(req.body.investor_id);
+    if (!investorId) return res.status(400).json({ error: 'Choose the investor.' });
+    const pct = num(req.body.pct);
+    if (!pct || pct <= 0 || pct > 100)
+      return res.status(400).json({ error: 'Enter the percentage, between 0 and 100.' });
+    const status = str(req.body.status) === 'Confirmed' ? 'Confirmed' : 'Requested';
+    const { rows: inv } = await q('SELECT id, name FROM investors WHERE id = $1', [investorId]);
+    if (!inv[0]) return res.status(404).json({ error: 'That investor is not on file.' });
+    if ((await investorsOutOfScope(req, [investorId])).length)
+      return res.status(403).json({
+        error: `${inv[0].name} is not one of your investors. An administrator can enter it, `
+          + 'or grant you that investor first.' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: lock } = await client.query(
+        'SELECT id, status FROM opportunities WHERE id = $1 FOR UPDATE', [req.params.id]);
+      const o = lock[0];
+      if (o.status !== 'Open') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `This deal is ${String(o.status).toLowerCase()}, not open.` });
+      }
+      const { rows: sum } = await client.query(
+        `SELECT COALESCE(SUM(pct),0) AS taken FROM opportunity_commitments
+          WHERE opportunity_id = $1 AND status IN ('Requested','Confirmed') AND investor_id <> $2`,
+        [o.id, investorId]);
+      const remaining = 100 - Number(sum[0].taken);
+      if (pct > remaining + 1e-9) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: remaining <= 0 ? 'This deal is fully spoken for.'
+            : `Only ${pctText(Math.max(0, remaining))} is still available.`,
+          remaining_pct: Math.max(0, remaining) });
+      }
+      const floor = minimumTake(remaining);
+      if (pct < floor - 1e-9) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: floor < MIN_COMMITMENT_PCT
+            ? `Only ${pctText(remaining)} is left, and the last slice is taken whole — enter ${pctText(floor)}.`
+            : `The smallest share is ${pctText(MIN_COMMITMENT_PCT)}.`,
+          min_commitment_pct: floor });
+      }
+      const note = str(req.body.notes).trim().slice(0, 1000);
+      const { rows } = await client.query(
+        `INSERT INTO opportunity_commitments (opportunity_id, investor_id, pct, status, notes,
+                                              entered_by, decided_at, decided_by)
+         VALUES ($1,$2,$3,$4,$5,$6,
+                 CASE WHEN $4 = 'Confirmed' THEN now() END,
+                 CASE WHEN $4 = 'Confirmed' THEN $6::int END)
+         ON CONFLICT (opportunity_id, investor_id) DO UPDATE
+           SET pct = EXCLUDED.pct, status = EXCLUDED.status, notes = EXCLUDED.notes,
+               entered_by = EXCLUDED.entered_by, requested_at = now(),
+               decided_at = EXCLUDED.decided_at, decided_by = EXCLUDED.decided_by
+         RETURNING *`,
+        [o.id, investorId, pct, status, note, req.user.uid]);
+      await client.query(
+        `INSERT INTO opportunity_shares (opportunity_id, investor_id, shared_by)
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [o.id, investorId, req.user.uid]);
+      await client.query(
+        'DELETE FROM opportunity_passes WHERE opportunity_id = $1 AND investor_id = $2',
+        [o.id, investorId]);
+      await client.query('COMMIT');
+      await audit(req.user.uid, 'opportunity', o.id, 'update',
+        `entered ${pctText(pct)} for ${inv[0].name} on their behalf (${status.toLowerCase()})`);
+      res.status(201).json(rows[0]);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }));
+
+/* ==================================================================== *
+ * Lending one deal to a manager
+ *
+ * Administrators only. The manager works it like one of his own deals --
+ * it appears on his list and in his count -- but funding, reopening and
+ * deleting stay with whoever manages the entity it belongs to. Taking it
+ * back is immediate: the next thing he opens is refused.
+ * ==================================================================== */
+router.post('/opportunities/:id/access', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
+    const userId = int(req.body.user_id);
+    const { rows: u } = await q(
+      "SELECT id, full_name, email FROM users WHERE id = $1 AND role = 'manager' AND is_active = TRUE",
+      [userId]);
+    if (!u[0]) return res.status(400).json({ error: 'Choose an active portfolio manager.' });
+    await q(
+      `INSERT INTO opportunity_access (opportunity_id, user_id, granted_by)
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [int(req.params.id), userId, req.user.uid]);
+    await audit(req.user.uid, 'opportunity', int(req.params.id), 'update',
+      `lent this deal to ${u[0].full_name || u[0].email}`);
+    res.json({ ok: true });
+  }));
+
+router.delete('/opportunities/:id/access/:userId', blockInvestors, requireRole('admin'),
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `DELETE FROM opportunity_access WHERE opportunity_id = $1 AND user_id = $2
+       RETURNING user_id`, [int(req.params.id), int(req.params.userId)]);
+    if (!rows[0]) return res.status(404).json({ error: 'That manager had not been lent this deal.' });
+    await audit(req.user.uid, 'opportunity', int(req.params.id), 'update',
+      `took this deal back from manager ${int(req.params.userId)}`);
+    res.json({ ok: true });
+  }));
+
 /** A manager confirms or declines a request. */
 router.put('/opportunity-commitments/:id', blockInvestors, oppEdit, wrap(async (req, res) => {
   const decision = str(req.body.status);
@@ -5548,8 +5740,16 @@ router.put('/opportunity-commitments/:id', blockInvestors, oppEdit, wrap(async (
  */
 router.post('/opportunities/:id/fund', blockInvestors, requireRole('admin', 'manager'),
   wrap(async (req, res) => {
-    if (!(await oppVisible(req, req.params.id)))
-      return res.status(404).json({ error: 'Opportunity not found' });
+    const seen = await oppVisible(req, req.params.id);
+    if (!seen) return res.status(404).json({ error: 'Opportunity not found' });
+    /* Funding puts a policy into the deal's owner entity. A manager the
+       deal was lent to does not manage that entity, so the step is left
+       to whoever does. */
+    if (seen.by_grant)
+      return res.status(403).json({
+        error: 'This deal belongs to another owner entity and was lent to you to work on. '
+          + 'Funding puts the policy into that entity, so an administrator or its own manager '
+          + 'does that step.' });
     const o = await loadOpportunity(req, req.params.id);
     if (o.policy_id) return res.status(409).json({ error: 'This opportunity has already been funded' });
     if (!str(o.policy_number) || !str(o.carrier_name))
@@ -10787,9 +10987,12 @@ router.get('/audit', blockScoped, requireRole('admin'), wrap(async (req, res) =>
  * a score, never a name and never the notice's own address.
  */
 export async function mortalityAlert(result) {
-  const filed = result?.filed || [];
-  if (!filed.length) return;
-  const ids = [...new Set(filed.map((f) => f.person_id))];
+  const all = result?.filed || [];
+  const filed = all.filter((f) => f.kind !== 'life');
+  const lifeCount = all.length - filed.length;
+  const overdue = result?.overdue || [];
+  if (!filed.length && !overdue.length && !lifeCount) return;
+  const ids = [...new Set([...filed.map((f) => f.person_id), ...overdue.map((o) => o.id)])];
   const { rows: ppl } = await q('SELECT id, name FROM watch_people WHERE id = ANY($1)', [ids]);
   const nameOf = new Map(ppl.map((p) => [p.id, p.name]));
   const initials = (full) => {
@@ -10806,18 +11009,32 @@ export async function mortalityAlert(result) {
   const { rows: admins } = await q(
     `SELECT id, email, full_name FROM users WHERE role = 'admin' AND is_active = TRUE
        AND email <> ''`);
+  const usDate = (d) => new Date(`${String(d).slice(0, 10)}T00:00:00Z`)
+    .toLocaleDateString('en-US', { timeZone: 'UTC' });
+  const overdueLines = overdue.slice(0, 25).map((o) => `· ${initials(o.name)} — ${
+    o.last_alive ? `last confirmed alive ${usDate(o.last_alive)}` : 'nothing recorded yet'}`);
+  if (overdue.length > 25) overdueLines.push(`· and ${overdue.length - 25} more on the tab`);
   for (const a of admins)
     await sendMail('mortality_alert', { to: a.email, userId: a.id, name: a.full_name,
       likely: String(likely), possible: String(filed.length - likely),
-      checked: String(result.checked), matches: lines.join('\n') });
+      checked: String(result.checked), matches: lines.join('\n'),
+      overdue_count: String(overdue.length), overdue: overdueLines.join('\n'),
+      overdue_days: String(overdue[0]?.days ?? await overdueDays()),
+      life_count: String(lifeCount) });
 }
 
 /** Everything the tab shows, in one read. */
 router.get('/mortality-watch', wrap(async (req, res) => {
   await syncPeople();
-  const [pending, reviewed, people, sources, runs] = await Promise.all([
+  const [pending, reviewed, people, sources, runs, lifePending, overdue, days] = await Promise.all([
     q(`SELECT m.*, w.name AS person_name, w.insured_id, w.dob AS person_dob,
               w.city AS person_city, w.state AS person_state,
+              /* The last proof of life beside every death notice: a notice
+                 that says "died the 21st" reads differently next to a call
+                 with them on the 25th. */
+              (SELECT json_build_object('observed_on', e.observed_on, 'kind', e.kind)
+                 FROM watch_life_evidence e WHERE e.person_id = w.id
+                ORDER BY e.observed_on DESC, e.id DESC LIMIT 1) AS last_alive,
               i.display_name, i.first_name AS insured_first, i.last_name AS insured_last,
               (SELECT json_agg(json_build_object('id', p.id, 'policy_number', p.policy_number,
                         'carrier', p.carrier_name, 'status', p.status, 'fund', f.code,
@@ -10827,9 +11044,9 @@ router.get('/mortality-watch', wrap(async (req, res) => {
          FROM watch_matches m
          JOIN watch_people w ON w.id = m.person_id
          JOIN insureds i ON i.id = w.insured_id
-        WHERE m.status = 'pending'
+        WHERE m.status = 'pending' AND m.kind = 'death'
         ORDER BY m.score DESC, m.found_at DESC`),
-    q(`SELECT m.id, m.status, m.score, m.obit_name, m.obit_dod, m.source_name, m.source_url,
+    q(`SELECT m.id, m.kind, m.status, m.score, m.obit_name, m.obit_dod, m.source_name, m.source_url,
               m.reviewed_at, m.reviewer_note, w.name AS person_name, w.insured_id,
               u.full_name AS reviewed_by_name
          FROM watch_matches m
@@ -10842,7 +11059,10 @@ router.get('/mortality-watch', wrap(async (req, res) => {
               EXISTS (SELECT 1 FROM policies p WHERE p.insured_id = w.insured_id
                        AND p.status = ANY('{Inforce,Grace,Pending}')) AS in_book,
               (SELECT COUNT(*)::int FROM watch_matches m
-                WHERE m.person_id = w.id AND m.status = 'pending') AS pending,
+                WHERE m.person_id = w.id AND m.status = 'pending' AND m.kind = 'death') AS pending,
+              (SELECT json_build_object('observed_on', e.observed_on, 'kind', e.kind)
+                 FROM watch_life_evidence e WHERE e.person_id = w.id
+                ORDER BY e.observed_on DESC, e.id DESC LIMIT 1) AS last_alive,
               (SELECT json_agg(json_build_object('id', p.id, 'policy_number', p.policy_number,
                         'status', p.status) ORDER BY p.policy_number)
                  FROM policies p WHERE p.insured_id = w.insured_id) AS policies
@@ -10852,14 +11072,26 @@ router.get('/mortality-watch', wrap(async (req, res) => {
     q(`SELECT r.*, u.full_name AS triggered_by_name FROM watch_runs r
          LEFT JOIN users u ON u.id = r.triggered_by
         ORDER BY r.started_at DESC LIMIT 15`),
+    q(`SELECT m.*, w.name AS person_name, w.insured_id, w.dob AS person_dob,
+              w.city AS person_city, w.state AS person_state
+         FROM watch_matches m JOIN watch_people w ON w.id = m.person_id
+        WHERE m.status = 'pending' AND m.kind = 'life'
+        ORDER BY m.score DESC, m.found_at DESC`),
+    overduePeople(),
+    overdueDays(),
   ]);
+  const overdueIds = new Set(overdue.map((o) => o.id));
   const watched = people.rows.filter((p) => p.watching && p.in_book && !p.insured_dod
     && p.status !== 'confirmed');
   const sched = scheduleSettings();
   res.json({
     pending: pending.rows,
+    life_pending: lifePending.rows,
     reviewed: reviewed.rows,
-    people: people.rows,
+    people: people.rows.map((p) => ({ ...p, overdue: overdueIds.has(p.id) })),
+    overdue_count: overdue.length,
+    overdue_days: days,
+    life_kinds: LIFE_KINDS,
     sources: sources.rows,
     runs: runs.rows,
     running: currentRun(),
@@ -10906,13 +11138,15 @@ const oneMatch = async (id) => (await q(
 router.post('/mortality-watch/matches/:id/confirm', wrap(async (req, res) => {
   const m = await oneMatch(req.params.id);
   if (!m) return res.status(404).json({ error: 'That notice is not on file' });
+  if (m.kind === 'life')
+    return res.status(400).json({ error: 'That is a sign of life, not a death notice — accept it as proof of life instead.' });
   if (m.status !== 'pending') return res.status(409).json({ error: 'That notice has already been decided.' });
   const note = str(req.body.note).trim().slice(0, 1000);
   await q(`UPDATE watch_matches SET status = 'confirmed', reviewed_at = now(), reviewed_by = $2,
                   reviewer_note = $3 WHERE id = $1`, [m.id, req.user.uid, note]);
   await q(`UPDATE watch_matches SET status = 'dismissed', reviewed_at = now(), reviewed_by = $2,
                   reviewer_note = 'Superseded — another notice was confirmed'
-            WHERE person_id = $1 AND status = 'pending'`, [m.person_id, req.user.uid]);
+            WHERE person_id = $1 AND status = 'pending' AND kind = 'death'`, [m.person_id, req.user.uid]);
   await q(`UPDATE watch_people SET status = 'confirmed', updated_at = now() WHERE id = $1`,
     [m.person_id]);
   await audit(req.user.uid, 'insured', m.insured_id, 'update',
@@ -10930,7 +11164,8 @@ router.post('/mortality-watch/matches/:id/dismiss', wrap(async (req, res) => {
   /* Back to plain watching once nothing is waiting on them. */
   await q(`UPDATE watch_people SET status = 'active', updated_at = now()
             WHERE id = $1 AND status = 'under_review'
-              AND NOT EXISTS (SELECT 1 FROM watch_matches WHERE person_id = $1 AND status = 'pending')`,
+              AND NOT EXISTS (SELECT 1 FROM watch_matches WHERE person_id = $1 AND status = 'pending'
+                                AND kind = 'death')`,
   [m.person_id]);
   await audit(req.user.uid, 'insured', m.insured_id, 'update',
     `Mortality Watch: dismissed a notice (score ${m.score})${note ? ` — ${note.slice(0, 80)}` : ''}`);
@@ -10944,8 +11179,14 @@ router.post('/mortality-watch/matches/:id/reopen', wrap(async (req, res) => {
   if (m.status === 'pending') return res.status(409).json({ error: 'That notice is already waiting.' });
   await q(`UPDATE watch_matches SET status = 'pending', reviewed_at = NULL, reviewed_by = NULL,
                   reviewer_note = '' WHERE id = $1`, [m.id]);
-  await q(`UPDATE watch_people SET status = 'under_review', updated_at = now() WHERE id = $1`,
-    [m.person_id]);
+  if (m.kind === 'life') {
+    /* An accepted sign of life put a piece of evidence on file; reopening
+       it takes that piece away again. */
+    await q('DELETE FROM watch_life_evidence WHERE match_id = $1', [m.id]);
+  } else {
+    await q(`UPDATE watch_people SET status = 'under_review', updated_at = now() WHERE id = $1`,
+      [m.person_id]);
+  }
   await audit(req.user.uid, 'insured', m.insured_id, 'update',
     `Mortality Watch: reopened a ${m.status} notice`);
   res.json({ ok: true });
@@ -10984,7 +11225,7 @@ function cleanSource(body) {
   if (!name) return { error: 'Give the source a name.' };
   const o = body.options && typeof body.options === 'object' ? body.options : {};
   const options = {};
-  if (kind === 'web_search') {
+  if (kind === 'web_search' || kind === 'life_search') {
     options.provider = PROVIDERS[o.provider] ? o.provider : 'brave';
     const domains = (Array.isArray(o.domains) ? o.domains : String(o.domains || '').split(/[\s,]+/))
       .map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
@@ -10994,8 +11235,8 @@ function cleanSource(body) {
       const x = Math.round(Number(v));
       return Number.isFinite(x) && x >= lo && x <= hi ? x : dflt;
     };
-    options.max_queries = n(o.max_queries, 1, 8, domains.length ? 2 : 5);
-    options.freshness_days = n(o.freshness_days, 1, 3650, 120);
+    options.max_queries = n(o.max_queries, 1, 8, domains.length || kind === 'life_search' ? 2 : 5);
+    options.freshness_days = n(o.freshness_days, 1, 3650, kind === 'life_search' ? 60 : 120);
     options.fetch_pages = o.fetch_pages !== false;
     if (options.provider === 'google_cse') options.cx = str(o.cx).trim().slice(0, 100);
   } else {
@@ -11057,6 +11298,103 @@ router.post('/mortality-watch/check', wrap(async (req, res) => {
     prior_residence: str(req.body.prior_residence), family: str(req.body.family) });
   await audit(req.user.uid, 'mortality_watch', null, 'read', 'ran a one-off Mortality Watch lookup');
   res.json(out);
+}));
+
+/* ------------------------------------------------------------------ *
+ * Proof of life
+ *
+ * Dated evidence that a person was alive on a day, recorded by hand or
+ * accepted from the sweep. The latest date is their "last confirmed
+ * alive"; anybody without one inside the setting is flagged on the tab
+ * and, once per lapse, in the daily email.
+ * ------------------------------------------------------------------ */
+const onePerson = async (id) => (await q('SELECT * FROM watch_people WHERE id = $1', [int(id)])).rows[0];
+
+router.get('/mortality-watch/people/:id/evidence', wrap(async (req, res) => {
+  const p = await onePerson(req.params.id);
+  if (!p) return res.status(404).json({ error: 'Not on the watch list' });
+  const { rows } = await q(
+    `SELECT e.*, u.full_name AS recorded_by_name FROM watch_life_evidence e
+       LEFT JOIN users u ON u.id = e.recorded_by
+      WHERE e.person_id = $1 ORDER BY e.observed_on DESC, e.id DESC`, [p.id]);
+  res.json(rows);
+}));
+
+/** A date in the past or today, in the office's sense of today. */
+const pastDate = (v) => {
+  const d = date(v);
+  if (!d) return null;
+  return d > new Date().toISOString().slice(0, 10) ? 'future' : d;
+};
+
+router.post('/mortality-watch/people/:id/evidence', wrap(async (req, res) => {
+  const p = await onePerson(req.params.id);
+  if (!p) return res.status(404).json({ error: 'Not on the watch list' });
+  const kind = LIFE_KINDS[str(req.body.kind)] && str(req.body.kind) !== 'web_mention'
+    ? str(req.body.kind) : null;
+  if (!kind) return res.status(400).json({ error: 'Say what the evidence was.' });
+  const on = pastDate(req.body.observed_on);
+  if (!on) return res.status(400).json({ error: 'The date they were known to be alive is needed.' });
+  if (on === 'future') return res.status(400).json({ error: 'That date is in the future.' });
+  const src = req.body.source_url ? url(req.body.source_url) : null;
+  if (req.body.source_url && !src)
+    return res.status(400).json({ error: 'A link has to be a web address starting http:// or https://.' });
+  const { rows } = await q(
+    `INSERT INTO watch_life_evidence (person_id, kind, observed_on, note, source_url, recorded_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [p.id, kind, on, str(req.body.note).trim().slice(0, 1000), src, req.user.uid]);
+  await audit(req.user.uid, 'insured', p.insured_id, 'update',
+    `Mortality Watch: recorded proof of life (${LIFE_KINDS[kind]}, ${on})`);
+  res.status(201).json(rows[0]);
+}));
+
+router.delete('/mortality-watch/evidence/:id', wrap(async (req, res) => {
+  const { rows } = await q(
+    `DELETE FROM watch_life_evidence e USING watch_people w
+      WHERE e.id = $1 AND w.id = e.person_id RETURNING e.kind, e.observed_on, e.match_id, w.insured_id`,
+    [int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not on file' });
+  /* Evidence that came from an accepted web mention takes the mention
+     back to the queue with it, so the two never disagree. */
+  if (rows[0].match_id)
+    await q(`UPDATE watch_matches SET status = 'pending', reviewed_at = NULL, reviewed_by = NULL
+              WHERE id = $1`, [rows[0].match_id]);
+  await audit(req.user.uid, 'insured', rows[0].insured_id, 'update',
+    'Mortality Watch: removed a piece of proof of life');
+  res.json({ ok: true });
+}));
+
+/** A public mention the sweep filed: "yes, that is them, alive on this date". */
+router.post('/mortality-watch/matches/:id/accept-life', wrap(async (req, res) => {
+  const m = await oneMatch(req.params.id);
+  if (!m) return res.status(404).json({ error: 'That mention is not on file' });
+  if (m.kind !== 'life') return res.status(400).json({ error: 'That is a death notice, not a sign of life.' });
+  if (m.status !== 'pending') return res.status(409).json({ error: 'That mention has already been decided.' });
+  const on = pastDate(req.body.observed_on);
+  if (!on) return res.status(400).json({ error: 'The date the mention shows them alive is needed.' });
+  if (on === 'future') return res.status(400).json({ error: 'That date is in the future.' });
+  const note = str(req.body.note).trim().slice(0, 1000);
+  await q(`UPDATE watch_matches SET status = 'confirmed', reviewed_at = now(), reviewed_by = $2,
+                  reviewer_note = $3 WHERE id = $1`, [m.id, req.user.uid, note]);
+  await q(
+    `INSERT INTO watch_life_evidence (person_id, kind, observed_on, note, source_url, match_id, recorded_by)
+     VALUES ($1,'web_mention',$2,$3,$4,$5,$6)`,
+    [m.person_id, on, note || m.obit_name || '', /^https?:\/\//i.test(m.source_url) ? m.source_url : null,
+      m.id, req.user.uid]);
+  await audit(req.user.uid, 'insured', m.insured_id, 'update',
+    `Mortality Watch: accepted a public mention as proof of life (${on})`);
+  res.json({ ok: true });
+}));
+
+router.put('/mortality-watch/settings', wrap(async (req, res) => {
+  const n = Math.round(Number(req.body.life_overdue_days));
+  if (!Number.isFinite(n) || n < 7 || n > 1095)
+    return res.status(400).json({ error: 'Between 7 and 1,095 days.' });
+  await q(`INSERT INTO watch_meta (k, v) VALUES ('life_overdue_days', $1)
+           ON CONFLICT (k) DO UPDATE SET v = $1`, [String(n)]);
+  await audit(req.user.uid, 'mortality_watch', null, 'update',
+    `set the proof-of-life warning to ${n} days`);
+  res.json({ ok: true, life_overdue_days: n });
 }));
 
 /**
