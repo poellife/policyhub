@@ -1060,6 +1060,10 @@ const STAFF_NAV = [
      panel on each case, because "what is outstanding" is a question
      about the book and not about any one deal. */
   ['med-review', 'Med Review'],
+  /* Death-notice monitoring for the active book. Administrators only:
+     it is a list of named people the firm is watching for news of a
+     death, and nobody else's work needs it. */
+  ['mortality', 'Mortality Watch'],
   ['investors', 'Investors'],
   ['documents', 'Documents'],
   ['reports', 'Reports'],
@@ -1117,7 +1121,7 @@ const ADMIN_ONLY_NAV = ['carry', 'longevity',
      which is on the deal — rather than the chart behind it. The server
      refuses the whole family to anybody else, so this keeps the menu
      honest rather than being the lock. */
-  'med-review'];
+  'med-review', 'mortality'];
 
 /* Policy Valuation is not a rank, it is a grant: an administrator has it,
    and anybody else has it only if one gave it to them by name. So the menu
@@ -12944,6 +12948,473 @@ async function mailTemplatesView() {
   };
 }
 
+/* ===================================================================== *
+ * Mortality Watch
+ *
+ * Death-notice monitoring for the active book. Once a day the server
+ * searches for everybody insured under a live policy, scores what it
+ * finds against the record, and files anything at 50 or more here for
+ * an administrator to decide. A port of the standalone tool of the same
+ * name, kept to its rubric: 75+ likely, 50–74 possible.
+ *
+ * Administrators only, menu and server alike.
+ *
+ * Confirming a notice does not record a death. It marks the notice,
+ * stops the search for that person and says what to do next: enter the
+ * date of death on the insured once a certificate or the carrier
+ * confirms it. An obituary is a lead, not proof.
+ * ===================================================================== */
+const MW_TIER = (score) => (score >= 75 ? ['Likely', 'lapsed'] : ['Possible', 'grace']);
+
+/* An obituary's address is only ever a link if it is a web address. A
+   vendor record's reference ("vendor://…") is shown as text. */
+const mwLink = (u, label) => (/^https?:\/\//i.test(String(u || ''))
+  ? `<a class="ext-link" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${label}</a>`
+  : `<span class="muted">${esc(u || '')}</span>`);
+
+let mwPoll = null;
+
+async function mortalityView() {
+  if (state.user?.role !== 'admin')
+    return { html: '<div class="empty">Mortality Watch is open to administrators only.</div>' };
+  const d = await api('/mortality-watch');
+  const last = d.runs.find((r) => r.finished_at) || null;
+  const anyKey = Object.values(d.providers).some((p) => p.key);
+  const searches = d.sources.filter((s) => s.enabled && s.kind === 'web_search');
+  const sched = d.schedule;
+  const hourWord = `${((sched.hour + 11) % 12) + 1} ${sched.hour < 12 ? 'AM' : 'PM'}`;
+  const people = d.people;
+  const policyLink = (pols) => {
+    const p = (pols || [])[0];
+    return p ? `#/policy/${p.id}` : null;
+  };
+
+  const factorChips = (fs) => (fs || []).map((f) => `<span class="mw-factor ${f.hit ? 'hit' : 'miss'}">${
+    f.hit ? '✓' : '✗'} ${esc(f.label)}${f.points ? ` <b>${f.points}</b>` : ''}</span>`).join('');
+
+  const matchCard = (m) => {
+    const [tier, tone] = MW_TIER(m.score);
+    const href = policyLink(m.policies);
+    return `<div class="mw-match" data-match="${m.id}">
+      <div class="mw-score ${m.score >= 75 ? 'likely' : 'possible'}">
+        <div class="mw-score-n">${m.score}</div>
+        <span class="badge ${tone}"><span class="dot"></span>${tier}</span>
+      </div>
+      <div class="mw-body">
+        <div class="mw-who">${href ? `<a href="${href}">${esc(m.person_name)}</a>` : esc(m.person_name)}
+          <span class="muted">${m.person_dob ? `· born ${fmtDate(m.person_dob)}` : '· no date of birth on file'}${
+  m.person_city || m.person_state ? ` · ${esc([m.person_city, m.person_state].filter(Boolean).join(', '))}` : ''}</span></div>
+        <div class="secondary">${(m.policies || []).map((p) => `${esc(p.policy_number)} · ${
+  esc(p.carrier || '')} · ${money(p.benefit)}${p.fund ? ` · ${esc(p.fund)}` : ''}`).join('<br>') || '—'}</div>
+        <div class="mw-notice">
+          <strong>${esc(m.obit_name || 'A notice')}</strong>${m.obit_dod
+  ? ` — died ${fmtDate(m.obit_dod)}` : ''}${m.obit_place ? ` · ${esc(m.obit_place)}` : ''}
+          <div class="muted" style="font-size:12px">${esc(m.source_name)} · found ${fmtDate(m.found_at)} ·
+            ${mwLink(m.source_url, 'Open the notice ↗')}</div>
+        </div>
+        <div class="mw-factors">${factorChips(m.factors)}</div>
+        ${m.excerpt ? `<div class="mw-excerpt">${esc(m.excerpt)}${m.excerpt.length >= 600 ? '…' : ''}</div>` : ''}
+        <div class="mw-actions">
+          <button class="btn-sm primary" data-mw-confirm="${m.id}">It's them — confirm</button>
+          <button class="btn-sm" data-mw-dismiss="${m.id}">Not them — dismiss</button>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  const statusBadge = (p) => {
+    if (p.insured_dod) return '<span class="badge"><span class="dot"></span>Date of death on file</span>';
+    if (!p.in_book) return '<span class="badge"><span class="dot"></span>Not in the active book</span>';
+    if (p.status === 'confirmed') return '<span class="badge lapsed"><span class="dot"></span>Confirmed — enter the date of death</span>';
+    if (!p.watching) return '<span class="badge"><span class="dot"></span>Switched off</span>';
+    if (p.status === 'under_review') return `<span class="badge grace"><span class="dot"></span>${p.pending} waiting</span>`;
+    return '<span class="badge inforce"><span class="dot"></span>Watching</span>';
+  };
+
+  const personRow = (p) => {
+    const href = policyLink(p.policies);
+    const extra = [p.aka && `aka ${p.aka}`, p.prior_residence && `formerly ${p.prior_residence}`,
+      p.family].filter(Boolean).join(' · ');
+    return `<tr class="${p.watching && p.in_book && !p.insured_dod ? '' : 'mw-dim'}">
+      <td class="strong">${href ? `<a href="${href}">${esc(p.name)}</a>` : esc(p.name)}
+        ${p.needs_attention ? `<div class="mw-attn">${esc(p.needs_attention)}</div>` : ''}
+        <div class="secondary">${esc((p.policies || []).map((x) => x.policy_number).join(', '))}</div></td>
+      <td>${p.dob ? fmtDate(p.dob) : '<span class="muted">—</span>'}</td>
+      <td>${esc([p.city, p.state].filter(Boolean).join(', ')) || '<span class="muted">—</span>'}</td>
+      <td class="secondary mw-wrap" style="max-width:320px">${esc(extra) || '<span class="muted">—</span>'}</td>
+      <td>${statusBadge(p)}</td>
+      <td class="secondary">${p.last_checked ? fmtDateTime(p.last_checked) : 'not yet'}</td>
+      <td class="num"><button class="btn-sm" data-mw-person="${p.id}">Edit</button></td>
+    </tr>`;
+  };
+
+  const sourceDetail = (s) => {
+    const o = s.options || {};
+    if (s.kind === 'web_search') {
+      const prov = d.providers[o.provider] || { label: o.provider, key: false };
+      return `${esc(prov.label)}${(o.domains || []).length ? ` · only ${esc(o.domains.join(', '))}` : ''} ·
+        up to ${o.max_queries || ((o.domains || []).length ? 2 : 5)} searches a person${
+  prov.key ? '' : ` · <span class="mw-warn">no ${esc(prov.env)} on the server</span>`}`;
+    }
+    return mwLink(o.url, esc(o.url || ''));
+  };
+
+  const run = d.running;
+  return {
+    html: `
+      <div class="page-head">
+        <div><h1>Mortality Watch</h1>
+          <div class="sub">Watching <strong>${d.watched_count}</strong> ${d.watched_count === 1 ? 'person' : 'people'} ·
+            ${sched.enabled ? `sweeps daily after ${hourWord} ${esc(sched.tz.replace('America/', '').replace('_', ' '))} time`
+    : 'daily sweep switched off on this server'}${last ? ` · last sweep ${fmtDateTime(last.started_at)}` : ''}</div></div>
+        <div class="spacer"></div>
+        <button id="mwCheck">Check a name</button>
+        <button id="mwVendor">Upload a vendor file</button>
+        <button class="primary" id="mwRun" ${run ? 'disabled' : ''}>Run a sweep now</button>
+      </div>
+
+      <div id="mwRunning">${run ? `<div class="mw-running">Sweeping — ${run.checked} of ${run.total}
+        ${run.total === 1 ? 'person' : 'people'} checked…</div>` : ''}</div>
+
+      ${!anyKey && searches.length ? `<div class="error-box" style="margin-bottom:16px">
+        No search API key is set on the server, so the ${searches.length} web-search
+        ${searches.length === 1 ? 'source finds' : 'sources find'} nothing. Add
+        <strong>BRAVE_API_KEY</strong> to the Render service's environment (or a Google or SerpAPI
+        key, and switch the sources to that provider). Listing pages, feeds and vendor files work
+        without one.</div>` : ''}
+
+      <div class="card">
+        <div class="card-head"><h2>Waiting for a decision</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">75+ likely · 50–74 possible · below 50 not filed</span></div>
+        <div class="card-body">
+          ${d.pending.length ? d.pending.map(matchCard).join('')
+    : `<div class="empty">Nothing waiting. ${last ? `The last sweep checked ${last.checked} ${
+      last.checked === 1 ? 'person' : 'people'} and filed ${last.new_matches}.` : 'No sweep has run yet.'}</div>`}
+          <div class="muted" style="font-size:12px;margin-top:10px">An obituary is a lead, not proof.
+            Confirming marks the notice and stops the search for that person; it does
+            <strong>not</strong> record a death. Enter the date of death on the insured once a
+            certificate or the carrier confirms it.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>People watched</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">everybody insured under a live policy, from the
+            portal · ${people.filter((p) => p.needs_attention).length
+    ? `<span class="mw-warn">${people.filter((p) => p.needs_attention).length} need a detail</span>` : 'all set'}</span></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Name</th><th>Born</th><th>Lives in</th><th>Also searched for</th>
+            <th>Status</th><th>Last checked</th><th></th></tr></thead>
+          <tbody>${people.length ? people.map(personRow).join('')
+    : '<tr><td colspan="7"><div class="empty">No policy in the active book yet.</div></td></tr>'}</tbody>
+        </table></div>
+        <div class="card-body" style="border-top:1px solid var(--grid)"><span class="muted" style="font-size:12.5px">
+          The more of these a record has, the better a notice can be told from a namesake: a middle
+          or maiden name, nicknames, the city, where they used to live, a spouse and children.
+          A joint insured is two people here, and each needs their own date of birth — a notice
+          whose birth date conflicts with the record is thrown out, so a wrong date is worse than none.
+        </span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Where it looks</h2><div class="spacer"></div>
+          <span class="muted" style="font-size:12px">about ${d.estimate.toLocaleString('en-US')} paid
+            ${d.estimate === 1 ? 'search' : 'searches'} a sweep</span>
+          <button class="btn-sm" id="mwAddSource">Add a source</button></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>On</th><th>Source</th><th>Kind</th><th>What it does</th><th></th></tr></thead>
+          <tbody>${d.sources.map((s) => `<tr class="${s.enabled ? '' : 'mw-dim'}">
+            <td><input type="checkbox" data-mw-toggle="${s.id}" ${s.enabled ? 'checked' : ''}
+              aria-label="Switch ${esc(s.name)} on or off"></td>
+            <td class="strong">${esc(s.name)}</td>
+            <td>${esc(d.kinds[s.kind] || s.kind)}</td>
+            <td class="secondary mw-wrap">${sourceDetail(s)}${(s.states || []).length
+    ? ` · <strong>only insureds in ${esc(s.states.join(', '))}</strong>` : ''}</td>
+            <td class="num"><button class="btn-sm" data-mw-source="${s.id}">Edit</button>
+              <button class="btn-sm" data-mw-source-rm="${s.id}">Delete</button></td>
+          </tr>`).join('') || '<tr><td colspan="5"><div class="empty">No sources. Add one.</div></td></tr>'}</tbody>
+        </table></div>
+        <div class="card-body" style="border-top:1px solid var(--grid)"><span class="muted" style="font-size:12.5px">
+          A web search runs a few searches per person on every sweep, which is what costs money. A site
+          with an RSS feed or a page listing recent notices is cheaper — one fetch a sweep however large
+          the book — so add those as a <strong>feed</strong> or a <strong>listing page</strong> where
+          a site has one. Pages that need JavaScript or block automated visits will show as
+          unavailable in the sweep's notes; keep a site-restricted search as the fallback for those.
+        </span></div>
+      </div>
+
+      ${d.reviewed.length ? `<div class="card">
+        <div class="card-head"><h2>Decided</h2></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Person</th><th>Notice</th><th class="num">Score</th><th>Decision</th>
+            <th>By</th><th></th></tr></thead>
+          <tbody>${d.reviewed.map((m) => `<tr>
+            <td class="strong">${esc(m.person_name)}</td>
+            <td>${esc(m.obit_name || '—')}${m.obit_dod ? ` <span class="muted">· died ${fmtDate(m.obit_dod)}</span>` : ''}
+              <div class="secondary">${esc(m.source_name)} · ${mwLink(m.source_url, 'open ↗')}</div></td>
+            <td class="num">${m.score}</td>
+            <td>${m.status === 'confirmed' ? '<span class="badge lapsed"><span class="dot"></span>Confirmed</span>'
+    : '<span class="badge"><span class="dot"></span>Dismissed</span>'}${m.reviewer_note
+  ? `<div class="secondary">${esc(m.reviewer_note)}</div>` : ''}</td>
+            <td class="secondary">${esc(m.reviewed_by_name || '—')}<br>${m.reviewed_at ? fmtDateTime(m.reviewed_at) : ''}</td>
+            <td class="num"><button class="btn-sm" data-mw-reopen="${m.id}">Reopen</button></td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : ''}
+
+      ${d.runs.length ? `<div class="card">
+        <div class="card-head"><h2>Recent sweeps</h2></div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Started</th><th>How</th><th class="num">Checked</th><th class="num">Filed</th>
+            <th class="num">Searches</th><th>Notes</th></tr></thead>
+          <tbody>${d.runs.map((r) => `<tr>
+            <td>${fmtDateTime(r.started_at)}${r.finished_at ? '' : ' <span class="muted">· running</span>'}</td>
+            <td>${r.trigger === 'schedule' ? 'Daily' : r.trigger === 'vendor_file' ? 'Vendor file' : 'Run now'}${
+  r.triggered_by_name ? ` <span class="muted">· ${esc(r.triggered_by_name)}</span>` : ''}</td>
+            <td class="num">${r.checked}${r.total && r.checked !== r.total ? ` of ${r.total}` : ''}</td>
+            <td class="num">${r.new_matches}</td>
+            <td class="num">${r.queries || '—'}</td>
+            <td class="secondary">${(r.errors || []).length ? `<details><summary>${r.errors.length}
+              ${r.errors.length === 1 ? 'note' : 'notes'}</summary>${r.errors.map((e) => `<div>${esc(e)}</div>`).join('')}</details>`
+    : '<span class="muted">—</span>'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : ''}`,
+
+    after: () => {
+      clearInterval(mwPoll);
+      const poll = () => {
+        clearInterval(mwPoll);
+        mwPoll = setInterval(async () => {
+          if (state.route !== 'mortality') { clearInterval(mwPoll); return; }
+          try {
+            const s = await api('/mortality-watch/status');
+            if (s.running) {
+              $('#mwRunning').innerHTML = `<div class="mw-running">Sweeping — ${s.running.checked} of
+                ${s.running.total} ${s.running.total === 1 ? 'person' : 'people'} checked…</div>`;
+            } else {
+              clearInterval(mwPoll);
+              toast(s.last ? `Sweep finished — ${s.last.new_matches} filed for review` : 'Sweep finished');
+              render();
+            }
+          } catch { clearInterval(mwPoll); }
+        }, 3000);
+      };
+      if (run) poll();
+
+      $('#mwRun')?.addEventListener('click', async () => {
+        const n = d.estimate;
+        if (n && !confirm(`Run a sweep now? It searches for ${d.watched_count} ${
+          d.watched_count === 1 ? 'person' : 'people'} and uses about ${n} paid ${n === 1 ? 'search' : 'searches'}.`)) return;
+        try {
+          const out = await api('/mortality-watch/run', { method: 'POST' });
+          if (out.finished) { toast(`Sweep finished — ${out.finished.filed?.length ?? 0} filed for review`); render(); return; }
+          $('#mwRun').disabled = true;
+          $('#mwRunning').innerHTML = '<div class="mw-running">Sweeping…</div>';
+          poll();
+        } catch (e) { alert(e.message); }
+      });
+
+      document.querySelectorAll('[data-mw-confirm]').forEach((b) => b.addEventListener('click', () => {
+        const m = d.pending.find((x) => String(x.id) === b.dataset.mwConfirm);
+        openDialog(`Confirm this notice is ${m.person_name}`, `
+          <div class="dlg-note">This marks the notice as theirs, stops searching for
+            ${esc(m.person_name)}, and closes their other waiting notices. It does
+            <strong>not</strong> record a death: once a death certificate or the carrier confirms
+            it, enter the date of death on the insured${m.obit_dod ? ` — the notice says
+            <strong>${fmtDate(m.obit_dod)}</strong>` : ''}.</div>
+          <div class="field"><label>Note (optional)</label>
+            <textarea name="note" rows="2" placeholder="Matched on spouse and city; called the family 10/28"></textarea></div>
+        `, async (v) => {
+          const out = await api(`/mortality-watch/matches/${m.id}/confirm`, { method: 'POST', body: { note: v.note } });
+          toast('Confirmed — enter the date of death on the insured when it is certified');
+          return out;
+        }, 'Confirm');
+      }));
+      document.querySelectorAll('[data-mw-dismiss]').forEach((b) => b.addEventListener('click', () => {
+        const m = d.pending.find((x) => String(x.id) === b.dataset.mwDismiss);
+        openDialog(`Not ${m.person_name}`, `
+          <div class="field"><label>Why (optional)</label>
+            <textarea name="note" rows="2" placeholder="Different person, born 1952"></textarea>
+            <span class="muted" style="font-size:12px">This notice will not be filed again for
+              ${esc(m.person_name)}. They go on being searched.</span></div>
+        `, async (v) => {
+          await api(`/mortality-watch/matches/${m.id}/dismiss`, { method: 'POST', body: { note: v.note } });
+          toast('Dismissed');
+        }, 'Dismiss');
+      }));
+      document.querySelectorAll('[data-mw-reopen]').forEach((b) => b.addEventListener('click', async () => {
+        try {
+          await api(`/mortality-watch/matches/${b.dataset.mwReopen}/reopen`, { method: 'POST' });
+          toast('Back in the queue'); render();
+        } catch (e) { alert(e.message); }
+      }));
+
+      document.querySelectorAll('[data-mw-person]').forEach((b) => b.addEventListener('click', () => {
+        const p = people.find((x) => String(x.id) === b.dataset.mwPerson);
+        openDialog(`Watch record — ${p.name}`, `
+          ${p.needs_attention ? `<div class="error-box" style="margin-bottom:12px">${esc(p.needs_attention)}</div>` : ''}
+          ${inputField('Full legal name *', 'name', p.name, 'text', 'required placeholder="Margaret Ann Kowalski"')}
+          <span class="muted" style="font-size:12px;display:block;margin:-8px 0 12px">First, middle and
+            last, as an obituary would print it. A middle name found in a notice is worth the most.</span>
+          ${inputField('Also known as', 'aka', p.aka, 'text', 'placeholder="Peggy; née Novak"')}
+          <span class="muted" style="font-size:12px;display:block;margin:-8px 0 12px">Nicknames and a
+            maiden name, separated by semicolons. Write a maiden name as "née Novak".</span>
+          <div class="field-row">
+            ${inputField('Date of birth', 'dob', dateInput(p.dob), 'date')}
+            ${inputField('City', 'city', p.city, 'text', 'placeholder="Dearborn"')}
+            ${inputField('State', 'state', p.state, 'text', 'maxlength="2" placeholder="MI" style="text-transform:uppercase"')}
+          </div>
+          ${inputField('Used to live in', 'prior_residence', p.prior_residence, 'text', 'placeholder="Toledo, OH"')}
+          ${inputField('Family', 'family', p.family, 'text', 'placeholder="Spouse: Walter; children: Linda, Robert"')}
+          <span class="muted" style="font-size:12px;display:block;margin:-8px 0 12px">A spouse named in a
+            notice is worth 25 points, a child 10.</span>
+          <label class="dlg-check"><input type="checkbox" name="watching" value="yes" ${p.watching ? 'checked' : ''}>
+            <span>Search for this person</span></label>
+        `, async (v) => {
+          await api(`/mortality-watch/people/${p.id}`, { method: 'PUT', body: {
+            name: v.name, aka: v.aka, dob: v.dob || null, city: v.city, state: v.state,
+            prior_residence: v.prior_residence, family: v.family, watching: v.watching === 'yes' } });
+          toast('Saved');
+        }, 'Save');
+      }));
+
+      const sourceDialog = (s = null) => {
+        const o = s?.options || {};
+        const dlg = openDialog(s ? `Source — ${s.name}` : 'Add a source', `
+          ${inputField('Name *', 'name', s?.name || '', 'text', 'required placeholder="Palm Beach Post death notices"')}
+          <div class="field"><label>Kind</label><select name="kind" id="mwKind">
+            ${Object.entries(d.kinds).map(([k, label]) => `<option value="${k}" ${(s?.kind || 'page') === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+          </select></div>
+          <div data-for="page rss">
+            ${inputField('Address *', 'url', o.url || '', 'url', 'placeholder="https://www.example.com/obituaries"')}
+            <span class="muted" style="font-size:12px;display:block;margin:-8px 0 12px">A feed's address
+              for an RSS feed; the page listing recent notices for a listing page. Any link on it that
+              contains a watched person's surname is followed and scored.</span>
+          </div>
+          <div data-for="web_search">
+            <div class="field"><label>Search provider</label><select name="provider">
+              ${Object.entries(d.providers).map(([k, p]) => `<option value="${k}" ${(o.provider || 'brave') === k ? 'selected' : ''}>${
+  esc(p.label)}${p.key ? '' : ` — no ${esc(p.env)} set`}</option>`).join('')}
+            </select></div>
+            ${inputField('Only these sites', 'domains', (o.domains || []).join(', '), 'text', 'placeholder="legacy.com, misaskim.org"')}
+            <span class="muted" style="font-size:12px;display:block;margin:-8px 0 12px">Leave empty to search
+              the whole web. A newspaper or funeral-home network with no feed is added this way.</span>
+            <div class="field-row">
+              ${inputField('Searches per person', 'max_queries', o.max_queries || '', 'number', 'min="1" max="8" placeholder="5"')}
+              ${inputField('Notices from the last (days)', 'freshness_days', o.freshness_days || '', 'number', 'min="1" placeholder="120"')}
+            </div>
+            ${inputField('Google engine ID (Google only)', 'cx', o.cx || '', 'text')}
+          </div>
+          ${inputField('Only for insureds in these states', 'states', (s?.states || []).join(', '), 'text', 'placeholder="FL, NY — empty for everybody"')}
+        `, async (v) => {
+          const body = { name: v.name, kind: v.kind, states: v.states, enabled: s ? s.enabled : true,
+            options: v.kind === 'web_search'
+              ? { provider: v.provider, domains: v.domains, max_queries: v.max_queries || undefined,
+                freshness_days: v.freshness_days || undefined, cx: v.cx }
+              : { url: v.url } };
+          if (s) await api(`/mortality-watch/sources/${s.id}`, { method: 'PUT', body });
+          else await api('/mortality-watch/sources', { method: 'POST', body });
+          toast(s ? 'Source saved' : 'Source added');
+        }, s ? 'Save' : 'Add it');
+        const show = () => {
+          const k = $('#mwKind', dlg).value;
+          dlg.querySelectorAll('[data-for]').forEach((el) => {
+            el.hidden = !el.dataset.for.split(' ').includes(k);
+          });
+        };
+        $('#mwKind', dlg).addEventListener('change', show);
+        show();
+      };
+      $('#mwAddSource')?.addEventListener('click', () => sourceDialog());
+      document.querySelectorAll('[data-mw-source]').forEach((b) => b.addEventListener('click', () =>
+        sourceDialog(d.sources.find((s) => String(s.id) === b.dataset.mwSource))));
+      document.querySelectorAll('[data-mw-source-rm]').forEach((b) => b.addEventListener('click', async () => {
+        const s = d.sources.find((x) => String(x.id) === b.dataset.mwSourceRm);
+        if (!confirm(`Delete the source "${s.name}"? Switching it off keeps the settings.`)) return;
+        try { await api(`/mortality-watch/sources/${s.id}`, { method: 'DELETE' }); toast('Deleted'); render(); } catch (e) { alert(e.message); }
+      }));
+      document.querySelectorAll('[data-mw-toggle]').forEach((b) => b.addEventListener('change', async () => {
+        try {
+          await api(`/mortality-watch/sources/${b.dataset.mwToggle}`, { method: 'PUT', body: { enabled: b.checked } });
+          toast(b.checked ? 'Switched on' : 'Switched off'); render();
+        } catch (e) { alert(e.message); b.checked = !b.checked; }
+      }));
+
+      /* A lookup's answer belongs in the dialog that asked, so this one is
+         opened for reading (Close only) with its own Search button, rather
+         than as a form that closes itself on success. */
+      $('#mwCheck')?.addEventListener('click', () => {
+        const dlg = openDialog('Check a name', `
+          <div class="dlg-note">Runs every switched-on source for one name and shows what it finds,
+            scored. Nothing is saved, and it spends searches like a sweep does.</div>
+          ${inputField('Full name *', 'name', '', 'text', 'placeholder="Claire Engler"')}
+          <div class="field-row">
+            ${inputField('Date of birth', 'dob', '', 'date')}
+            ${inputField('City', 'city', '', 'text')}
+            ${inputField('State', 'state', '', 'text', 'maxlength="2"')}
+          </div>
+          ${inputField('Also known as', 'aka', '', 'text', 'placeholder="Peggy; née Novak"')}
+          ${inputField('Family', 'family', '', 'text', 'placeholder="Spouse: Moe"')}
+          <button type="button" class="primary" id="mwCheckGo">Search</button>
+          <div id="mwCheckOut" style="margin-top:14px"></div>
+        `);
+        const go = async () => {
+          const btn = $('#mwCheckGo', dlg);
+          const box = $('#mwCheckOut', dlg);
+          const v = formValues($('#dlgForm', dlg));
+          if (!String(v.name || '').trim()) { box.innerHTML = '<div class="error-box">Type a name.</div>'; return; }
+          btn.disabled = true;
+          box.innerHTML = '<div class="muted">Searching…</div>';
+          try {
+            const out = await api('/mortality-watch/check', { method: 'POST', body: v });
+            box.innerHTML = `<div class="mw-check-out">${out.results.length ? out.results.map((r) => `
+              <div class="mw-check-row"><strong>${r.discarded_reason ? '—' : r.score}</strong>
+                ${esc(r.title || r.url)} <span class="muted">· ${esc(r.source_name)}${
+  r.discarded_reason ? ` · thrown out (${esc(r.discarded_reason.replace('_', ' '))})` : ` · ${esc(r.tier)}`}</span>
+                · ${mwLink(r.url, 'open ↗')}</div>`).join('') : '<div class="empty">Nothing found.</div>'}
+              ${out.notes.length ? `<div class="muted" style="font-size:12px;margin-top:8px">${out.notes.map(esc).join('<br>')}</div>` : ''}</div>`;
+          } catch (e) {
+            box.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+          } finally { btn.disabled = false; }
+        };
+        $('#mwCheckGo', dlg).addEventListener('click', go);
+        /* Enter in a box searches rather than closing the dialog. */
+        dlg.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); go(); }
+        });
+      });
+
+      $('#mwVendor')?.addEventListener('click', () => {
+        openDialog('Upload a vendor death file', `
+          <div class="dlg-note">A CSV from a death-record vendor — a Limited Access Death Master File
+            reseller, a credit-header vendor, or anybody else. It is scored against everybody watched
+            as soon as it is uploaded, and anything at 50 or more is filed for review. The file itself
+            is not kept.</div>
+          <div class="field"><label>File *</label><input type="file" name="file" id="mwFile" accept=".csv,text/csv" required></div>
+          ${inputField('Call it', 'source_name', 'Vendor death file', 'text')}
+          <details style="margin-top:6px"><summary>Column names</summary>
+            <span class="muted" style="font-size:12px;display:block;margin:8px 0">Expected columns:
+              first_name, middle_name, last_name, dob, dod, city, state, reference. If the vendor
+              calls them something else, type their names here.</span>
+            <div class="field-row">${d.vendor_fields.slice(0, 4).map((f) => inputField(f, `col_${f}`, '', 'text', `placeholder="${f}"`)).join('')}</div>
+            <div class="field-row">${d.vendor_fields.slice(4).map((f) => inputField(f, `col_${f}`, '', 'text', `placeholder="${f}"`)).join('')}</div>
+          </details>
+        `, async (v) => {
+          const f = $('#mwFile')?.files?.[0];
+          if (!f) throw new Error('Choose the CSV file.');
+          if (f.size > 1_800_000) throw new Error('That file is over 1.8 MB. Split it, or ask the vendor for a matched-only delivery.');
+          const csv = await f.text();
+          const columns = Object.fromEntries(d.vendor_fields.map((x) => [x, v[`col_${x}`] || '']));
+          const out = await api('/mortality-watch/vendor-file', { method: 'POST', body: {
+            csv, filename: f.name, source_name: v.source_name, columns } });
+          toast(`${out.records} records read — ${out.filed} filed for review`);
+        }, 'Score it');
+      });
+    },
+  };
+}
+
 async function medicalQueueView() {
   if (state.params.id) return medicalCaseView();
   const rows = await api('/medical-reviews');
@@ -13795,6 +14266,7 @@ const VIEWS = {
   'le-reports': leReportsView,
   medical: medicalQueueView,
   'med-review': medReviewView,
+  mortality: mortalityView,
   reports: () => reportsView(api, state),
   import: importView,
   // An investor has an Agreements tab of their own; for staff the list

@@ -1,73 +1,97 @@
-PolicyHub — build 2026-10-27a
-Emailing the one-pager to an investor, PDF attached
+PolicyHub — build 2026-10-28a
+Mortality Watch, as an administrators-only tab
+(also contains everything in 2026-10-27a: emailing the one-pager)
 
-WHERE IT IS
-Open a deal, click One-pager, set the participation, and Build it. The
-sheet opens with "Email it to an investor" above it:
+WHAT IT IS
+Your Mortality Watch tool, rebuilt inside the portal. Same scoring rules —
+the original tool's own test cases pass point for point, so a 75 means the
+same thing it did — but it watches the insureds already in the portal, so
+there is no CSV to keep in sync.
 
-  To        pick the investor. Those already shown the deal are listed
-            first; anybody else can be chosen too, and sending shares the
-            deal with them so the link in the email opens it. Their name
-            goes at the top of the message when you pick them.
-  Subject   prefilled, editable.
-  Message   the covering note, prefilled from the deal's own figures and
-            editable however you like.
+  Who is watched   everybody insured under a policy in the active book
+                   (In force, Grace, Pending) with no date of death on file.
+                   A new policy is watched from the next sweep; a matured
+                   one drops out by itself.
+  Joint insureds   "Moe And Claire Engler" is one record in the portal and
+                   two people to an obituary, so it is split into two. Neither
+                   is given the shared date of birth — a notice whose birth
+                   date conflicts is thrown out, so a wrong date is worse than
+                   none — and both are flagged until you type each one in.
 
-  Send to investor    sends it, with the one-pager attached as a PDF.
-  Send me a preview   sends the identical email to you only, marked
-                      [Preview]. Nothing is shared and nobody else is
-                      written to.
+THE TAB (Mortality Watch, in the menu after Med Review)
+  Waiting for a decision   each notice with its score, who it might be, the
+                           policies at stake, what the notice says, a ✓/✗ row
+                           showing why it scored what it did, and a link to it.
+                           "It's them — confirm" / "Not them — dismiss".
+  People watched           the details the scorer uses that the portal does
+                           not hold: middle and maiden names, nicknames, city,
+                           where they used to live, spouse and children. Edit
+                           any row. The more filled in, the better a notice is
+                           told from a namesake.
+  Where it looks           the sources, switch each on or off, add your own:
+                           a web search (optionally limited to certain sites),
+                           an RSS feed, or a page listing recent notices.
+                           Starts with the same four your config had. Shows
+                           roughly how many paid searches a sweep will cost.
+  Decided, Recent sweeps   history, with Reopen for a decision made by mistake.
+  Run a sweep now          on demand; it shows progress while it runs.
+  Check a name             a one-off lookup, scored, nothing saved.
+  Upload a vendor file     a death-record vendor's CSV, scored against
+                           everybody the moment it is uploaded. Column names
+                           can be mapped if the vendor uses its own.
 
-No download, no attaching. The PDF is drawn at the moment you press
-Send, from the deal as it stands — the same document Download PDF gives.
+CONFIRMING DOES NOT RECORD A DEATH (as you chose)
+Confirm marks the notice as theirs, stops searching for that person and
+closes their other waiting notices. The insured's date of death is NOT
+written — the policy stays in the active book until you enter it on the
+insured once a certificate or the carrier confirms it. The tab says so on
+every notice and in the confirm box.
 
-HOW IT GOES OUT
-From the firm's address (the same "Poel Capital Portal" sender as every
-other message), with replies coming back to YOU — the investor who hits
-Reply reaches whoever sent it. It goes immediately; the screen says
-"Sent to …" or says what went wrong.
+DAILY SWEEP
+Runs once a day after 6 AM Eastern, plus Run now. If anything is filed,
+every administrator gets an email — initials, score, date and place only;
+never the insured's name and never the notice's link (those usually spell
+out the name). Admins can switch it off under their notification settings,
+and the wording is editable in "What the messages say".
 
-Every send is listed on the deal, staff only, under "One-pager emailed":
-who, when, by whom, at what participation, and whether it was delivered
-or bounced.
+SETTINGS ON RENDER (Environment)
+  BRAVE_API_KEY   needed for the web-search sources. Without it they find
+                  nothing and the tab says so in red; listing pages, feeds
+                  and vendor files still work. (GOOGLE_API_KEY or SERPAPI_KEY
+                  instead, if you switch the sources to that provider.)
+  MW_RUN_HOUR     optional, hour of the daily sweep, default 6
+  MW_TIMEZONE     optional, default America/Detroit
+  MW_SCHEDULE=off optional, turns the daily sweep off (Run now still works)
+API keys stay on the server; the tab only ever shows whether one is set.
 
-WHAT IT WILL NOT DO
-  · Send an email that names the insured. The note is written in
-    initials, but the box is editable, so the finished text is checked
-    before anything leaves and refused with the word it found. Last
-    names are caught however they are typed; first names as written on
-    the record, so an insured called Will does not stop "we will".
-    Writing to an investor who shares the insured's surname is fine as
-    long as you use her full name; "Ms Coleman" alone is refused, because
-    there is no telling whose name it is.
-  · Send to anyone but an investor on file. You pick the person; the
-    address is the one on their record. Managers can only pick investors
-    in their own book.
-  · Send a closed deal (it is on nobody's portal, so the link would lead
-    nowhere). A preview of one is fine.
+Cost: with the four starting sources it is about 9 searches per person per
+sweep (5 + 2 + 2). The tab shows the figure for your book before you run.
 
-ALSO FIXED
-The covering note now quotes the scenario investors are shown, when one
-is chosen. It was quoting the deal's own figures while the PDF beside it
-quoted the scenario's.
+The daily sweep needs the Render service awake at 6 AM — a paid instance
+is; a free one that has gone to sleep will run it when it next wakes.
 
-NEEDS EMAIL SET UP ON RENDER
-Sending uses the same mail setup as the other messages (RESEND_API_KEY on
-the Render service). If that is not set, the box says so and the Send
-buttons stay off; Download PDF and "Copy the text instead" still work.
+SAFETY
+  · Administrators only, menu and server alike; managers and investors
+    are refused every route.
+  · The server will not fetch private or internal addresses (localhost,
+    the cloud metadata address, private ranges) from a source or from a
+    link on a listing page, and follows redirects only to public ones.
+  · Searching sends insureds' names, with city or birth year, to the
+    search provider — the same as the Python tool did.
 
-FILES (each goes into the policyhub folder of the repo — policyhub/src
-and policyhub/public, NOT the src folder at the top level of the repo)
-  src/api.js        the send route; one shared "sheet as investors see
-                    it" helper for the download, the note and the email
-  src/mail.js       attachments and reply-to through the queue; Send
-                    pushes that one message rather than the oldest queued
-  src/schema.sql    outbox attachments and reply-to columns; the
-                    opportunity_sends table (added on boot, nothing to run)
-  public/app.js     the email box and the "One-pager emailed" card
+FILES (into policyhub/src and policyhub/public — not the top-level src)
+  src/mortality-watch.js   NEW — the engine: extraction, scoring, sources,
+                           the sweep, the daily timer
+  src/api.js               the tab's routes, admin-only; the alert email
+  src/mail.js              the "A possible death notice was found" message
+  src/schema.sql           four new tables (added on boot, nothing to run)
+  src/server.js            starts the daily timer
+  public/app.js            the tab
   public/styles.css
-  public/build.js   2026-10-27a
-  scripts/send-sheet-test.mjs   47 checks, run against a stand-in mail
-                    service so the actual email and PDF are inspected
+  public/build.js          2026-10-28a
+  scripts/mortality-score-test.mjs   the original tool's cases + guards
+  scripts/mortality-watch-test.mjs   62 checks, a real sweep end to end
+                                     against stand-in sites and mail
+  scripts/send-sheet-test.mjs        (from 10-27a)
 
-TESTS: no regressions against a baseline taken first on the same database.
+TESTS: no regressions against a baseline taken on the same database.

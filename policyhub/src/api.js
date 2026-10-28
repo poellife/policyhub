@@ -16,6 +16,11 @@ import { cleanReport, reportPdf } from './report-pdf.js';
 import { opportunityPdf } from './opportunity-pdf.js';
 import { maturityPdf } from './maturity-pdf.js';
 import { opportunityEmail } from './opportunity-email.js';
+import { parse as parseCsv } from 'csv-parse/sync';
+import {
+  runSweep, runVendorFile, checkOnce, currentRun, syncPeople, estimateQueries, person as mwPerson,
+  keyPresent, PROVIDERS, SOURCE_KINDS, VENDOR_FIELDS, scheduleSettings, LIKELY,
+} from './mortality-watch.js';
 import { createCase, caseStatus, casePdf, purgeCase, headline,
          leConfigured, leRunning } from './le-service.js';
 import { sendMail, flushMail, mailReady, MAIL_KINDS, choosableKinds, appUrlProblem,
@@ -1558,6 +1563,17 @@ router.use((req, res, next) => {
   if (isMedical(req) || req.user?.role === 'admin') return next();
   return res.status(403).json({
     error: 'Medical review is open to administrators and to the reviewing doctor.' });
+});
+
+/* Mortality Watch is the administrators', the whole family of routes, in
+   one place: it is a list of named people the firm is watching for news
+   of a death, matched against obituaries, and nobody else's work needs
+   that. Refused here rather than route by route so the one added next
+   month is refused too. */
+router.use((req, res, next) => {
+  if (!/^\/mortality-watch(\/|$)/.test(req.path)) return next();
+  if (req.user?.role === 'admin') return next();
+  return res.status(403).json({ error: 'Mortality Watch is open to administrators only.' });
 });
 
 /* ------------------------------------------------------------------ *
@@ -10754,6 +10770,327 @@ router.get('/audit', blockScoped, requireRole('admin'), wrap(async (req, res) =>
       ORDER BY a.created_at DESC LIMIT 300`
   );
   res.json(rows);
+}));
+
+/* ==================================================================== *
+ * Mortality Watch
+ *
+ * The routes behind the tab. The engine -- extraction, scoring, sources,
+ * the sweep -- is src/mortality-watch.js; this is the part that reads
+ * and writes on an administrator's behalf. Every route here is behind
+ * the admin-only guard near the top of the file.
+ * ==================================================================== */
+
+/**
+ * The email after a sweep. To every active administrator, each through
+ * their own preference, and only when something was filed. Initials and
+ * a score, never a name and never the notice's own address.
+ */
+export async function mortalityAlert(result) {
+  const filed = result?.filed || [];
+  if (!filed.length) return;
+  const ids = [...new Set(filed.map((f) => f.person_id))];
+  const { rows: ppl } = await q('SELECT id, name FROM watch_people WHERE id = ANY($1)', [ids]);
+  const nameOf = new Map(ppl.map((p) => [p.id, p.name]));
+  const initials = (full) => {
+    const parts = String(full || '').trim().split(/\s+/);
+    return initialsOf(parts[0], parts[parts.length - 1]) || '—';
+  };
+  const sorted = [...filed].sort((a, b) => b.score - a.score);
+  const lines = sorted.slice(0, 25).map((f) => `· ${initials(nameOf.get(f.person_id))} — ${f.score}, ${
+    f.score >= LIKELY ? 'likely' : 'possible'}${f.obit_dod ? ` · died ${
+    new Date(`${String(f.obit_dod).slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC' })}` : ''}${
+    f.obit_place ? ` · ${f.obit_place}` : ''}`);
+  if (sorted.length > 25) lines.push(`· and ${sorted.length - 25} more on the tab`);
+  const likely = filed.filter((f) => f.score >= LIKELY).length;
+  const { rows: admins } = await q(
+    `SELECT id, email, full_name FROM users WHERE role = 'admin' AND is_active = TRUE
+       AND email <> ''`);
+  for (const a of admins)
+    await sendMail('mortality_alert', { to: a.email, userId: a.id, name: a.full_name,
+      likely: String(likely), possible: String(filed.length - likely),
+      checked: String(result.checked), matches: lines.join('\n') });
+}
+
+/** Everything the tab shows, in one read. */
+router.get('/mortality-watch', wrap(async (req, res) => {
+  await syncPeople();
+  const [pending, reviewed, people, sources, runs] = await Promise.all([
+    q(`SELECT m.*, w.name AS person_name, w.insured_id, w.dob AS person_dob,
+              w.city AS person_city, w.state AS person_state,
+              i.display_name, i.first_name AS insured_first, i.last_name AS insured_last,
+              (SELECT json_agg(json_build_object('id', p.id, 'policy_number', p.policy_number,
+                        'carrier', p.carrier_name, 'status', p.status, 'fund', f.code,
+                        'benefit', COALESCE(p.face_amount, 0)) ORDER BY p.policy_number)
+                 FROM policies p LEFT JOIN funds f ON f.id = p.fund_id
+                WHERE p.insured_id = w.insured_id) AS policies
+         FROM watch_matches m
+         JOIN watch_people w ON w.id = m.person_id
+         JOIN insureds i ON i.id = w.insured_id
+        WHERE m.status = 'pending'
+        ORDER BY m.score DESC, m.found_at DESC`),
+    q(`SELECT m.id, m.status, m.score, m.obit_name, m.obit_dod, m.source_name, m.source_url,
+              m.reviewed_at, m.reviewer_note, w.name AS person_name, w.insured_id,
+              u.full_name AS reviewed_by_name
+         FROM watch_matches m
+         JOIN watch_people w ON w.id = m.person_id
+         LEFT JOIN users u ON u.id = m.reviewed_by
+        WHERE m.status <> 'pending'
+        ORDER BY m.reviewed_at DESC NULLS LAST LIMIT 50`),
+    q(`SELECT w.*,
+              i.date_of_death AS insured_dod,
+              EXISTS (SELECT 1 FROM policies p WHERE p.insured_id = w.insured_id
+                       AND p.status = ANY('{Inforce,Grace,Pending}')) AS in_book,
+              (SELECT COUNT(*)::int FROM watch_matches m
+                WHERE m.person_id = w.id AND m.status = 'pending') AS pending,
+              (SELECT json_agg(json_build_object('id', p.id, 'policy_number', p.policy_number,
+                        'status', p.status) ORDER BY p.policy_number)
+                 FROM policies p WHERE p.insured_id = w.insured_id) AS policies
+         FROM watch_people w JOIN insureds i ON i.id = w.insured_id
+        ORDER BY (w.needs_attention <> '') DESC, w.name`),
+    q('SELECT * FROM watch_sources ORDER BY id'),
+    q(`SELECT r.*, u.full_name AS triggered_by_name FROM watch_runs r
+         LEFT JOIN users u ON u.id = r.triggered_by
+        ORDER BY r.started_at DESC LIMIT 15`),
+  ]);
+  const watched = people.rows.filter((p) => p.watching && p.in_book && !p.insured_dod
+    && p.status !== 'confirmed');
+  const sched = scheduleSettings();
+  res.json({
+    pending: pending.rows,
+    reviewed: reviewed.rows,
+    people: people.rows,
+    sources: sources.rows,
+    runs: runs.rows,
+    running: currentRun(),
+    watched_count: watched.length,
+    estimate: estimateQueries(sources.rows, watched),
+    schedule: sched,
+    providers: Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) =>
+      [k, { label: v.label, env: v.env, key: keyPresent(k) }])),
+    kinds: Object.fromEntries(Object.entries(SOURCE_KINDS).map(([k, v]) => [k, v.label])),
+    vendor_fields: VENDOR_FIELDS,
+  });
+}));
+
+/**
+ * Run a sweep now. Started and left running: a sweep of a whole book
+ * takes minutes, and the tab polls /status rather than holding a
+ * request open that a proxy would cut.
+ */
+router.post('/mortality-watch/run', wrap(async (req, res) => {
+  if (currentRun()) return res.status(409).json({ error: 'A sweep is already running.' });
+  const started = runSweep({ trigger: 'manual', userId: req.user.uid, onDone: mortalityAlert });
+  const first = await Promise.race([started, new Promise((r) => { setTimeout(() => r(null), 400); })]);
+  if (first?.busy) return res.status(409).json({ error: 'A sweep is already running.' });
+  started.catch((e) => console.error('[mortality] sweep failed:', e.message));
+  await audit(req.user.uid, 'mortality_watch', null, 'update', 'started a Mortality Watch sweep');
+  res.status(202).json({ started: true, running: currentRun(), finished: first || null });
+}));
+
+router.get('/mortality-watch/status', wrap(async (req, res) => {
+  const { rows } = await q('SELECT * FROM watch_runs ORDER BY started_at DESC LIMIT 1');
+  res.json({ running: currentRun(), last: rows[0] || null });
+}));
+
+const oneMatch = async (id) => (await q(
+  `SELECT m.*, w.insured_id, w.name AS person_name FROM watch_matches m
+     JOIN watch_people w ON w.id = m.person_id WHERE m.id = $1`, [int(id)])).rows[0];
+
+/**
+ * "This notice is them." Marks the match, stops searching for the
+ * person, and closes their other waiting notices as superseded. Does
+ * NOT touch the insured's date of death: that is entered by hand, on
+ * the insured, once a certificate or the carrier confirms it.
+ */
+router.post('/mortality-watch/matches/:id/confirm', wrap(async (req, res) => {
+  const m = await oneMatch(req.params.id);
+  if (!m) return res.status(404).json({ error: 'That notice is not on file' });
+  if (m.status !== 'pending') return res.status(409).json({ error: 'That notice has already been decided.' });
+  const note = str(req.body.note).trim().slice(0, 1000);
+  await q(`UPDATE watch_matches SET status = 'confirmed', reviewed_at = now(), reviewed_by = $2,
+                  reviewer_note = $3 WHERE id = $1`, [m.id, req.user.uid, note]);
+  await q(`UPDATE watch_matches SET status = 'dismissed', reviewed_at = now(), reviewed_by = $2,
+                  reviewer_note = 'Superseded — another notice was confirmed'
+            WHERE person_id = $1 AND status = 'pending'`, [m.person_id, req.user.uid]);
+  await q(`UPDATE watch_people SET status = 'confirmed', updated_at = now() WHERE id = $1`,
+    [m.person_id]);
+  await audit(req.user.uid, 'insured', m.insured_id, 'update',
+    `Mortality Watch: confirmed a death notice (score ${m.score}) — date of death still to be entered`);
+  res.json({ ok: true, insured_id: m.insured_id });
+}));
+
+router.post('/mortality-watch/matches/:id/dismiss', wrap(async (req, res) => {
+  const m = await oneMatch(req.params.id);
+  if (!m) return res.status(404).json({ error: 'That notice is not on file' });
+  if (m.status !== 'pending') return res.status(409).json({ error: 'That notice has already been decided.' });
+  const note = str(req.body.note).trim().slice(0, 1000);
+  await q(`UPDATE watch_matches SET status = 'dismissed', reviewed_at = now(), reviewed_by = $2,
+                  reviewer_note = $3 WHERE id = $1`, [m.id, req.user.uid, note]);
+  /* Back to plain watching once nothing is waiting on them. */
+  await q(`UPDATE watch_people SET status = 'active', updated_at = now()
+            WHERE id = $1 AND status = 'under_review'
+              AND NOT EXISTS (SELECT 1 FROM watch_matches WHERE person_id = $1 AND status = 'pending')`,
+  [m.person_id]);
+  await audit(req.user.uid, 'insured', m.insured_id, 'update',
+    `Mortality Watch: dismissed a notice (score ${m.score})${note ? ` — ${note.slice(0, 80)}` : ''}`);
+  res.json({ ok: true });
+}));
+
+/** Undo a decision made by mistake: back to waiting, and the person back under review. */
+router.post('/mortality-watch/matches/:id/reopen', wrap(async (req, res) => {
+  const m = await oneMatch(req.params.id);
+  if (!m) return res.status(404).json({ error: 'That notice is not on file' });
+  if (m.status === 'pending') return res.status(409).json({ error: 'That notice is already waiting.' });
+  await q(`UPDATE watch_matches SET status = 'pending', reviewed_at = NULL, reviewed_by = NULL,
+                  reviewer_note = '' WHERE id = $1`, [m.id]);
+  await q(`UPDATE watch_people SET status = 'under_review', updated_at = now() WHERE id = $1`,
+    [m.person_id]);
+  await audit(req.user.uid, 'insured', m.insured_id, 'update',
+    `Mortality Watch: reopened a ${m.status} notice`);
+  res.json({ ok: true });
+}));
+
+const PERSON_FIELDS = {
+  name: str, aka: str, dob: date, city: str, state: str, prior_residence: str, family: str,
+  watching: bool,
+};
+
+/** The details the scorer leans on, as typed on the tab. */
+router.put('/mortality-watch/people/:id', wrap(async (req, res) => {
+  const body = { ...req.body };
+  if ('state' in body) body.state = str(body.state).trim().toUpperCase().slice(0, 2);
+  if ('name' in body && !str(body.name).trim())
+    return res.status(400).json({ error: 'A full name is needed — first and last at least.' });
+  const { sets, vals, next } = buildSet(PERSON_FIELDS, body);
+  if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
+  /* Typing a date of birth answers the question a joint insured was
+     flagged with; anything else leaves the flag where it is. */
+  const clears = 'dob' in body && body.dob ? ", needs_attention = ''" : '';
+  const { rows } = await q(
+    `UPDATE watch_people SET ${sets.join(',')}, updated_at = now()${clears}
+      WHERE id = $${next} RETURNING *`, [...vals, int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not on the watch list' });
+  await audit(req.user.uid, 'insured', rows[0].insured_id, 'update',
+    `Mortality Watch: updated the watch record (${sets.map((x) => x.split(' ')[0]).join(', ')})`);
+  res.json(rows[0]);
+}));
+
+/** A source, checked: the kind exists, and an address is an address. */
+function cleanSource(body) {
+  const kind = str(body.kind);
+  if (!SOURCE_KINDS[kind]) return { error: `A source is one of: ${Object.keys(SOURCE_KINDS).join(', ')}.` };
+  const name = str(body.name).trim().slice(0, 120);
+  if (!name) return { error: 'Give the source a name.' };
+  const o = body.options && typeof body.options === 'object' ? body.options : {};
+  const options = {};
+  if (kind === 'web_search') {
+    options.provider = PROVIDERS[o.provider] ? o.provider : 'brave';
+    const domains = (Array.isArray(o.domains) ? o.domains : String(o.domains || '').split(/[\s,]+/))
+      .map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
+      .filter((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d));
+    if (domains.length) options.domains = [...new Set(domains)].slice(0, 20);
+    const n = (v, lo, hi, dflt) => {
+      const x = Math.round(Number(v));
+      return Number.isFinite(x) && x >= lo && x <= hi ? x : dflt;
+    };
+    options.max_queries = n(o.max_queries, 1, 8, domains.length ? 2 : 5);
+    options.freshness_days = n(o.freshness_days, 1, 3650, 120);
+    options.fetch_pages = o.fetch_pages !== false;
+    if (options.provider === 'google_cse') options.cx = str(o.cx).trim().slice(0, 100);
+  } else {
+    const u = url(o.url);
+    if (!u) return { error: 'An address starting http:// or https:// is needed.' };
+    options.url = u;
+  }
+  const states = (Array.isArray(body.states) ? body.states : String(body.states || '').split(/[\s,]+/))
+    .map((x) => String(x).trim().toUpperCase()).filter((x) => /^[A-Z]{2}$/.test(x));
+  return { kind, name, states: [...new Set(states)], options,
+    enabled: body.enabled === undefined ? true : !!body.enabled };
+}
+
+router.post('/mortality-watch/sources', wrap(async (req, res) => {
+  const s = cleanSource(req.body);
+  if (s.error) return res.status(400).json({ error: s.error });
+  const { rows } = await q(
+    `INSERT INTO watch_sources (kind, name, enabled, states, options) VALUES ($1,$2,$3,$4,$5::jsonb)
+     RETURNING *`, [s.kind, s.name, s.enabled, s.states, JSON.stringify(s.options)]);
+  await audit(req.user.uid, 'mortality_watch', rows[0].id, 'create', `added the source "${s.name}"`);
+  res.status(201).json(rows[0]);
+}));
+
+router.put('/mortality-watch/sources/:id', wrap(async (req, res) => {
+  const { rows: cur } = await q('SELECT * FROM watch_sources WHERE id = $1', [int(req.params.id)]);
+  if (!cur[0]) return res.status(404).json({ error: 'No such source' });
+  /* A bare on/off from the switch on the list, without the rest. */
+  if (Object.keys(req.body || {}).length === 1 && 'enabled' in req.body) {
+    await q('UPDATE watch_sources SET enabled = $1 WHERE id = $2', [!!req.body.enabled, cur[0].id]);
+    await audit(req.user.uid, 'mortality_watch', cur[0].id, 'update',
+      `${req.body.enabled ? 'switched on' : 'switched off'} the source "${cur[0].name}"`);
+    return res.json({ ok: true });
+  }
+  const s = cleanSource({ ...cur[0], ...req.body });
+  if (s.error) return res.status(400).json({ error: s.error });
+  const { rows } = await q(
+    `UPDATE watch_sources SET kind = $1, name = $2, enabled = $3, states = $4, options = $5::jsonb
+      WHERE id = $6 RETURNING *`,
+    [s.kind, s.name, s.enabled, s.states, JSON.stringify(s.options), cur[0].id]);
+  await audit(req.user.uid, 'mortality_watch', cur[0].id, 'update', `changed the source "${s.name}"`);
+  res.json(rows[0]);
+}));
+
+router.delete('/mortality-watch/sources/:id', wrap(async (req, res) => {
+  const { rows } = await q('DELETE FROM watch_sources WHERE id = $1 RETURNING name', [int(req.params.id)]);
+  if (!rows[0]) return res.status(404).json({ error: 'No such source' });
+  await audit(req.user.uid, 'mortality_watch', int(req.params.id), 'delete',
+    `deleted the source "${rows[0].name}"`);
+  res.json({ ok: true });
+}));
+
+/** A one-off lookup. Runs the sources, scores, saves nothing. */
+router.post('/mortality-watch/check', wrap(async (req, res) => {
+  const name = str(req.body.name).trim();
+  if (name.split(/\s+/).length < 2)
+    return res.status(400).json({ error: 'Type a first and last name at least.' });
+  const out = await checkOnce({ name, aka: str(req.body.aka), dob: date(req.body.dob),
+    city: str(req.body.city), state: str(req.body.state).toUpperCase().slice(0, 2),
+    prior_residence: str(req.body.prior_residence), family: str(req.body.family) });
+  await audit(req.user.uid, 'mortality_watch', null, 'read', 'ran a one-off Mortality Watch lookup');
+  res.json(out);
+}));
+
+/**
+ * A vendor's death file. Sent as text by the browser (it reads the CSV
+ * itself), scored against everybody watched the moment it arrives, and
+ * not kept: the matches it produced are what is worth keeping.
+ */
+router.post('/mortality-watch/vendor-file', wrap(async (req, res) => {
+  const csv = str(req.body.csv);
+  if (!csv.trim()) return res.status(400).json({ error: 'The file is empty.' });
+  let rows;
+  try {
+    rows = parseCsv(csv.replace(/^﻿/, ''), { columns: true, skip_empty_lines: true,
+      relax_column_count: true, trim: true });
+  } catch (e) {
+    return res.status(400).json({ error: `That file could not be read as CSV: ${e.message}` });
+  }
+  if (!rows.length) return res.status(400).json({ error: 'The file has a header and no records.' });
+  const cols = req.body.columns && typeof req.body.columns === 'object' ? req.body.columns : {};
+  const columns = Object.fromEntries(VENDOR_FIELDS.filter((f) => str(cols[f]).trim())
+    .map((f) => [f, str(cols[f]).trim()]));
+  const headers = Object.keys(rows[0]).map((h) => h.trim().toLowerCase());
+  const need = ['last_name', 'first_name'].map((f) => (columns[f] || f).toLowerCase());
+  const missing = need.filter((h) => !headers.includes(h));
+  if (missing.length)
+    return res.status(400).json({
+      error: `The file has no ${missing.join(' or ')} column. Its columns are: ${
+        Object.keys(rows[0]).join(', ')}. Say which is which under "Column names".` });
+  const label = str(req.body.filename).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80) || 'upload';
+  const result = await runVendorFile({ name: str(req.body.source_name).trim() || 'Vendor death file',
+    rows, columns, fileLabel: label, userId: req.user.uid, onDone: mortalityAlert });
+  await audit(req.user.uid, 'mortality_watch', result.id, 'create',
+    `scored a vendor death file (${rows.length} records, ${result.filed.length} filed for review)`);
+  res.json({ records: rows.length, checked: result.checked, filed: result.filed.length });
 }));
 
 export default router;

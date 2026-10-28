@@ -12,7 +12,8 @@ import api, { wrap, storeDocument, storeReviewFile, storeLeDocument, previewPrem
 import { authenticate, requireRole } from './auth.js';
 import { previewUpload, runImport, TEMPLATES } from './import.js';
 import { readDocuments } from './extract.js';
-import { startLeReport, startLeSweeper, mayLe } from './api.js';
+import { startLeReport, startLeSweeper, mayLe, mortalityAlert } from './api.js';
+import { startMortalitySchedule } from './mortality-watch.js';
 import { startMailWorker } from './mail.js';
 // The valuation model is a separate program; this is the door to it.
 import { mountValuation } from './valuation.js';
@@ -362,6 +363,12 @@ initDb()
        then left alone would lose its headline if this application only
        ever looked when somebody opened the screen. */
     startLeSweeper();
+    /* Mortality Watch: one sweep a day, after the hour set (6am Eastern
+       unless MW_RUN_HOUR / MW_TIMEZONE say otherwise), emailing the
+       administrators if anything was filed. The timer asks the database
+       whether today's has run, so a restart neither skips a day nor runs
+       two. MW_SCHEDULE=off switches it off. */
+    startMortalitySchedule({ onDone: mortalityAlert });
     app.listen(PORT, () => console.log(`PolicyHub running on http://localhost:${PORT}`));
   })
   .catch((e) => {

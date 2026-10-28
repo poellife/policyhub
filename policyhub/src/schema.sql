@@ -1908,3 +1908,123 @@ CREATE TABLE IF NOT EXISTS opportunity_sends (
   sent_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_oppsend_opp ON opportunity_sends (opportunity_id, sent_at DESC);
+
+/* ====================================================================
+   Mortality Watch
+   ====================================================================
+
+   Death-notice monitoring for the active book: on a schedule it
+   searches for every insured, scores what it finds against the record,
+   and files likely matches for an administrator to look at. A port of
+   the standalone Python tool, kept to its rubric -- see
+   src/mortality-watch.js.
+
+   Four tables.
+
+   watch_people   one row per PERSON watched. Usually one per insured;
+                  two for a joint insured ("Moe And Claire Engler"), who
+                  are two people to an obituary. Holds what the scorer
+                  leans on that the insured record does not carry --
+                  middle and maiden names, nicknames, the city, where
+                  they used to live, the family -- edited on the tab.
+                  `status`: active, under_review (a match is waiting),
+                  confirmed (an administrator has said this notice is
+                  them; they are no longer searched).
+
+   watch_matches  a notice scored at 50 or more, waiting for a decision.
+                  One per person per source URL, ever: a dismissed notice
+                  stays dismissed, it is not refiled every morning.
+
+   watch_runs     each sweep, for the tab's "last run" and for the timer
+                  to know whether today's has happened.
+
+   watch_sources  where notices come from. In the database rather than a
+                  config file, because a file on Render's disk does not
+                  survive a deploy. API KEYS ARE NOT HERE: they are
+                  environment variables on the server and never leave it.
+
+   Confirming a match does NOT write a date of death. An obituary is a
+   lead, not proof; the date goes on the insured by hand once a
+   certificate or the carrier confirms it.
+   ==================================================================== */
+CREATE TABLE IF NOT EXISTS watch_people (
+  id               SERIAL PRIMARY KEY,
+  insured_id       INTEGER NOT NULL REFERENCES insureds(id) ON DELETE CASCADE,
+  slot             INTEGER NOT NULL DEFAULT 1,           -- 1, or 2 for the second of a joint
+  name             TEXT NOT NULL,                        -- full legal name, "First Middle Last"
+  aka              TEXT NOT NULL DEFAULT '',             -- "Peggy; née Novak"
+  dob              DATE,
+  city             TEXT NOT NULL DEFAULT '',
+  state            TEXT NOT NULL DEFAULT '',
+  prior_residence  TEXT NOT NULL DEFAULT '',             -- "Toledo, OH"
+  family           TEXT NOT NULL DEFAULT '',             -- "Spouse: Walter; children: Linda"
+  watching         BOOLEAN NOT NULL DEFAULT TRUE,
+  status           TEXT NOT NULL DEFAULT 'active',       -- active | under_review | confirmed
+  needs_attention  TEXT NOT NULL DEFAULT '',             -- "add this person's own date of birth"
+  last_checked     TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (insured_id, slot)
+);
+
+CREATE TABLE IF NOT EXISTS watch_matches (
+  id             SERIAL PRIMARY KEY,
+  person_id      INTEGER NOT NULL REFERENCES watch_people(id) ON DELETE CASCADE,
+  source_url     TEXT NOT NULL,
+  source_name    TEXT NOT NULL DEFAULT '',
+  obit_name      TEXT,
+  obit_dod       DATE,
+  obit_place     TEXT,
+  score          INTEGER NOT NULL,
+  factors        JSONB NOT NULL DEFAULT '[]',
+  excerpt        TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL DEFAULT 'pending',        -- pending | confirmed | dismissed
+  found_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at    TIMESTAMPTZ,
+  reviewed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewer_note  TEXT NOT NULL DEFAULT '',
+  UNIQUE (person_id, source_url)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_matches_pending ON watch_matches (status, score DESC);
+
+CREATE TABLE IF NOT EXISTS watch_runs (
+  id            SERIAL PRIMARY KEY,
+  trigger       TEXT NOT NULL DEFAULT 'manual',          -- schedule | manual | vendor_file
+  triggered_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at   TIMESTAMPTZ,
+  total         INTEGER NOT NULL DEFAULT 0,
+  checked       INTEGER NOT NULL DEFAULT 0,
+  new_matches   INTEGER NOT NULL DEFAULT 0,
+  queries       INTEGER NOT NULL DEFAULT 0,
+  errors        JSONB NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_watch_runs_started ON watch_runs (started_at DESC);
+
+CREATE TABLE IF NOT EXISTS watch_sources (
+  id          SERIAL PRIMARY KEY,
+  kind        TEXT NOT NULL,                             -- web_search | rss | page
+  name        TEXT NOT NULL,
+  enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+  states      TEXT[] NOT NULL DEFAULT '{}',              -- only insureds in these states; empty = all
+  options     JSONB NOT NULL DEFAULT '{}',               -- url, provider, domains, max_queries…
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+/* The starting set of sources, the same ones the Python tool shipped
+   with, put in once. A marker rather than "if the table is empty", so
+   an administrator who deletes them all does not get them back on the
+   next deploy. */
+CREATE TABLE IF NOT EXISTS watch_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '');
+INSERT INTO watch_sources (kind, name, options)
+SELECT x.kind, x.name, x.options::jsonb FROM (VALUES
+  ('web_search', 'Web search (Brave)',
+   '{"provider":"brave","max_queries":5,"fetch_pages":true,"freshness_days":120}'),
+  ('web_search', 'Obituary aggregators',
+   '{"provider":"brave","domains":["legacy.com","tributearchive.com","echovita.com","dignitymemorial.com"],"max_queries":2}'),
+  ('page', 'Misaskim aveilim listings', '{"url":"https://www.misaskim.org/aveilim"}'),
+  ('web_search', 'Misaskim (site search)',
+   '{"provider":"brave","domains":["misaskim.org"],"max_queries":2,"freshness_days":30}')
+) AS x(kind, name, options)
+WHERE NOT EXISTS (SELECT 1 FROM watch_meta WHERE k = 'sources_seeded');
+INSERT INTO watch_meta (k, v) VALUES ('sources_seeded', '1') ON CONFLICT DO NOTHING;

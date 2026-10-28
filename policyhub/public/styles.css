@@ -2066,3 +2066,45 @@ tr.scen-shown > td:first-child { box-shadow: inset 2px 0 0 var(--fg, #111); }
 .opp-pass-row { display: flex; align-items: center; gap: 10px; margin-top: 14px;
   padding-top: 12px; border-top: 1px solid var(--grid); }
 .opp-take.opp-passed { background: rgba(0, 0, 0, 0.025); }
+
+/* ------------------------------------------------------------------ *
+ * Mortality Watch
+ *
+ * A queue of notices to decide, each laid out as the decision is made:
+ * the score first and largest (it is what decides whether to read on),
+ * then who it might be, then what the notice says, then why the score
+ * is what it is -- a row of ticks and crosses, the same rubric for
+ * every notice so they can be compared at a glance.
+ * ------------------------------------------------------------------ */
+.mw-match { display: flex; gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--grid); }
+.mw-match:first-child { padding-top: 2px; }
+.mw-match:last-of-type { border-bottom: 0; }
+.mw-score { flex: 0 0 86px; text-align: center; }
+.mw-score-n { font-size: 30px; font-weight: 700; line-height: 1.1; margin-bottom: 6px;
+  font-variant-numeric: tabular-nums; }
+.mw-score.likely .mw-score-n { color: var(--critical); }
+.mw-body { flex: 1; min-width: 0; }
+.mw-who { font-size: 15px; font-weight: 600; margin-bottom: 3px; }
+.mw-who .muted { font-weight: 400; font-size: 13px; }
+.mw-notice { margin: 10px 0 8px; font-size: 13.5px; }
+.mw-factors { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.mw-factor { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.mw-factor.hit { border-color: var(--success-text); color: var(--success-text); }
+.mw-factor.miss { color: var(--muted); }
+.mw-factor b { font-weight: 700; margin-left: 2px; }
+.mw-excerpt { font-size: 12.5px; color: var(--muted); line-height: 1.55; max-height: 5.6em;
+  overflow: hidden; border-left: 2px solid var(--grid); padding-left: 10px; margin-bottom: 10px; }
+.mw-actions { display: flex; gap: 8px; }
+.mw-running { padding: 10px 14px; margin-bottom: 16px; border-radius: 8px;
+  background: rgba(0, 0, 0, 0.04); font-size: 13.5px; }
+tr.mw-dim > td { opacity: 0.55; }
+.mw-attn { font-size: 12px; color: var(--critical); font-weight: 500; margin-top: 2px; }
+.mw-warn { color: var(--critical); }
+.mw-check-out { border-top: 1px solid var(--grid); padding-top: 10px; }
+.mw-check-row { font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--grid); }
+.mw-check-row strong { display: inline-block; min-width: 28px; }
+@media (max-width: 700px) { .mw-match { flex-direction: column; gap: 8px; }
+  .mw-score { text-align: left; display: flex; align-items: center; gap: 10px; flex: none; } }
+/* Long source descriptions and family lists wrap rather than pushing the
+   table off the side of the card. */
+td.mw-wrap { white-space: normal; }

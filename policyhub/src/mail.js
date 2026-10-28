@@ -185,6 +185,15 @@ export const MAIL_KINDS = [
   { kind: 'registration_new', label: 'Somebody registered for access',
     who: 'staff',
     note: 'Sent when a registration lands in the queue.' },
+  /* Mortality Watch. Administrators, because they are the only people
+     who can see the tab it points at. Not forced: an administrator who
+     would rather read the queue each morning can switch it off. The
+     message carries initials, a score and a date -- never the insured's
+     name, and never the notice's own address, which is usually the name
+     spelled out in a URL. */
+  { kind: 'mortality_alert', label: 'A possible death notice was found',
+    who: 'admin',
+    note: 'Sent after a Mortality Watch sweep files anything for review. Initials only.' },
 ];
 /* Kinds that exist but are not something anybody subscribes to, so they are
    not on the preferences screen. `test` is asked for explicitly by the person
@@ -650,6 +659,18 @@ export const TEMPLATES = {
       + `promise rather than a list. It is on the Investors page. ${link()}`,
   }),
 
+  mortality_alert: ({ likely, possible, checked, matches }) => ({
+    subject: Number(likely) > 0
+      ? `Mortality Watch: ${likely} likely ${Number(likely) === 1 ? 'match' : 'matches'} to review`
+      : `Mortality Watch: ${possible} possible ${Number(possible) === 1 ? 'match' : 'matches'} to review`,
+    text: `The latest Mortality Watch sweep filed notices for review.\n\n`
+      + `${matches}\n\n`
+      + `${checked} people were checked. The notices, the scoring and the Confirm and `
+      + `Dismiss buttons are on the Mortality Watch tab. ${link()}\n\n`
+      + 'An obituary is a lead, not proof. Confirm with a death certificate or the carrier '
+      + 'before filing a claim.',
+  }),
+
   test: ({ who }) => ({
     subject: 'Test message from the Poel Capital portal',
     text: `This is a test, sent by ${who}.\n\n`
@@ -723,6 +744,9 @@ export const MAIL_FIELDS = {
   registration_approved: { name: 'Ada Sommers', email: 'ada@example.com' },
   registration_new: { name: 'Ada Sommers', email: 'ada@example.com',
     entity: 'Sommers Family Trust', when: '6 October 2026' },
+  mortality_alert: { likely: '1', possible: '2', checked: '48',
+    matches: '· M.K. — 92, likely · died 10/21/2026 · Dearborn, MI\n'
+      + '· H.W. — 63, possible · Sarasota, FL\n· B.F. — 55, possible' },
   test: { who: 'Jonathan Polter' },
 };
 
