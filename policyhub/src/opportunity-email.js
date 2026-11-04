@@ -40,6 +40,7 @@
    ===================================================================== */
 
 import { scrubNames, namesLeftIn } from '../public/initials.js';
+import { compoundedAs, compoundedWord, cleanCompounding } from '../public/irr.js';
 
 export { scrubNames };
 
@@ -94,6 +95,8 @@ export function opportunityEmail(o, opts = {}) {
   const partial = share < 100 - 1e-9;
   const interest = ['simple', 'compound', 'both'].includes(opts.interest)
     ? opts.interest : 'simple';
+  const cmpHow = cleanCompounding(opts.compounding);
+  const C = (r) => compoundedAs(r === null || r === undefined ? r : Number(r), cmpHow);
   const firm = opts.firm || 'Poel Capital';
   const warn = [];
 
@@ -121,7 +124,7 @@ export function opportunityEmail(o, opts = {}) {
     survivorship ? 'survivorship policy' : 'life policy',
   ].filter(Boolean).join(' ');
   const subjectRate = base
-    ? rate(interest === 'compound' ? base.compound_rate : base.rate) : null;
+    ? rate(interest === 'compound' ? C(base.compound_rate) : base.rate) : null;
   const subject = [
     `Investment opportunity${headline ? ` — ${headline}` : ''}`,
     subjectRate ? `${subjectRate} at life expectancy` : null,
@@ -187,14 +190,14 @@ export function opportunityEmail(o, opts = {}) {
     const at = Number.isFinite(drivingMonths) && drivingMonths > 0
       ? `At the ${drivingMonths} month life expectancy mark` : 'At life expectancy';
     const simple = rate(base.rate);
-    const comp = rate(base.compound_rate);
+    const comp = rate(C(base.compound_rate));
     /* Named for what it is. An IRR and a simple-interest return are
        different numbers and the reader is entitled to know which one
        they have been sent. */
     const said = interest === 'compound'
-      ? (comp ? `the IRR is ${comp} a year` : null)
+      ? (comp ? `the IRR is ${comp} a year${cmpHow === 'annual' ? '' : `, ${compoundedWord(cmpHow)}`}` : null)
       : interest === 'both'
-        ? (simple && comp ? `the return is ${simple} a year simple, ${comp} compounded` : null)
+        ? (simple && comp ? `the return is ${simple} a year simple, ${comp} ${compoundedWord(cmpHow)}` : null)
         : (simple ? `the return is ${simple} a year, simple interest` : null);
     if (said) tail.push(`${at}, ${said}.`);
   } else {

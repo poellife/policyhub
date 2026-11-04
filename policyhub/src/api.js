@@ -1351,12 +1351,20 @@ const cleanInterestShown = (value) => {
   return INTEREST_SHOWN.includes(want) ? { shown: want } : null;
 };
 
+/* How often the compounded rate compounds when it is shown. */
+const cleanCompoundingPref = (value) => {
+  const want = typeof value === 'string' ? value
+    : (value && typeof value === 'object' ? str(value.how) : '');
+  return ['annual', 'monthly', 'daily'].includes(want) ? { how: want } : null;
+};
+
 const PREF_CLEANERS = {
   policy_columns: cleanArrangement,
   report_columns: cleanArrangement,
   view_defaults: cleanView,
   rate_basis: cleanRateBasis,
   interest_shown: cleanInterestShown,
+  compounding: cleanCompoundingPref,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -3687,7 +3695,9 @@ const sheetOptions = (src) => {
   const share = Number.isFinite(asked) && asked > 0 && asked <= 100 ? asked : 100;
   const interest = ['simple', 'compound', 'both'].includes(str(src.interest))
     ? str(src.interest) : 'simple';
-  return { share, interest };
+  const compounding = ['annual', 'monthly', 'daily'].includes(str(src.compounding))
+    ? str(src.compounding) : 'annual';
+  return { share, interest, compounding };
 };
 
 /* Named for the deal rather than "sheet.pdf", because it lands in a
@@ -3703,9 +3713,9 @@ router.get('/opportunities/:id/sheet.pdf', wrap(async (req, res) => {
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
 
   const sheet = sheetFor(o);
-  const { share, interest } = sheetOptions(req.query);
+  const { share, interest, compounding } = sheetOptions(req.query);
 
-  const pdf = opportunityPdf(sheet, { share, interest });
+  const pdf = opportunityPdf(sheet, { share, interest, compounding });
   await audit(req.user.uid, 'opportunity', Number(req.params.id), 'read',
     `downloaded the one-pager${share < 100 ? ` at ${share}%` : ''} · ${describeOrigin(req)}`);
 
@@ -3739,7 +3749,7 @@ router.get('/opportunities/:id/email', blockInvestors, wrap(async (req, res) => 
   const o = await loadOpportunity(req, req.params.id);
   if (!o) return res.status(404).json({ error: 'Opportunity not found' });
 
-  const { share, interest } = sheetOptions(req.query);
+  const { share, interest, compounding } = sheetOptions(req.query);
 
   /* Signed by whoever is composing it, not by "the system". */
   const from = [req.user.name || '', 'Poel Capital'].filter(Boolean).join('\n');
@@ -3748,7 +3758,7 @@ router.get('/opportunities/:id/email', blockInvestors, wrap(async (req, res) => 
      "If we get him to 260" case went out with 260 on the paper and 300
      in the note. */
   const draft = opportunityEmail(sheetFor(o), {
-    share, interest, from,
+    share, interest, compounding, from,
     to: str(req.query.to) || '',
   });
 
@@ -3883,8 +3893,8 @@ router.post('/opportunities/:id/send-sheet', blockInvestors, blockMedical, oppEd
 
     /* The document, drawn now, from the deal as it stands. */
     const sheet = sheetFor(o);
-    const { share, interest } = sheetOptions(req.body);
-    const pdf = opportunityPdf(sheet, { share, interest });
+    const { share, interest, compounding } = sheetOptions(req.body);
+    const pdf = opportunityPdf(sheet, { share, interest, compounding });
     const filename = sheetFilename(o);
 
     const queued = await queueMail({
@@ -8791,6 +8801,10 @@ router.get('/policies/:id/maturity.pdf', blockInvestors, blockMedical,
        assumed collection by it. Who prepared it does not: the footer
        that said so came off the page. */
     as_of: asOf,
+    /* How often the IRR on the sheet compounds, as the screen it was
+       downloaded from was set. Annually unless asked. */
+    compounding: ['annual', 'monthly', 'daily'].includes(str(req.query.compounding))
+      ? str(req.query.compounding) : 'annual',
   };
 
   await audit(req.user.uid, 'policy', Number(req.params.id), 'read',

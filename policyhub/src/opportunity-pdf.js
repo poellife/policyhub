@@ -22,6 +22,7 @@
 
 import { PdfDocument, textWidth, wrap, pdfString } from './pdf.js';
 import { scrubNames } from '../public/initials.js';
+import { compoundedAs, compoundedWord, cleanCompounding } from '../public/irr.js';
 
 const PAGE = [792, 612];          // Letter, on its side
 const MARGIN = 36;
@@ -366,6 +367,11 @@ export function opportunityPdf(o, opts = {}) {
   const f = share / 100;
   const partial = share < 100 - 1e-9;
   const interest = ['simple', 'compound', 'both'].includes(opts.interest) ? opts.interest : 'simple';
+  /* How often the compounded figure compounds: annually (the XIRR as
+     solved), monthly or daily. Only the statement of the rate changes. */
+  const cmpHow = cleanCompounding(opts.compounding);
+  const C = (r) => compoundedAs(r === null || r === undefined ? r : Number(r), cmpHow);
+  const cmpWord = compoundedWord(cmpHow);
   const firm = opts.firm || 'Poel Capital';
 
   const a = o.analysis || {};
@@ -464,7 +470,7 @@ export function opportunityPdf(o, opts = {}) {
   const shownRate = (sc) => {
     if (!sc) return null;
     const simple = rate(sc.rate);
-    const comp = rate(sc.compound_rate);
+    const comp = rate(C(sc.compound_rate));
     if (interest === 'compound') return comp === '--' ? null : comp;
     if (interest === 'both') {
       return simple === '--' && comp === '--' ? null : `${simple} / ${comp}`;
@@ -472,8 +478,8 @@ export function opportunityPdf(o, opts = {}) {
     return simple === '--' ? null : simple;
   };
   const headRate = shownRate(base) || '--';
-  const headRateNote = interest === 'compound' ? 'a year, compounded'
-    : interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
+  const headRateNote = interest === 'compound' ? `a year, ${cmpWord}`
+    : interest === 'both' ? `a year, simple / ${cmpWord}` : 'a year, simple';
   const swing = [
     shownRate(scenLate) ? `${shownRate(scenLate)} two years late` : null,
     shownRate(scenEarly) ? `${shownRate(scenEarly)} two years early` : null,
@@ -575,9 +581,9 @@ export function opportunityPdf(o, opts = {}) {
     : `life expectancy ${o.le_months} months`);
   if (base) {
     headBits.push(interest === 'compound'
-      ? `${rate(base.compound_rate)} at life expectancy, compounded`
+      ? `${rate(C(base.compound_rate))} at life expectancy, ${cmpWord}`
       : interest === 'both'
-        ? `${rate(base.rate)} simple / ${rate(base.compound_rate)} compounded at life expectancy`
+        ? `${rate(base.rate)} simple / ${rate(C(base.compound_rate))} ${cmpWord} at life expectancy`
         : `${rate(base.rate)} at life expectancy`);
   }
   at(doc, headBits.join('  ·  '), 0, { size: 9 });
@@ -641,7 +647,7 @@ export function opportunityPdf(o, opts = {}) {
     doc.y -= 16;
   } else {
     const rateHead = interest === 'both' ? 'Return  simple / cmp'
-      : interest === 'compound' ? 'Return  compounded' : 'Return';
+      : interest === 'compound' ? `Return  ${cmpWord}` : 'Return';
     const w = [116, 92, 92, 92, 92, 56, 46, 108];
     let x = 0;
     const cols = ['Maturity', 'Premiums paid', 'Total invested', 'Death benefit', 'Profit',
@@ -661,8 +667,8 @@ export function opportunityPdf(o, opts = {}) {
       money((s.death_benefit ?? benefit) * f, 2),
       money(s.profit * f, 2), `${Number(s.multiple).toFixed(2)}x`,
       Number(s.years).toFixed(1),
-      interest === 'compound' ? rate(s.compound_rate)
-        : interest === 'both' ? `${rate(s.rate)} / ${rate(s.compound_rate)}`
+      interest === 'compound' ? rate(C(s.compound_rate))
+        : interest === 'both' ? `${rate(s.rate)} / ${rate(C(s.compound_rate))}`
           : rate(s.rate),
     ]), { size: 8.5 });
     doc.space(6);

@@ -419,3 +419,33 @@ export function fmtRate(rate, { dp = 2 } = {}) {
   if (pct < -99.99) return '−100%';
   return `${pct.toFixed(dp)}%`;
 }
+
+/* ---------------------- how often it compounds ------------------------
+ * The compounded rate above is an annual effective rate: the XIRR, a 365-
+ * day year, one compounding a year. The same dated cash flows can be
+ * quoted compounding monthly or daily instead. Nothing about the deal
+ * changes -- same dollars, same dates, same profit -- only the number on
+ * the label: the more often it compounds, the lower the quoted rate,
+ * because interest starts earning interest sooner.
+ *
+ *     nominal rate, compounding n times a year  =  n × ((1 + r)^(1/n) − 1)
+ *
+ * 16.00% annually is 14.93% monthly and 14.85% daily: all three turn $1
+ * into $1.16 over a year. A display convention only, applied where the
+ * figure is shown; what is stored and computed is always the annual rate.
+ * ------------------------------------------------------------------- */
+export const COMPOUNDINGS = { annual: 1, monthly: 12, daily: 365 };
+export const COMPOUNDING_WORDS = { annual: 'annually', monthly: 'monthly', daily: 'daily' };
+export const cleanCompounding = (how) =>
+  (Object.prototype.hasOwnProperty.call(COMPOUNDINGS, how) ? how : 'annual');
+
+/** An annual effective rate, restated as compounding `how` often. */
+export function compoundedAs(rate, how = 'annual') {
+  const n = COMPOUNDINGS[cleanCompounding(how)];
+  if (rate === null || rate === undefined || !Number.isFinite(rate) || n === 1 || rate <= -1)
+    return rate;
+  return n * (Math.pow(1 + rate, 1 / n) - 1);
+}
+
+/** "compounded monthly", for a label. */
+export const compoundedWord = (how) => `compounded ${COMPOUNDING_WORDS[cleanCompounding(how)]}`;

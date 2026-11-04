@@ -41,6 +41,7 @@
    ===================================================================== */
 
 import { PdfDocument, textWidth, wrap, pdfString } from './pdf.js';
+import { compoundedAs, compoundedWord, cleanCompounding } from '../public/irr.js';
 
 const PAGE = [612, 792];          // Letter, upright: this is a statement
 const MARGIN = 54;
@@ -221,10 +222,11 @@ export function maturityPdf(m) {
      the register in the portal; a sheet that hands a reader two rates
      for one case hands them the job of deciding which one it meant. */
   doc.reserve(2);
-  at(doc, 'COMPOUNDED (IRR)', 0, { style: 'sansBold', size: 6.5 });
+  at(doc, `${compoundedWord(m.compounding).toUpperCase()} (IRR)`, 0, { style: 'sansBold', size: 6.5 });
   doc.y -= 14;
   doc.reserve(1);
-  at(doc, rate(m.compound_rate), 0, { style: 'bold', size: 20 });
+  at(doc, rate(compoundedAs(m.compound_rate == null ? m.compound_rate : Number(m.compound_rate),
+    cleanCompounding(m.compounding))), 0, { style: 'bold', size: 20 });
   doc.y -= 26;
   if (!m.settled)
     note(doc, 'The claim has not been paid. The rate above assumes the death benefit is '

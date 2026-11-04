@@ -3,11 +3,12 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact, seriesColor, hideTip } from './charts.js';
-import { reportsView, buildOpportunitySheet, wireReports } from './reports.js';
+import { reportsView, buildOpportunitySheet, wireReports, setReportCompounding } from './reports.js';
 // The agreement's clauses live in one file, read by the browser for preview
 // and by the server for the PDF. See public/agreement-template.js.
 import { AGREEMENT_FIELDS, FIELD_SECTIONS } from './agreement-template.js';
-import { analyzeFlows, fmtRate, today as irrToday } from './irr.js';
+import { analyzeFlows, fmtRate, today as irrToday, compoundedAs, compoundedWord,
+  cleanCompounding } from './irr.js';
 import { longevityRisk, concentration, classifyImpairments,
          CATEGORIES, CATEGORY_KEYS } from './longevity.js';
 // The build this page was served from. The server reports the same
@@ -69,6 +70,10 @@ const state = {
      from every other asset they hold — and the desk works in simple
      interest, which is how this business talks about a return. */
   interestShown: null,
+  /* How often the compounded rate compounds: 'annual' | 'monthly' |
+     'daily'. A way of stating the same number, saved against the
+     account like interestShown. See compoundingToggle below. */
+  compounding: 'annual',
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -120,6 +125,8 @@ async function loadPrefs() {
        before the user is even known. */
     state.interestShown = ['simple', 'compound', 'both']
       .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : null;
+    state.compounding = cleanCompounding(prefs?.compounding?.how);
+    setReportCompounding(state.compounding);
   } catch {
     state.policyCols = null;
   }
@@ -457,7 +464,7 @@ const basisNote = (a, { count } = {}) => {
   return other === null || other === undefined
     ? `${here}${of}`
     : `${here}${of} · ${BASIS_WORDS[rateBasis() === 'simple' ? 'weighted' : 'simple']} ${
-      fmtRate(other)}`;
+      showSimpleToo() ? fmtRate(other) : fmtCmp(other)}`;
 };
 
 /** The control. Staff only, like the compounded figure beside it. */
@@ -535,17 +542,51 @@ const INTEREST_WORDS = {
  */
 function rateText(simple, compound, { size = '' } = {}) {
   const mode = interestShown();
-  if (mode === 'compound') return fmtRate(compound);
+  if (mode === 'compound') return fmtCmp(compound);
   if (mode === 'simple' || compound === null || compound === undefined)
     return fmtRate(simple);
   return `${fmtRate(simple)}<span class="rate-alt"${
-    size ? ` style="font-size:${size}"` : ''}> · ${fmtRate(compound)} cmp</span>`;
+    size ? ` style="font-size:${size}"` : ''}> · ${fmtCmp(compound)} cmp</span>`;
 }
+
+/* ------------------------- how often it compounds --------------------
+ * The compounded rate is solved as an annual effective rate (Excel's
+ * XIRR). This restates it compounding monthly or daily instead -- the
+ * same deal, a lower-looking number. See `compoundedAs` in irr.js.
+ * Saved against the account; the PDFs and the covering note follow it.
+ * ------------------------------------------------------------------- */
+const compounding = () => cleanCompounding(state.compounding);
+const asCmp = (r) => compoundedAs(r, compounding());
+const fmtCmp = (r, opts) => fmtRate(asCmp(r), opts);
+/** "compounded monthly" -- always says which, so a figure is never ambiguous. */
+const cmpWord = () => compoundedWord(compounding());
+
+const compoundingToggle = () => `
+  <select id="compounding" class="head-select" aria-label="How often the compounded rate compounds"
+    title="The same return, stated compounding annually, monthly or daily">
+    <option value="annual" ${compounding() === 'annual' ? 'selected' : ''}>Compound annually</option>
+    <option value="monthly" ${compounding() === 'monthly' ? 'selected' : ''}>Compound monthly</option>
+    <option value="daily" ${compounding() === 'daily' ? 'selected' : ''}>Compound daily</option>
+  </select>`;
+
+const wireCompounding = () => {
+  const el = $('#compounding');
+  if (!el || el.dataset.wired) return;
+  el.dataset.wired = '1';
+  el.addEventListener('change', async (e) => {
+    state.compounding = cleanCompounding(e.target.value);
+    setReportCompounding(state.compounding);
+    render();
+    try {
+      await api('/me/prefs/compounding', { method: 'PUT', body: { how: state.compounding } });
+    } catch (err) { toast(`That was not saved: ${err.message}`); }
+  });
+};
 
 /** What the figure above it is, in words. For the note under a tile. */
 const interestNote = () => (interestShown() === 'both'
-  ? 'simple · compounded'
-  : INTEREST_WORDS[interestShown()]);
+  ? `simple · ${cmpWord()}`
+  : interestShown() === 'compound' ? cmpWord() : INTEREST_WORDS[interestShown()]);
 
 /**
  * The control.
@@ -557,7 +598,7 @@ const interestNote = () => (interestShown() === 'both'
  * had quoted an IRR to. One number, said two ways, is a disagreement;
  * a switch that says which one you are looking at is not.
  */
-const interestToggle = () => (`
+const interestToggle = () => (`${compoundingToggle()}
   <select id="interestShown" class="head-select"
     aria-label="How a return is expressed">
     <option value="simple" ${interestShown() === 'simple' ? 'selected' : ''}
@@ -579,13 +620,14 @@ const interestToggle = () => (`
  */
 const showSimpleToo = () => interestShown() !== 'compound';
 
-const simpleBox = () => `
+const simpleBox = () => `${compoundingToggle()}
   <label class="head-check" title="Simple interest on dollar-years, beside the IRR">
     <input type="checkbox" id="showSimpleToo" ${showSimpleToo() ? 'checked' : ''}>
     <span>Show simple interest</span>
   </label>`;
 
 const wireSimpleBox = () => {
+  wireCompounding();
   $('#showSimpleToo')?.addEventListener('change', async (e) => {
     state.interestShown = e.target.checked ? 'both' : 'compound';
     render();
@@ -598,6 +640,7 @@ const wireSimpleBox = () => {
 
 /** Wire it up. Call from a view's `after`. */
 const wireInterestToggle = () => {
+  wireCompounding();
   $('#interestShown')?.addEventListener('change', async (e) => {
     state.interestShown = ['simple', 'compound', 'both'].includes(e.target.value)
       ? e.target.value : interestShown();
@@ -1934,9 +1977,9 @@ async function dashboardView() {
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
       <div class="stat">
-        <div class="label">Portfolio return${showsBothRates() ? ' · compounded' : ''}</div>
-        <div class="value">${fmtRate(showsBothRates()
-          ? bookCompound(sum.rate) : bookRate(sum.rate))}</div>
+        <div class="label">Portfolio return${showsBothRates() ? ` · ${cmpWord()}` : ''}</div>
+        <div class="value">${showsBothRates()
+          ? fmtCmp(bookCompound(sum.rate)) : fmtRate(bookRate(sum.rate))}</div>
         ${''/* Which of the two ways of combining the policies is on the
                tile, and what the other reads. Printed rather than left to
                the control in the heading: the gap between them is the
@@ -2631,7 +2674,7 @@ async function policyView() {
              there instead is the sheet that says how it did. */}
       ${p.status === 'Matured' && !isInvestorUser()
         ? `<a class="btn" id="maturitySheetBtn"
-             href="/api/policies/${p.id}/maturity.pdf">One-pager</a>`
+             href="/api/policies/${p.id}/maturity.pdf?compounding=${compounding()}">One-pager</a>`
         : ''}
       ${['admin', 'manager'].includes(state.user.role) && p.status !== 'Matured'
         ? '<button id="offerPolicyBtn">Offer to investors</button>' : ''}
@@ -3437,8 +3480,8 @@ function returnTab(p, d) {
       ${showsBothRates() && r.compound_rate != null ? `
       <div class="stat">
         <div class="label">${settled ? 'Realized return' : d.status === 'Matured'
-          ? 'Return if collected today' : 'Return if matured today'} · compounded</div>
-        <div class="value hero">${fmtRate(r.compound_rate)}</div>
+          ? 'Return if collected today' : 'Return if matured today'} · ${cmpWord()}</div>
+        <div class="value hero">${fmtCmp(r.compound_rate)}</div>
         <div class="note">${r.days.toLocaleString('en-US')} days · ${r.years.toFixed(2)} years held${
           r.multiple ? `<br>${r.multiple.toFixed(2)}× over the period, not annualised` : ''}</div>
       </div>` : ''}
@@ -7338,7 +7381,7 @@ async function opportunitySheetView() {
                sentences long. */}
         <a class="btn btn-primary" id="sheetDownload"
            href="/api/opportunities/${o.id}/sheet.pdf?share=${share}&interest=${
-  encodeURIComponent(interestShown())}">Download PDF</a>
+  encodeURIComponent(interestShown())}&compounding=${compounding()}">Download PDF</a>
       </div>
       <div class="rpt-hint no-print">
         <strong>Download PDF</strong> saves the finished document — landscape, initials only,
@@ -7350,7 +7393,7 @@ async function opportunitySheetView() {
       </div>
       <div class="no-print" id="sheetEmail"></div>
       <div class="rpt-output">${buildOpportunitySheet(o, {
-    share, interest: interestShown() })}</div>`,
+    share, interest: interestShown(), compounding: compounding() })}</div>`,
     after: () => {
       wireInterestToggle();
       $('#sheetPrint')?.addEventListener('click', () => window.print());
@@ -7388,7 +7431,7 @@ async function loadCoveringEmail(o, share) {
   let draft;
   try {
     draft = await api(`/opportunities/${o.id}/email?share=${share}&interest=${
-      encodeURIComponent(interestShown())}`);
+      encodeURIComponent(interestShown())}&compounding=${compounding()}`);
   } catch (err) {
     box.innerHTML = `<div class="rpt-hint">The covering email could not be written:
       ${esc(err.message)}</div>`;
@@ -7488,7 +7531,7 @@ async function loadCoveringEmail(o, share) {
       const out = await api(`/opportunities/${o.id}/send-sheet`, { method: 'POST', body: {
         preview, investor_id: preview ? undefined : Number(sel.value),
         subject: subject.value, body: body.value,
-        share, interest: interestShown() } });
+        share, interest: interestShown(), compounding: compounding() } });
       if (out.status === 'Failed')
         say(`The email to ${esc(out.to)} was refused by the mail service: ${esc(out.error || '')}`, true);
       else if (preview)
@@ -7926,11 +7969,11 @@ function maturityColumns(m, investorView) {
         : `${r.rate_days} days held`}">${fmtRate(r.rate)}${
         r.rate != null && (paid(r) == null || r.rate_short || r.rate_ambiguous)
           ? ' *' : ''}</span>` }]),
-    { key: 'compound_rate', header: investorView ? 'Return' : 'Return · compounded',
+    { key: 'compound_rate', header: investorView ? 'Return' : `Return · ${cmpWord()}`,
       cls: 'num', value: (r) => r.compound_rate,
       cell: (r) => `<span title="Internal rate of return on the same dated cash flows${
         paid(r) == null ? ' — assumes the death benefit is collected today' : ''}">${
-        fmtRate(r.compound_rate)}${r.compound_rate != null && paid(r) == null
+        fmtCmp(r.compound_rate)}${r.compound_rate != null && paid(r) == null
           ? '<span class="muted"> *</span>' : ''}</span>` },
     /* What the house takes on this case, and what the investors are left
        with. Two columns rather than one, because "20%" and "$482,000"
@@ -7953,12 +7996,12 @@ function maturityColumns(m, investorView) {
               pct != null ? ' · on this case' : ''}</div>`;
         } },
       { key: 'net_rate',
-        header: `Net to investors${showSimpleToo() ? ' · compounded' : ''}`, cls: 'num',
+        header: `Net to investors${showSimpleToo() ? ` · ${cmpWord()}` : ''}`, cls: 'num',
         /* Sorted on whichever is being shown, so the column and the
            ordering cannot disagree. */
         value: (r) => (showSimpleToo() ? r.net_compound_rate : r.net_compound_rate),
         cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
-          fmtRate(r.net_compound_rate)}</span>${showSimpleToo()
+          fmtCmp(r.net_compound_rate)}</span>${showSimpleToo()
           ? `<div class="secondary">${fmtRate(r.net_rate)} simple</div>` : ''}` },
     ] : []),
   ];
@@ -8224,14 +8267,14 @@ async function maturitiesView() {
                flows read the other way and appears under it only when
                the box in the header is ticked. */}
         <div class="label">${paidCount ? 'Realized return' : 'Return if collected today'}${
-          showsBothRates() ? ' · compounded' : ''}</div>
-        <div class="value">${fmtRate(bookCompound(paidCount ? m.realized : m.portfolio))}</div>
+          showsBothRates() ? ` · ${cmpWord()}` : ''}</div>
+        <div class="value">${fmtCmp(bookCompound(paidCount ? m.realized : m.portfolio))}</div>
         ${showsBothRates() && showSimpleToo()
           ? `<div class="note">${fmtRate(bookRate(paidCount ? m.realized : m.portfolio))}
              simple interest</div>` : ''}
         <div class="note">${paidCount
           ? `${paidCount} paid ${paidCount === 1 ? 'claim' : 'claims'}, each dated when it was
-             received${unpaidCount ? ` · ${fmtRate(bookCompound(m.portfolio))} with the other ${
+             received${unpaidCount ? ` · ${fmtCmp(bookCompound(m.portfolio))} with the other ${
                unpaidCount} assumed collected today` : ''}`
           : `no claims paid yet — every one of the ${rows.length} is assumed collected today`}${
           basisNote(paidCount ? m.realized : m.portfolio)
@@ -8258,7 +8301,7 @@ async function maturitiesView() {
               and the whole ledger. What they are owed is this register,
               already net, and their statements. */}${
             investorView ? '' : `<a class="btn-sm"
-              href="/api/policies/${r.id}/maturity.pdf"
+              href="/api/policies/${r.id}/maturity.pdf?compounding=${compounding()}"
               title="A one-page summary of this case">Sheet</a>`}${
             canEditData() ? ` <button class="btn-sm" data-proceeds="${r.id}"
               >${r.proceeds_amount == null ? 'Record proceeds' : 'Edit'}</button>` : ''}${
@@ -8283,7 +8326,7 @@ async function maturitiesView() {
             if (i < first) return '';
             if (c.key === 'rate') return `<td class="num">${fmtRate(totals.rate)}</td>`;
             if (c.key === 'compound_rate')
-              return `<td class="num">${fmtRate(totals.compound_rate)}</td>`;
+              return `<td class="num">${fmtCmp(totals.compound_rate)}</td>`;
             /* The commission column totals as money; the net-rate column
                has no meaningful total — a book rate is not the sum of
                per-policy rates — so it stays blank rather than lying. */
@@ -8366,8 +8409,8 @@ async function maturitiesView() {
             : (Number(r.proceeds_amount) - Number(r.total_invested || 0)) * shareFactor(r)) },
           { header: 'Return % (simple)',
             get: (r) => (r.rate == null ? '' : (r.rate * 100).toFixed(4)) },
-          { header: 'Return % (compounded)',
-            get: (r) => (r.compound_rate == null ? '' : (r.compound_rate * 100).toFixed(4)) },
+          { header: `Return % (${cmpWord()})`,
+            get: (r) => (r.compound_rate == null ? '' : (asCmp(r.compound_rate) * 100).toFixed(4)) },
           { header: 'Days Held', key: 'rate_days' },
         ], 'maturities'));
     },
@@ -13595,7 +13638,7 @@ async function mortalityView() {
             box.innerHTML = `<div class="mw-check-out">${out.results.length ? out.results.map((r) => `
               <div class="mw-check-row"><strong>${r.discarded_reason ? '—' : r.score}</strong>
                 ${esc(r.title || r.url)} <span class="muted">· ${esc(r.source_name)}${
-  r.discarded_reason ? ` · thrown out (${esc(r.discarded_reason.replace('_', ' '))})` : ` · ${esc(r.tier)}`}</span>
+  r.discarded_reason ? ` · thrown out (${esc(r.discarded_reason.replace(/_/g, ' '))})` : ` · ${esc(r.tier)}`}</span>
                 · ${mwLink(r.url, 'open ↗')}</div>`).join('') : '<div class="empty">Nothing found.</div>'}
               ${out.notes.length ? `<div class="muted" style="font-size:12px;margin-top:8px">${out.notes.map(esc).join('<br>')}</div>` : ''}</div>`;
           } catch (e) {

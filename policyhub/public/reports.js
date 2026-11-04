@@ -9,7 +9,14 @@
    ===================================================================== */
 
 import { lineChart, barChart, fmtMoney, fmtExact } from './charts.js';
-import { fmtRate } from './irr.js';
+import { fmtRate, compoundedAs, compoundedWord, cleanCompounding } from './irr.js';
+
+/* How often a compounded figure compounds on these documents: set by the
+   screen whenever the account's choice is read or changed. See
+   `compoundedAs` in irr.js -- a way of stating the rate, nothing more. */
+let reportCmp = 'annual';
+export const setReportCompounding = (how) => { reportCmp = cleanCompounding(how); };
+const fmtCmp = (r) => fmtRate(compoundedAs(r, reportCmp));
 import { scrubNames } from './initials.js';
 import { buildWorkbook } from './xlsx-write.js';
 
@@ -977,9 +984,9 @@ function buildReturn(d, o, { realized }) {
              the simple one alone — it is what their statements are written
              in, and an unexplained second figure raises a question the
              document cannot answer. */}
-      ${o.investorShare || shownCompound(p) == null ? '' : tile('Compounded (IRR)',
-        fmtRate(shownCompound(p)),
-        `the same cash flows, compounded rather than simple · ${basisWord()}`)}
+      ${o.investorShare || shownCompound(p) == null ? '' : tile(`Compounded ${compoundedWord(reportCmp).replace('compounded ', '')} (IRR)`,
+        fmtCmp(shownCompound(p)),
+        `the same cash flows, ${compoundedWord(reportCmp)} rather than simple · ${basisWord()}`)}
       ${tile(realized ? 'Proceeds' : 'Death benefit', fmtExact(p.returned),
         realized
           ? (assumed > 0
@@ -1019,7 +1026,7 @@ function buildReturn(d, o, { realized }) {
           ${o.showBasis ? '<th class="num">Invested</th><th class="num">Profit</th><th class="num">Multiple</th>' : ''}
           <th class="num">Days</th>
           <th class="num">${o.investorShare ? 'Return' : 'Return · simple'}</th>
-          ${o.investorShare ? '' : '<th class="num">Compounded</th>'}
+          ${o.investorShare ? '' : `<th class="num">${compoundedWord(reportCmp).replace(/^c/, 'C')}</th>`}
         </tr></thead>
         <tbody>${rows.length === 0
           ? `<tr><td colspan="14">No ${realized ? 'matured' : 'in-force'} policies to report.</td></tr>`
@@ -1039,7 +1046,7 @@ function buildReturn(d, o, { realized }) {
               <td class="num">${r.multiple ? `${r.multiple.toFixed(2)}×` : '—'}</td>` : ''}
             <td class="num">${r.days.toLocaleString('en-US')}</td>
             <td class="num strong">${fmtRate(r.rate)}${flag(r)}</td>
-            ${o.investorShare ? '' : `<td class="num">${fmtRate(r.compound_rate)}</td>`}
+            ${o.investorShare ? '' : `<td class="num">${fmtCmp(r.compound_rate)}</td>`}
           </tr>`).join('')}</tbody>
         ${rows.length ? `<tfoot><tr>
           <td colspan="${6 + (realized ? 2 : 0)}">Totals — ${rows.length} ${rows.length === 1 ? 'policy' : 'policies'}</td>
@@ -1054,7 +1061,7 @@ function buildReturn(d, o, { realized }) {
                  led with 65% and footed with 19% — two answers to one
                  question, on one page, with nothing to say why. */}
           <td class="num">${fmtRate(shown(p))}</td>
-          ${o.investorShare ? '' : `<td class="num">${fmtRate(shownCompound(p))}</td>`}
+          ${o.investorShare ? '' : `<td class="num">${fmtCmp(shownCompound(p))}</td>`}
         </tr></tfoot>` : ''}
       </table>
     </div>
@@ -1600,8 +1607,8 @@ function coverBlock(c) {
   const perYear = Number(base.premium_per_year) * f || 0;
 
   const collect = (base.death_benefit ?? benefit) * f;
-  const headRateNote = c.interest === 'compound' ? 'a year, compounded'
-    : c.interest === 'both' ? 'a year, simple / compounded' : 'a year, simple';
+  const headRateNote = c.interest === 'compound' ? `a year, ${c.cmpWord}`
+    : c.interest === 'both' ? `a year, simple / ${c.cmpWord}` : 'a year, simple';
   /* The same convention as the headline, and as the table overleaf.
      This cell used to print `.rate` -- the simple-interest reading --
      whatever the reader had chosen, so a sheet set to compounded said
@@ -1612,8 +1619,8 @@ function coverBlock(c) {
      grid cells are escaped. */
   const shownRate = (sc) => {
     if (!sc) return null;
-    if (c.interest === 'compound') return fmtRate(sc.compound_rate);
-    if (c.interest === 'both') return `${fmtRate(sc.rate)} / ${fmtRate(sc.compound_rate)}`;
+    if (c.interest === 'compound') return fmtRate(c.cmp(sc.compound_rate));
+    if (c.interest === 'both') return `${fmtRate(sc.rate)} / ${fmtRate(c.cmp(sc.compound_rate))}`;
     return fmtRate(sc.rate);
   };
   const swing = [
@@ -1680,11 +1687,16 @@ export function buildOpportunitySheet(o, opts = {}) {
      screen can never quote different conventions. */
   const interest = ['simple', 'compound', 'both'].includes(opts.interest)
     ? opts.interest : 'simple';
+  /* How often the compounded figure compounds -- passed in like the
+     interest convention, falling back to whatever the screen last set. */
+  const compounding = cleanCompounding(opts.compounding ?? reportCmp);
+  const cmp = (r) => compoundedAs(r, compounding);
+  const cmpWord = compoundedWord(compounding);
   const rateCell = (simple, compound) => {
-    if (interest === 'compound') return fmtRate(compound);
+    if (interest === 'compound') return fmtRate(cmp(compound));
     if (interest === 'simple' || compound === null || compound === undefined)
       return fmtRate(simple);
-    return `${fmtRate(simple)} <span class="rpt-dim">${fmtRate(compound)} cmp</span>`;
+    return `${fmtRate(simple)} <span class="rpt-dim">${fmtRate(cmp(compound))} cmp</span>`;
   };
   const f = share / 100;
   const partial = share < 100 - 1e-9;
@@ -1798,7 +1810,7 @@ export function buildOpportunitySheet(o, opts = {}) {
       Do not distribute.</div>
 
     ${coverBlock({ o, a, base, scen, f, share, partial, changing, survivorship,
-    bothNames, benefit, price, lives, runningRows, interest, rateCell })}
+    bothNames, benefit, price, lives, runningRows, interest, rateCell, cmp, cmpWord })}
 
     ${''/* The word that matches the cover's "Overview", so a reader who
            has turned the page knows which half of the document they are
@@ -1855,8 +1867,8 @@ export function buildOpportunitySheet(o, opts = {}) {
           <th class="num">Total invested</th><th class="num">Death benefit</th>
           <th class="num">Profit</th><th class="num">Multiple</th>
           <th class="num">Years</th><th class="num">Return${
-  interest === 'both' ? '<br><span class="rpt-dim">simple · compounded</span>'
-    : interest === 'compound' ? '<br><span class="rpt-dim">compounded</span>' : ''}</th></tr></thead>
+  interest === 'both' ? `<br><span class="rpt-dim">simple · ${cmpWord}</span>`
+    : interest === 'compound' ? `<br><span class="rpt-dim">${cmpWord}</span>` : ''}</th></tr></thead>
         <tbody>${scen.map((s) => `<tr class="${s.offset_months === 0 ? 'at-le' : ''}">
           <td>${esc(SCENARIO_LABEL[String(s.offset_months)] || `${s.offset_months} mo`)}
             <span class="rpt-dim">${fmtDate(s.matures_on)}</span></td>
