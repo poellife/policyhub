@@ -168,7 +168,7 @@ export async function loadScope(req, res, next) {
   /* Read from the account on every request, like the role is, so a grant
      taken away applies at once rather than at the end of a session. An
      investor never holds it whatever the column says. */
-  req.user.canValue = !['investor', 'medical'].includes(u.role)
+  req.user.canValue = !['investor', 'medical', 'cfo'].includes(u.role)
     && (u.role === 'admin' || !!u.can_value);
   /* The same rule for the LE report service. Separately granted, because
      a medical file is not a price. */
@@ -176,7 +176,7 @@ export async function loadScope(req, res, next) {
      `can_le` is permission to SPEND MONEY running the report service on
      records, which is a desk decision. The doctor reads what the desk
      has already run. */
-  req.user.canLe = !['investor', 'medical'].includes(u.role)
+  req.user.canLe = !['investor', 'medical', 'cfo'].includes(u.role)
     && (u.role === 'admin' || !!u.can_le);
   req.user.fundIds = null;
   req.user.investorIds = null;
@@ -188,6 +188,13 @@ export async function loadScope(req, res, next) {
     const { rows: i } = await q('SELECT investor_id FROM user_investors WHERE user_id = $1',
       [req.user.uid]);
     req.user.investorIds = i.map((r) => r.investor_id);
+  }
+  /* A CFO reads every policy owned by the entities they are given -- the
+     same user_funds rows a manager has, read the same way, and nothing
+     else: no investors by name, no write access anywhere. */
+  if (u.role === 'cfo') {
+    const { rows: f } = await q('SELECT fund_id FROM user_funds WHERE user_id = $1', [req.user.uid]);
+    req.user.fundIds = f.map((r) => r.fund_id);
   }
   next();
 }
@@ -217,7 +224,7 @@ async function activeAdminCount(excludeId = null) {
    book. That narrowness is the feature — an independent clinical opinion
    is contaminated the moment the clinician knows the desk needs 36
    months for the deal to work. See `medicalOnly` in api.js for the door. */
-const ROLES = ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'];
+const ROLES = ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical', 'cfo'];
 
 export async function updateUser(req, res) {
   const id = parseInt(req.params.id, 10);
@@ -251,7 +258,7 @@ export async function updateUser(req, res) {
    * Never held by an investor and never needed by an administrator, who
    * has it inherently -- storing it on either would be a value the door
    * ignores, which is a lie waiting in a table. */
-  const grantable = role !== 'investor' && role !== 'admin' && role !== 'medical';
+  const grantable = !['investor', 'admin', 'medical', 'cfo'].includes(role);
   const canValue = 'can_value' in req.body
     ? !!req.body.can_value && grantable
     : !!target.can_value && grantable;
@@ -304,6 +311,18 @@ export async function updateUser(req, res) {
         await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
       }
     }
+  } else if (role === 'cfo') {
+    /* Entity-wide, read-only. The same entity list a manager has; no
+       investor grants, which a CFO login has no use for. */
+    const fundIds = (Array.isArray(req.body.fund_ids) ? req.body.fund_ids : [])
+      .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+    if (!fundIds.length)
+      return res.status(400).json({ error: 'A CFO login needs at least one owner entity' });
+    await q('DELETE FROM user_funds WHERE user_id = $1 AND fund_id <> ALL($2)', [id, fundIds]);
+    for (const fid of fundIds)
+      await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [id, fid]);
+    await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
   } else {
     await q('DELETE FROM user_funds WHERE user_id = $1', [id]);
     await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
@@ -564,6 +583,17 @@ export async function createUser(req, res) {
         .map((n) => parseInt(n, 10)).filter(Number.isInteger))
         await q('INSERT INTO user_investors (user_id, investor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
           [rows[0].id, iid]);
+    }
+    if (role === 'cfo') {
+      const fundIds = (Array.isArray(req.body.fund_ids) ? req.body.fund_ids : [])
+        .map((n) => parseInt(n, 10)).filter(Number.isInteger);
+      if (!fundIds.length) {
+        await q('DELETE FROM users WHERE id = $1', [rows[0].id]);
+        return res.status(400).json({ error: 'Choose at least one owner entity for this CFO login' });
+      }
+      for (const fid of fundIds)
+        await q('INSERT INTO user_funds (user_id, fund_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+          [rows[0].id, fid]);
     }
     let invited = null;
     if (invite) {

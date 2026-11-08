@@ -64,6 +64,11 @@ const staffOnly = requireRole('admin', 'editor', 'viewer', 'manager');
 
 const isInvestor = (req) => req.user?.role === 'investor';
 const isManager  = (req) => req.user?.role === 'manager';
+/* A CFO login: read-only, sees every policy owned by the entities it is
+   given, through the investor's screens. Data scope is the manager's
+   (fundScope below); what it may reach at all is the allowlist further
+   down, CFO_PATHS. */
+const isCfo      = (req) => req.user?.role === 'cfo';
 
 /**
  * Two independent visibility scopes, never both active on one account:
@@ -73,7 +78,8 @@ const isManager  = (req) => req.user?.role === 'manager';
  */
 const scopeId = (req) => (isInvestor(req) ? Number(req.user.iid) || -1 : null);
 const fundScope = (req) =>
-  isManager(req) ? (req.user.fundIds && req.user.fundIds.length ? req.user.fundIds : [-1]) : null;
+  isManager(req) || isCfo(req)
+    ? (req.user.fundIds && req.user.fundIds.length ? req.user.fundIds : [-1]) : null;
 
 /**
  * Investors an administrator has put in this manager's hands by name.
@@ -211,6 +217,8 @@ function policyCarry(flows, { earned = false } = {}) {
 function blockInvestors(req, res, next) {
   if (isInvestor(req))
     return res.status(403).json({ error: 'Not available on an investor account' });
+  if (isCfo(req))
+    return res.status(403).json({ error: 'Not available on a CFO account' });
   next();
 }
 
@@ -230,6 +238,8 @@ function blockScoped(req, res, next) {
       error: 'Not available on a portfolio manager account — an administrator has to do this' });
   if (isInvestor(req))
     return res.status(403).json({ error: 'Not available on an investor account' });
+  if (isCfo(req))
+    return res.status(403).json({ error: 'Not available on a CFO account' });
   next();
 }
 
@@ -1552,6 +1562,42 @@ router.use((req, res, next) => {
     error: 'This is a medical review account. It reaches the review queue and nothing else.' });
 });
 
+/**
+ * A CFO login reaches its entities' policies and nothing else.
+ *
+ * An allowlist, for the reason the reviewer's is one: a route added next
+ * month is refused to this role by default. Reads only, apart from signing
+ * in and out, changing their own password and their own screen settings.
+ *
+ * On it: the portfolio dashboard, the policies and each policy, its return,
+ * the premium calendar and the realized maturities -- the investor's own
+ * screens -- plus their own account. Every one of those routes is already
+ * scoped by entity for a portfolio manager, and fundScope gives a CFO the
+ * same scope. Not on it: investors, opportunities, agreements, capital
+ * calls, documents, reports, exports, valuations, LE reports, the activity
+ * log, anything that writes.
+ */
+const CFO_READS = [
+  /^\/policies$/,
+  /^\/policies\/\d+$/,
+  /^\/policies\/\d+\/irr$/,
+  /^\/analytics\/summary$/,
+  /^\/maturities$/,
+  /^\/servicing$/,
+  /^\/funds$/,
+  /^\/me\/notices$/,
+  /^\/me\/notifications$/,
+  /^\/security\/locations$/,
+];
+const CFO_ANY = [/^\/auth\//, /^\/me\/prefs(\/[a-z_]+)?$/, /^\/me\/notices\/seen$/];
+router.use((req, res, next) => {
+  if (!isCfo(req)) return next();
+  if (CFO_ANY.some((re) => re.test(req.path))) return next();
+  if (req.method === 'GET' && CFO_READS.some((re) => re.test(req.path))) return next();
+  return res.status(403).json({
+    error: 'This is a read-only CFO account. It reaches its entities\' policies and nothing else.' });
+});
+
 /** The other direction: keep the desk out of the reviewer's chair. */
 const blockMedical = (req, res, next) => (isMedical(req)
   ? res.status(403).json({ error: 'Not available on a medical review account' })
@@ -1689,11 +1735,23 @@ function deidentify(value, seen = new WeakSet()) {
  * made once when the agreement is written, and the field is optional.
  */
 router.use((req, res, next) => {
-  if (!isInvestor(req)) return next();
+  if (!isInvestor(req) && !isCfo(req)) return next();
   const send = res.json.bind(res);
-  res.json = (body) => (res.locals.identified ? send(body) : send(deidentify(body)));
+  /* A CFO holds no share of anything, so the per-row "my_pct" (always 100
+     for a reader with no investor scope) is taken off rather than left to
+     read as "you own all of this". */
+  const shape = (body) => (isCfo(req) ? withoutShare(body) : body);
+  res.json = (body) => send(shape(res.locals.identified ? body : deidentify(body)));
   next();
 });
+
+function withoutShare(value) {
+  if (Array.isArray(value)) return value.map(withoutShare);
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) if (k !== 'my_pct') out[k] = withoutShare(v);
+  return out;
+}
 
 /**
  * Every route parameter in this API is a database serial. Reject anything that
@@ -1710,7 +1768,8 @@ router.param('linkId', serialParam);
  * funds
  * ------------------------------------------------------------------ */
 
-router.get('/funds', blockInvestors, wrap(async (req, res) => {
+router.get('/funds', (req, res, next) => (isCfo(req) ? next() : blockInvestors(req, res, next)),
+  wrap(async (req, res) => {
   const funds = fundScope(req);
   const { rows } = await q(
     /* Average insured age, per owner entity.
@@ -2049,7 +2108,7 @@ router.get('/policies/:id', wrap(async (req, res) => {
         WHERE r.policy_id = $1
           AND ($2::boolean IS NOT TRUE OR (r.kind = 'Premium' AND r.done_at IS NULL))
         ORDER BY (r.done_at IS NOT NULL), r.due_date, r.id`,
-      [req.params.id, isInvestor(req)]),
+      [req.params.id, isInvestor(req) || isCfo(req)]),
   ]);
   // Staff see the whole cap table; an investor sees only their own line.
   const owners = await q(
@@ -2066,11 +2125,12 @@ router.get('/policies/:id', wrap(async (req, res) => {
     values: values.rows,
     transactions: txns.rows,
     additionalInsureds: extra.rows,
-    owners: owners.rows,
+    /* A CFO sees the policy, not who holds it: no investor names. */
+    owners: isCfo(req) ? [] : owners.rows,
     /* Staff only, the same rule the opportunity follows. What the desk
        paid is the investor's business; what the desk's model thinks the
        policy is worth is the desk's. */
-    valuations: scope === null ? await valuationsFor('policy', req.params.id) : undefined,
+    valuations: scope === null && !isCfo(req) ? await valuationsFor('policy', req.params.id) : undefined,
     /* One level tighter than the valuations beside them: a
        life-expectancy report is a reading of somebody's medical file, and
        the headline still says how long they are expected to live. An

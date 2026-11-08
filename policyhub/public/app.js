@@ -139,6 +139,7 @@ async function loadPrefs() {
  * in place rather than holding up the page for a count.
  */
 async function refreshOppCount() {
+  if (isCfoUser()) return;   // no opportunities on a CFO login
   try {
     const s = await api('/opportunities/summary');
     const next = Number(s.undecided) || 0;
@@ -155,7 +156,7 @@ async function refreshOppCount() {
 /* An agreement waiting for a signature is the one thing in the portal that
    is actually blocking somebody, so it gets the same treatment. */
 async function refreshAgreementCount() {
-  if (!isInvestorUser()) return;
+  if (!isInvestorUser() || isCfoUser()) return;
   try {
     const list = await api('/agreements');
     const next = list.filter((a) => a.status === 'Out for signature' && !a.my_signed_at).length;
@@ -263,7 +264,10 @@ const viewIsDefault = () => {
  * one row at a time on a laptop, which makes choosing two a thing people
  * do by accident and undo by accident.
  */
-const entityPicker = (funds) => (isInvestorUser() ? '' : `
+/* A CFO with more than one entity gets the picker too, over its own
+   entities only (the server's /funds is already scoped to them). */
+const entityPicker = (funds) => (isInvestorUser()
+  && !(isCfoUser() && (funds || []).length > 1) ? '' : `
   <div class="entity-pick" id="entityPick">
     <button type="button" class="head-select entity-btn" id="entityBtn"
             aria-haspopup="true" aria-expanded="false">
@@ -714,7 +718,7 @@ async function forgetView() {
 
 /** Entities, fetched once per session and kept on state. */
 const loadFunds = async () => {
-  if (isInvestorUser()) return [];
+  if (isInvestorUser() && !isCfoUser()) return [];
   if (!state.funds.length) state.funds = await api('/funds').catch(() => []);
   return state.funds;
 };
@@ -1207,12 +1211,44 @@ const MANAGER_NAV = STAFF_NAV
    people did not have to change their own passwords. Everything else on
    the staff menu is a screen this account cannot reach, and a tab that
    answers 403 reads as a broken application rather than as a boundary. */
+/* The CFO's menu: the investor's own screens that are about policies, and
+   their account. No opportunities, agreements or statements -- those are
+   an investor's dealings with the firm, and a CFO login has none. */
+const CFO_NAV = [
+  ['dashboard', 'Portfolio'],
+  ['policies', 'Policies'],
+  ['servicing', 'Premiums'],
+  ['maturities', 'Realized'],
+  ['settings', 'Account'],
+];
+
 const MEDICAL_NAV = [
   ['medical', 'To review'],
   ['settings', 'Account'],
 ];
 
-const isInvestorUser = () => state.user?.role === 'investor';
+/* A CFO login sees the investor's screens -- read-only, initials for the
+   insured, no staff tools -- but across every policy its entities own
+   rather than one investor's holdings. So it answers yes here, and the
+   few places that differ ask isCfoUser. */
+const isCfoUser      = () => state.user?.role === 'cfo';
+
+/* The investor's screens speak in the second person about a share. A CFO
+   holds no share: every figure is the whole policy, across the entities
+   the login was given. So the wording is restated once, here, on the way
+   to the page, rather than in fifty template strings. Display text only. */
+const CFO_VOICE = [
+  [' · figures reflect your ownership percentage', ' · full-policy figures'],
+  [' · every figure is your share of each policy', ' · full-policy figures'],
+  ['Your portfolio', 'Portfolio'],
+  ['My policies', 'Policies'],
+  ['Your share', 'Full policy'],
+  ['your share', 'full policy'],
+  ['on your policies', 'on these policies'],
+  ["your policies'", "these policies'"],
+];
+const cfoVoice = (html) => CFO_VOICE.reduce((h, [a, b]) => h.split(a).join(b), html);
+const isInvestorUser = () => state.user?.role === 'investor' || isCfoUser();
 const isManagerUser  = () => state.user?.role === 'manager';
 const isMedicalUser  = () => state.user?.role === 'medical';
 /**
@@ -1305,6 +1341,7 @@ const isAdminUser    = () => state.user?.role === 'admin';
  */
 const navItems = () => {
   const list = isMedicalUser() ? MEDICAL_NAV
+    : isCfoUser() ? CFO_NAV
     : isInvestorUser() ? INVESTOR_NAV
     : isManagerUser() ? MANAGER_NAV
     // An editor or viewer is staff but not an administrator.
@@ -1915,7 +1952,7 @@ async function dashboardView() {
     <div class="page-head">
       <div>
         <h1>${isInvestorUser() ? 'Your portfolio' : 'Portfolio dashboard'}</h1>
-        <div class="sub">${t.policy_count} ${t.policy_count === 1 ? 'position' : isInvestorUser() ? 'positions' : 'active policies'}${
+        <div class="sub">${t.policy_count} ${t.policy_count === 1 ? (isCfoUser() ? 'active policy' : 'position') : isCfoUser() ? 'active policies' : isInvestorUser() ? 'positions' : 'active policies'}${
           !isInvestorUser() && entityLabel() ? ` in ${esc(entityLabel())}` : ''}${
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
@@ -2169,12 +2206,15 @@ wireReports({
   rateBasis: () => rateBasis(),
 });
 
+/* A CFO has no share of anything -- every figure is the whole policy --
+   so the investor's "My share" column is not theirs to see. */
+const notForCfo = (list) => (isCfoUser() ? list.filter((f) => f.key !== 'my_pct') : list);
 const policyFieldList = () =>
-  arrangeFields(state.policyCols, { investor: isInvestorUser() });
+  notForCfo(arrangeFields(state.policyCols, { investor: isInvestorUser() }));
 
 /** The same catalogue, arranged for the Policy Schedule report instead. */
 const reportFieldList = () =>
-  arrangeFields(state.reportCols, { investor: isInvestorUser(), forReport: true });
+  notForCfo(arrangeFields(state.reportCols, { investor: isInvestorUser(), forReport: true }));
 
 /** The ones actually on the grid. */
 const policyColumns = () => policyFieldList().filter((f) => f.visible).map(asColumn);
@@ -2715,7 +2755,10 @@ async function policyView() {
       <div class="stat"><div class="label">Invested to date</div>
         <div class="value">${fmtExact(scaled(p.total_invested, p))}</div>
         <div class="note">${fmtExact(scaled(p.total_acquisition, p))} acquisition · ${fmtExact(scaled(p.total_premiums, p))} premium</div></div>
-      ${isInvestorUser() ? `
+      ${isCfoUser() ? `
+      <div class="stat"><div class="label">Owner entity</div>
+        <div class="value">${esc(p.fund_code || '—')}</div>
+        <div class="note">acquired ${p.acquisition_date ? fmtDate(p.acquisition_date) : '—'}</div></div>` : isInvestorUser() ? `
       <div class="stat"><div class="label">Your position</div>
         <div class="value">${p.my_pct != null ? fmtPct(p.my_pct) : '—'}</div>
         <div class="note">acquired ${p.acquisition_date ? fmtDate(p.acquisition_date) : '—'}</div></div>` : `
@@ -2859,7 +2902,7 @@ function overviewTab(p) {
   </div>`;
 
   return `
-  ${ownershipCard}
+  ${isCfoUser() ? '' : ownershipCard}
   <div class="card">
     <div class="card-head"><h2>Lives insured</h2><div class="spacer"></div>
       ${canEditData() ? '<button class="btn-sm primary" id="addLifeBtn">Add insured</button>' : ''}</div>
@@ -4949,7 +4992,7 @@ async function servicingView() {
   const [svc, funds, calls, dupes] = await Promise.all([
     api(`/servicing${entityQuery() ? `?${entityQuery()}` : ''}`),
     loadFunds(),
-    api('/capital-calls').catch(() => []),
+    isCfoUser() ? Promise.resolve([]) : api('/capital-calls').catch(() => []),
     /* Calls raised more than once before this was fixed. New ones fold into
        the open call by themselves; these are the ones already on the page. */
     mayRaise ? api('/capital-calls/duplicates').catch(() => ({ groups: [] }))
@@ -9717,7 +9760,7 @@ async function settingsView() {
     accountOnly ? Promise.resolve([]) : api('/funds'),
     // Staff read the cabinet on the Documents tab; here it is only an
     // investor's own copies, on the one page they have for them.
-    isInvestorUser() ? api('/documents').catch(() => []) : Promise.resolve([]),
+    isInvestorUser() && !isCfoUser() ? api('/documents').catch(() => []) : Promise.resolve([]),
     isInvestorUser() || isMedicalUser() ? Promise.resolve([]) : api('/investors').catch(() => []),
     // Everybody can see where their own account has been used. Only an
     // administrator sees the firm's.
@@ -10170,7 +10213,7 @@ async function settingsView() {
               and until they change it you both know it. Prefer the link.</span>
           </div>
           ${selectField('Role', 'role', 'editor',
-            ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'])}
+            ['admin', 'editor', 'viewer', 'manager', 'investor', 'medical', 'cfo'])}
           <div class="field" id="fundPick" style="display:none">
             <label>Owner entities *</label>
             <select name="fund_ids" multiple size="${Math.min(5, Math.max(2, funds.length))}">
@@ -10179,6 +10222,15 @@ async function settingsView() {
             <span class="muted" style="font-size:12px">
               Hold ⌘ or Ctrl to pick several. This manager gets full access to the policies
               in these entities, and no access to Settings.</span>
+          </div>
+          <div class="field" id="cfoNote" style="display:none">
+            <div class="dlg-note">
+              <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
+              entities chosen above — the portfolio, each policy, premiums due and realized
+              maturities — on the same screens an investor has, at full-policy figures.
+              Insureds appear as initials. No investor names, no opportunities, no
+              documents, and nothing it can change.
+            </div>
           </div>
           <div class="field" id="grantPick" style="display:none">
             <label>Investors they may work with</label>
@@ -10233,8 +10285,9 @@ async function settingsView() {
         const roleSel = $('select[name=role]', dlg);
         const sync = () => {
           $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
-          $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+          $('#fundPick', dlg).style.display = ['manager', 'cfo'].includes(roleSel.value) ? '' : 'none';
           $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+          $('#cfoNote', dlg).style.display = roleSel.value === 'cfo' ? '' : 'none';
         };
         $('#setPwSelf', dlg)?.addEventListener('change', (e) => {
           $('#pwSelf', dlg).style.display = e.currentTarget.checked ? '' : 'none';
@@ -10274,7 +10327,7 @@ async function openUserDialog(u, funds, onSaved) {
     <div class="field-row">
       <div class="field"><label>Role</label>
         <select name="role" ${self ? 'disabled' : ''}>
-          ${['admin', 'editor', 'viewer', 'manager', 'investor', 'medical'].map((r) =>
+          ${['admin', 'editor', 'viewer', 'manager', 'investor', 'medical', 'cfo'].map((r) =>
             `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
         </select>
       </div>
@@ -10333,6 +10386,15 @@ async function openUserDialog(u, funds, onSaved) {
         including to a session they already have open.</span>
     </div>
 
+          <div class="field" id="cfoNote" style="display:none">
+      <div class="dlg-note">
+        <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
+        entities chosen above — the portfolio, each policy, premiums due and realized
+        maturities — on the same screens an investor has, at full-policy figures.
+        Insureds appear as initials. No investor names, no opportunities, no
+        documents, and nothing it can change.
+      </div>
+    </div>
     <div class="field" id="grantPick" style="display:none">
       <label>Investors they may work with</label>
       <select name="granted_investor_ids" multiple size="${Math.min(8, Math.max(3, state.investors.length))}">
@@ -10426,8 +10488,9 @@ async function openUserDialog(u, funds, onSaved) {
   const roleSel = $('select[name=role]', dlg);
   const sync = () => {
     $('#investorPick', dlg).style.display = roleSel.value === 'investor' ? '' : 'none';
-    $('#fundPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+    $('#fundPick', dlg).style.display = ['manager', 'cfo'].includes(roleSel.value) ? '' : 'none';
     $('#grantPick', dlg).style.display = roleSel.value === 'manager' ? '' : 'none';
+    $('#cfoNote', dlg).style.display = roleSel.value === 'cfo' ? '' : 'none';
     /* An administrator has it inherently and an investor may never have
        it, so the choice is only meaningful for the roles in between. */
     $('#valuePick', dlg).style.display =
@@ -14700,7 +14763,7 @@ async function render({ soft = false } = {}) {
        said. On a full render the box is already gone, so the earlier reading
        stands. */
     const focusNow = rememberFocus() || focus;
-    $('#main').innerHTML = result.html;
+    $('#main').innerHTML = isCfoUser() ? cfoVoice(result.html) : result.html;
     result.after?.();
     restoreFocus(focusNow);
     fitStatValues();

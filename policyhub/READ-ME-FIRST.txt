@@ -1,20 +1,23 @@
-PolicyHub build 2026-11-08a: an investor can belong to more than one owner entity
+PolicyHub build 2026-11-08b: CFO login
+(This zip also contains the compounding and multi-entity investor builds,
+2026-11-04a and 2026-11-08a, so you can skip those zips and upload this one.)
 
 Upload into the policyhub folder of the repo:
-  src/      -> policyhub/src      (api.js, schema.sql)
-  public/   -> policyhub/public   (app.js, styles.css, build.js)
+  src/      -> policyhub/src      (api.js, auth.js, schema.sql, opportunity-pdf.js,
+                                   opportunity-email.js, maturity-pdf.js)
+  public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
   scripts/  -> policyhub/scripts  (tests, optional)
 
-If you have NOT yet uploaded build 2026-11-04a (compounding), upload that zip
-first, or its features will be missing. These files already include it.
+No new environment variables. The database updates itself on the next start.
 
-Database: a new table, investor_funds, is created automatically on the next
-start. Every investor's existing entity is copied into it, so nothing is lost.
+Setting up a CFO
+  Settings -> Users -> New user -> Role "cfo" -> tick the owner entities -> Create.
+  (An existing login: click it, change Role to cfo, pick the entities, Save.)
 
-What changes
-- Edit investor -> "Owner entities" is now a list of tick boxes. Tick as many
-  as apply; untick all for "not assigned".
-- Every manager of any ticked entity sees the investor in their list.
-- The Investors list shows all of them, e.g. "LCG1, LCG2", and the entity
-  filter finds the investor under each one.
-- Still administrator-only. Each change is written to the activity log.
+What the CFO sees
+  Portfolio, Policies, each policy, Premiums and Realized: the investor's screens,
+  across every policy owned by the chosen entities, at full-policy figures.
+  With more than one entity they can filter by entity.
+  Insureds show as initials. No investor names, no opportunities, documents,
+  agreements or capital calls. Read-only: they cannot change anything.
+  Removing an entity from their login takes effect immediately.
