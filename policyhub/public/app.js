@@ -8729,8 +8729,8 @@ async function investorsView() {
       <div><h1>Investors</h1>
         <div class="sub">${rows.length} ${rows.length === 1 ? 'investor' : 'investors'} · ${
           totals.pos} positions${entityLabel() ? ` · ${esc(entityLabel())} only` : ''}${
-          rows.filter((r) => !r.fund_code).length
-            ? ` · ${rows.filter((r) => !r.fund_code).length} not assigned to an entity` : ''}</div></div>
+          rows.filter((r) => !(r.fund_codes || r.fund_code)).length
+            ? ` · ${rows.filter((r) => !(r.fund_codes || r.fund_code)).length} not assigned to an entity` : ''}</div></div>
       <div class="spacer"></div>
       ${entityPicker(funds)}
       ${canEditNow ? '<button class="primary" id="newInvestorBtn">New investor</button>' : ''}
@@ -8772,8 +8772,8 @@ async function investorsView() {
           : rows.map((r) => `<tr class="clickable" data-investor="${r.id}">
               <td class="strong">${esc(r.name)}</td>
               <td>${esc(r.investor_type || '')}</td>
-              <td>${r.fund_code
-                ? esc(r.fund_code)
+              <td>${r.fund_codes || r.fund_code
+                ? esc(r.fund_codes || r.fund_code)
                 : '<span class="muted">unassigned</span>'}</td>
               <td class="secondary">${esc(r.legal_name || '')}</td>
               <td class="secondary">${esc(r.email || '')}</td>
@@ -9099,15 +9099,22 @@ function openInvestorDialog(inv) {
     ${isAdmin ? `
     <div class="field-row">
       <div class="field">
-        <label>Owner entity</label>
-        <select name="fund_id">
-          <option value="">— not assigned —</option>
-          ${funds.map((f) => `<option value="${f.id}" ${
-            Number(inv?.fund_id) === Number(f.id) ? 'selected' : ''}>${esc(f.code)}${
-            f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</option>`).join('')}
-        </select>
-        <span class="muted" style="font-size:12px">Whose client they are. The manager of that
-          entity sees them in their investor list straight away, before they hold anything.</span>
+        <label>Owner entities</label>
+        ${''/* Ticks rather than a multi-select: nobody has to know about
+               Ctrl-click, and what is chosen is visible without scrolling. */}
+        <div class="entity-ticks" id="invFundTicks">
+          ${funds.length ? funds.map((f) => {
+            const on = (inv?.fund_ids || (inv?.fund_id ? [inv.fund_id] : []))
+              .map(Number).includes(Number(f.id));
+            return `<label class="dlg-check entity-tick">
+              <input type="checkbox" name="fund_ids" value="${f.id}" ${on ? 'checked' : ''}>
+              <span><strong>${esc(f.code)}</strong>${
+                f.name && f.name !== f.code ? ` — ${esc(f.name)}` : ''}</span></label>`;
+          }).join('') : '<span class="muted">No owner entities set up yet.</span>'}
+        </div>
+        <span class="muted" style="font-size:12px">Whose client they are — tick as many as
+          apply. The manager of each entity ticked sees them in their investor list straight
+          away, before they hold anything.</span>
       </div>
       <div class="field">
         <label>Tax ID</label>
@@ -9121,8 +9128,8 @@ function openInvestorDialog(inv) {
       </div>
     </div>` : `
     <div class="field-row">
-      <div class="field"><label>Owner entity</label>
-        <div class="strong" style="padding:7px 0">${esc(inv?.fund_code || '—')}</div>
+      <div class="field"><label>Owner entities</label>
+        <div class="strong" style="padding:7px 0">${esc(inv?.fund_codes || inv?.fund_code || '—')}</div>
         <span class="muted" style="font-size:12px">Set by an administrator.</span></div>
       <div class="field"><label>Tax ID</label>
         <div class="strong app-tax" style="padding:7px 0">${
@@ -9176,6 +9183,12 @@ function openInvestorDialog(inv) {
   const dlg = openDialog(isNew ? 'New investor' : 'Edit investor', body, async (v) => {
     // An untouched tax box must not be read as "clear it".
     if (!String(v.tax_id || '').trim()) delete v.tax_id;
+    /* The entity ticks, always as a list -- none ticked is an answer too
+       ("not assigned"), and FormData would otherwise send nothing at all. */
+    if (isAdmin) {
+      v.fund_ids = [...dlg.querySelectorAll('input[name="fund_ids"]:checked')].map((el) => el.value);
+      delete v.fund_id;
+    }
 
     const wantsLogin = v.create_login === 'yes';
     const login = wantsLogin

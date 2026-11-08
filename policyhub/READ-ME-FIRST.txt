@@ -1,19 +1,20 @@
-PolicyHub build 2026-11-04a: choose compounding annually, monthly or daily
+PolicyHub build 2026-11-08a: an investor can belong to more than one owner entity
 
-Upload into the policyhub folder of the repo (Render Root Directory = policyhub):
-  src/      -> policyhub/src      (api.js, opportunity-pdf.js, opportunity-email.js, maturity-pdf.js)
-  public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js)
-  scripts/  -> policyhub/scripts  (compounding-test.mjs, optional)
+Upload into the policyhub folder of the repo:
+  src/      -> policyhub/src      (api.js, schema.sql)
+  public/   -> policyhub/public   (app.js, styles.css, build.js)
+  scripts/  -> policyhub/scripts  (tests, optional)
 
-No database change. No new environment variables.
+If you have NOT yet uploaded build 2026-11-04a (compounding), upload that zip
+first, or its features will be missing. These files already include it.
 
-What it does
-- A "Compound annually / monthly / daily" selector sits next to the existing
-  rate controls on Maturities, Opportunities, the opportunity page and the one-pager.
-- The rate itself is the same deal stated differently:
-  nominal = n x ((1 + annual rate)^(1/n) - 1), n = 12 monthly, 365 daily.
-  For example, 16.00% annually = 14.93% monthly = 14.85% daily.
-- Labels always say which, e.g. "compounded monthly".
-- The choice is saved per user. The one-pager PDF, the covering email and the
-  maturity summary PDF follow whatever the screen is set to.
-- Default is annually, so nothing changes until someone picks otherwise.
+Database: a new table, investor_funds, is created automatically on the next
+start. Every investor's existing entity is copied into it, so nothing is lost.
+
+What changes
+- Edit investor -> "Owner entities" is now a list of tick boxes. Tick as many
+  as apply; untick all for "not assigned".
+- Every manager of any ticked entity sees the investor in their list.
+- The Investors list shows all of them, e.g. "LCG1, LCG2", and the entity
+  filter finds the investor under each one.
+- Still administrator-only. Each change is written to the activity log.

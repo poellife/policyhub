@@ -2125,3 +2125,46 @@ SELECT 'life_search', 'Signs of life (Brave)',
        '{"provider":"brave","max_queries":2,"fetch_pages":true,"freshness_days":60}'::jsonb
 WHERE NOT EXISTS (SELECT 1 FROM watch_meta WHERE k = 'life_source_seeded');
 INSERT INTO watch_meta (k, v) VALUES ('life_source_seeded', '1') ON CONFLICT DO NOTHING;
+
+/* ====================================================================
+   An investor can belong to more than one owner entity
+   ====================================================================
+
+   investors.fund_id was one entity: whose client they are. A client of
+   two entities had to be filed under one and granted to the other's
+   manager by hand. investor_funds is the full list; every manager of any
+   entity on it sees the investor in their directory.
+
+   investors.fund_id stays, as the first entity on the list, so anything
+   that reads one entity (a heading, an export, an older screen) still
+   gets an answer. The trigger keeps the list holding it whenever it is
+   set, which covers registration approval and every other path that
+   writes the single column. Seeded once from the column itself;
+   re-running is harmless because ON CONFLICT does nothing. */
+CREATE TABLE IF NOT EXISTS investor_funds (
+  investor_id INTEGER NOT NULL REFERENCES investors(id) ON DELETE CASCADE,
+  fund_id     INTEGER NOT NULL REFERENCES funds(id) ON DELETE CASCADE,
+  added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (investor_id, fund_id)
+);
+CREATE INDEX IF NOT EXISTS idx_investor_funds_fund ON investor_funds (fund_id);
+
+INSERT INTO investor_funds (investor_id, fund_id)
+SELECT id, fund_id FROM investors WHERE fund_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+CREATE OR REPLACE FUNCTION sync_investor_primary_fund() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.fund_id IS NOT NULL THEN
+    INSERT INTO investor_funds (investor_id, fund_id) VALUES (NEW.id, NEW.fund_id)
+    ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_investor_primary_fund ON investors;
+CREATE TRIGGER trg_investor_primary_fund
+  AFTER INSERT OR UPDATE OF fund_id ON investors
+  FOR EACH ROW EXECUTE FUNCTION sync_investor_primary_fund();

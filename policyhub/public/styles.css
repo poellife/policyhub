@@ -2118,3 +2118,9 @@ td.mw-wrap { white-space: normal; }
 .mw-life-history { max-height: 220px; overflow: auto; margin-bottom: 6px; }
 .mw-life-row { font-size: 13px; padding: 7px 0; border-bottom: 1px solid var(--grid); }
 .mw-rowbtns { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+
+/* Owner entities on the investor form: one tick per entity, a scrolling
+   box once there are more than a handful. */
+.entity-ticks { display: flex; flex-direction: column; gap: 6px; max-height: 168px;
+  overflow-y: auto; padding: 8px 10px; border: 1px solid var(--grid); border-radius: 6px; }
+.entity-ticks .entity-tick { margin: 0; }

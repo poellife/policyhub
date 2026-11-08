@@ -107,9 +107,9 @@ check('with the reading written down',
   (audit || []).some((r) => r.entity === 'investor' && /revealed tax id/i.test(r.detail || '')));
 
 console.log('\nSAYING WHOSE CLIENT THEY ARE');
-check('the entity is a list of the entities on file',
-  (await dlg.locator('select[name="fund_id"] option').count()) >= funds.length + 1);
-await dlg.locator('select[name="fund_id"]').selectOption(String(mine.id));
+check('the entity is a list of the entities on file, one tick each',
+  (await dlg.locator('input[name="fund_ids"]').count()) >= funds.length);
+await dlg.locator(`input[name="fund_ids"][value="${mine.id}"]`).check();
 await dlg.locator('[name="address_line1"]').fill('221 Cranbrook Road');
 await dlg.locator('[name="postal_code"]').fill('48304');
 await dlg.locator('button[type=submit]').click();
@@ -144,7 +144,7 @@ const mdlg = m.locator('dialog[open]');
 check('the manager can still correct the address',
   (await mdlg.locator('[name="address_line1"]').inputValue()) === '221 Cranbrook Road');
 check('but the entity is shown as a fact, not a choice',
-  (await mdlg.locator('select[name="fund_id"]').count()) === 0
+  (await mdlg.locator('input[name="fund_ids"]').count()) === 0
   && /LCG1/.test(await mdlg.textContent()));
 check('and it says who does decide it',
   /set by an administrator/i.test(await mdlg.textContent()));

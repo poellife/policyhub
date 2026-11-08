@@ -107,7 +107,8 @@ async function investorsOutOfScope(req, ids) {
     `SELECT inv.id FROM investors inv
       WHERE inv.id = ANY($1)
         -- 1. filed under one of this manager's entities
-        AND (inv.fund_id IS NULL OR inv.fund_id <> ALL($2))
+        AND NOT EXISTS (SELECT 1 FROM investor_funds xf
+                         WHERE xf.investor_id = inv.id AND xf.fund_id = ANY($2))
         -- 2. granted to them by name
         AND inv.id <> ALL(COALESCE($3::int[], '{}'))
         -- 3. already holding a position inside one of their entities
@@ -937,6 +938,10 @@ async function staffAudience({ fundId = null, investorId = null, alsoUserId = nu
           OR (u.role = 'manager' AND $1::int IS NOT NULL
               AND EXISTS (SELECT 1 FROM user_funds uf
                            WHERE uf.user_id = u.id AND uf.fund_id = $1))
+          OR (u.role = 'manager' AND $2::int IS NOT NULL
+              AND EXISTS (SELECT 1 FROM investor_funds xf
+                            JOIN user_funds uf ON uf.fund_id = xf.fund_id
+                           WHERE xf.investor_id = $2 AND uf.user_id = u.id))
           OR (u.role = 'manager' AND $2::int IS NOT NULL
               AND EXISTS (SELECT 1 FROM user_investors ui
                            WHERE ui.user_id = u.id AND ui.investor_id = $2))
@@ -9040,6 +9045,10 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
   const granted = grantedInvestors(req);
   const { rows } = await q(
     `SELECT inv.*, f.code AS fund_code, f.name AS fund_name,
+            COALESCE((SELECT array_agg(xf.fund_id ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '{}') AS fund_ids,
+            COALESCE((SELECT string_agg(ff.code, ', ' ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '') AS fund_codes,
             /* Whether they can sign in, and as what. Staff-only — this route
                already is — and it is the address, never anything about the
                password. It is here so the investor form can say "already
@@ -9061,8 +9070,10 @@ router.get('/investors', blockInvestors, staffOnly, wrap(async (req, res) => {
                                  AND ($2::int[] IS NULL OR pl.fund_id = ANY($2))
       WHERE ($1 = '' OR inv.name ILIKE '%'||$1||'%' OR inv.legal_name ILIKE '%'||$1||'%'
              OR inv.email ILIKE '%'||$1||'%')
-        AND ($4 = '' OR f.code = ANY(string_to_array($4, ',')))
-        AND ($2::int[] IS NULL OR inv.fund_id = ANY($2)
+        AND ($4 = '' OR EXISTS (SELECT 1 FROM investor_funds xf JOIN funds ff ON ff.id = xf.fund_id
+               WHERE xf.investor_id = inv.id AND ff.code = ANY(string_to_array($4, ','))))
+        AND ($2::int[] IS NULL OR EXISTS (SELECT 1 FROM investor_funds xf
+               WHERE xf.investor_id = inv.id AND xf.fund_id = ANY($2))
              OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))
@@ -9076,11 +9087,16 @@ router.get('/investors/:id', blockInvestors, staffOnly, wrap(async (req, res) =>
   const funds = fundScope(req);
   const granted = grantedInvestors(req);
   const { rows } = await q(
-    `SELECT inv.*, f.code AS fund_code, f.name AS fund_name
+    `SELECT inv.*, f.code AS fund_code, f.name AS fund_name,
+            COALESCE((SELECT array_agg(xf.fund_id ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '{}') AS fund_ids,
+            COALESCE((SELECT string_agg(ff.code, ', ' ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '') AS fund_codes
        FROM investors inv
        LEFT JOIN funds f ON f.id = inv.fund_id
       WHERE inv.id = $1
-        AND ($2::int[] IS NULL OR inv.fund_id = ANY($2)
+        AND ($2::int[] IS NULL OR EXISTS (SELECT 1 FROM investor_funds xf
+               WHERE xf.investor_id = inv.id AND xf.fund_id = ANY($2))
              OR inv.id = ANY(COALESCE($3::int[], '{}')) OR EXISTS (
               SELECT 1 FROM policy_investors pj JOIN policies pp ON pp.id = pj.policy_id
                WHERE pj.investor_id = inv.id AND pp.fund_id = ANY($2)))`,
@@ -9120,9 +9136,52 @@ const adminOnlyInvestorFields = (req) => {
   if (req.user.role === 'admin') return req.body;
   /* Whose client they are, and whether they are still a client at all: both
      decide what other people can see, so both are an administrator's. */
-  const { fund_id: _fund, is_active: _active, ...rest } = req.body || {};
+  const { fund_id: _fund, fund_ids: _funds, is_active: _active, ...rest } = req.body || {};
   return rest;
 };
+
+/**
+ * The owner entities an investor belongs to -- any number of them.
+ *
+ * Administrators only, like the single entity before it. `fund_ids` is the
+ * whole list and replaces what was there; an older client that still sends
+ * one `fund_id` is read as a list of one. investors.fund_id is kept as the
+ * first entity on the list (or none), so a screen that shows one entity
+ * still has one to show. Returns an error object, or null.
+ */
+async function applyInvestorFunds(req, investorId) {
+  if (req.user.role !== 'admin' || !req.body) return null;
+  let ids;
+  if (Array.isArray(req.body.fund_ids)) ids = req.body.fund_ids;
+  else if ('fund_id' in req.body) ids = req.body.fund_id === null || req.body.fund_id === '' ? [] : [req.body.fund_id];
+  else return null;
+  ids = [...new Set(ids.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n > 0))];
+  if (ids.length) {
+    const { rows } = await q('SELECT id FROM funds WHERE id = ANY($1)', [ids]);
+    if (rows.length !== ids.length) return { error: 'One of those owner entities does not exist.' };
+  }
+  const { rows: before } = await q(
+    'SELECT fund_id FROM investor_funds WHERE investor_id = $1', [investorId]);
+  /* The primary stays primary while it is still on the list; otherwise
+     the first one chosen. */
+  const { rows: cur } = await q('SELECT fund_id FROM investors WHERE id = $1', [investorId]);
+  const primary = ids.includes(cur[0]?.fund_id) ? cur[0].fund_id : (ids[0] ?? null);
+  await q('DELETE FROM investor_funds WHERE investor_id = $1 AND fund_id <> ALL($2::int[])',
+    [investorId, ids]);
+  for (const id of ids)
+    await q(`INSERT INTO investor_funds (investor_id, fund_id) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`, [investorId, id]);
+  await q('UPDATE investors SET fund_id = $2, updated_at = now() WHERE id = $1', [investorId, primary]);
+  const was = before.map((r) => r.fund_id).sort((a, b) => a - b).join(',');
+  const now = [...ids].sort((a, b) => a - b).join(',');
+  if (was !== now) {
+    const { rows: codes } = await q(
+      "SELECT string_agg(code, ', ' ORDER BY code) AS c FROM funds WHERE id = ANY($1)", [ids]);
+    await audit(req.user.uid, 'investor', Number(investorId), 'update',
+      `owner entities: ${codes[0]?.c || 'none'}`);
+  }
+  return null;
+}
 
 /**
  * A replacement tax number, sealed on the way in. Only an administrator
@@ -9287,6 +9346,8 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   );
   const bad = await applyTaxId(req, rows[0].id);
   if (bad) return res.status(400).json(bad);
+  const badFunds = await applyInvestorFunds(req, rows[0].id);
+  if (badFunds) return res.status(400).json(badFunds);
   await audit(req.user.uid, 'investor', rows[0].id, 'create', rows[0].name);
 
   /* A manager's own investor, theirs from the moment they enter it.
@@ -9340,7 +9401,11 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
   // number is sealed in a second statement, and a response that omitted it
   // would say the record has no number on it when it does.
   const { rows: fresh } = await q(
-    `SELECT inv.*, f.code AS fund_code FROM investors inv
+    `SELECT inv.*, f.code AS fund_code,
+            COALESCE((SELECT array_agg(xf.fund_id ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '{}') AS fund_ids,
+            COALESCE((SELECT string_agg(ff.code, ', ' ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '') AS fund_codes FROM investors inv
        LEFT JOIN funds f ON f.id = inv.fund_id WHERE inv.id = $1`, [rows[0].id]);
   res.status(201).json({ ...fresh[0],
     ...(login ? { login_email: login.email,
@@ -9348,9 +9413,18 @@ router.post('/investors', blockInvestors, canEdit, wrap(async (req, res) => {
 }));
 
 router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
-  const { sets, vals, next } = buildSet(INVESTOR_FIELDS, adminOnlyInvestorFields(req));
-  if (!sets.length && !str(req.body?.tax_id))
+  /* The entity list is written by applyInvestorFunds, not by buildSet, so
+     the single column can never say something the list does not. */
+  const { fund_id: _f, ...plain } = adminOnlyInvestorFields(req) || {};
+  const { sets, vals, next } = buildSet(INVESTOR_FIELDS, plain);
+  const listed = req.user.role === 'admin'
+    && (Array.isArray(req.body?.fund_ids) || 'fund_id' in (req.body || {}));
+  if (!sets.length && !str(req.body?.tax_id) && !listed)
     return res.status(400).json({ error: 'No fields supplied' });
+  const { rows: exists } = await q('SELECT 1 FROM investors WHERE id = $1', [req.params.id]);
+  if (!exists.length) return res.status(404).json({ error: 'Investor not found' });
+  const badFunds = await applyInvestorFunds(req, req.params.id);
+  if (badFunds) return res.status(400).json(badFunds);
   if (sets.length) {
     const { rowCount } = await q(
       `UPDATE investors SET ${sets.join(',')}, updated_at = now() WHERE id = $${next}`,
@@ -9360,7 +9434,11 @@ router.put('/investors/:id', blockInvestors, canEdit, wrap(async (req, res) => {
   const bad = await applyTaxId(req, req.params.id);
   if (bad) return res.status(400).json(bad);
   const { rows } = await q(
-    `SELECT inv.*, f.code AS fund_code FROM investors inv
+    `SELECT inv.*, f.code AS fund_code,
+            COALESCE((SELECT array_agg(xf.fund_id ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '{}') AS fund_ids,
+            COALESCE((SELECT string_agg(ff.code, ', ' ORDER BY ff.code) FROM investor_funds xf
+                        JOIN funds ff ON ff.id = xf.fund_id WHERE xf.investor_id = inv.id), '') AS fund_codes FROM investors inv
        LEFT JOIN funds f ON f.id = inv.fund_id WHERE inv.id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Investor not found' });
   await audit(req.user.uid, 'investor', rows[0].id, 'update', rows[0].name);
