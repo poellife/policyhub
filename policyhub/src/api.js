@@ -183,6 +183,34 @@ const carryRate = (fundCol = 'pl.fund_id', policyCol = 'pl.id') =>
   `COALESCE((SELECT px.commission_pct FROM policies px WHERE px.id = ${policyCol}),
             (SELECT fx.carry_pct FROM funds fx WHERE fx.id = ${fundCol}), 0)`;
 
+/**
+ * Average insured age weighted by death benefit.
+ *
+ * The same people the plain average counts -- every living life on an
+ * active policy, primary or second, dated -- but each weighted by the death
+ * benefit riding on them: the sum over the policies they are on. Two
+ * policies on one person weigh her by both; a survivorship contract weighs
+ * both lives by its whole benefit, since either death moves it. `polWhere`
+ * narrows policy_latest pl to what the reader may see; `weight` multiplies
+ * the benefit (an investor's share, or 1).
+ */
+const weightedAgeSql = (polWhere, weight = '1') => `
+  WITH pol AS (
+    SELECT pl.id, COALESCE(pl.death_benefit, pl.face_amount, 0) * ${weight} AS db
+      FROM policy_latest pl
+     WHERE pl.status NOT IN ('Lapsed','Sold','Matured') AND ${polWhere}),
+  links AS (
+    SELECT p.id AS policy_id, p.insured_id FROM policies p WHERE p.insured_id IS NOT NULL
+    UNION
+    SELECT pi.policy_id, pi.insured_id FROM policy_insureds pi),
+  lives AS (
+    SELECT l.insured_id, SUM(pol.db) AS w
+      FROM pol JOIN links l ON l.policy_id = pol.id GROUP BY l.insured_id)
+  SELECT ROUND((SUM(EXTRACT(YEAR FROM age(CURRENT_DATE, i.dob)) * lives.w)
+               / NULLIF(SUM(lives.w), 0))::numeric, 1) AS avg_age_db
+    FROM lives JOIN insureds i ON i.id = lives.insured_id
+   WHERE i.date_of_death IS NULL AND i.dob IS NOT NULL AND lives.w > 0`;
+
 const afterCarry = (gross, basis, scopeParam, fundCol = 'pl.fund_id', policyCol = 'pl.id') => `
   CASE WHEN $${scopeParam}::int IS NULL THEN (${gross})
        ELSE (${gross}) - (${carryRate(fundCol, policyCol)} / 100.0)
@@ -1366,6 +1394,14 @@ const cleanInterestShown = (value) => {
   return INTEREST_SHOWN.includes(want) ? { shown: want } : null;
 };
 
+/* Average insured age, weighted by life (each person once) or by death
+   benefit (each person by the death benefit riding on them). */
+const cleanAgeBasis = (value) => {
+  const want = typeof value === 'string' ? value
+    : (value && typeof value === 'object' ? str(value.basis) : '');
+  return ['lives', 'db'].includes(want) ? { basis: want } : null;
+};
+
 /* How often the compounded rate compounds when it is shown. */
 const cleanCompoundingPref = (value) => {
   const want = typeof value === 'string' ? value
@@ -1380,6 +1416,7 @@ const PREF_CLEANERS = {
   rate_basis: cleanRateBasis,
   interest_shown: cleanInterestShown,
   compounding: cleanCompoundingPref,
+  age_basis: cleanAgeBasis,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -1853,6 +1890,11 @@ router.get('/funds', (req, res, next) => (isCfo(req) ? next() : blockInvestors(r
       ORDER BY f.code`,
     [funds]
   );
+  /* The same average, weighted by death benefit, per entity. */
+  for (const r of rows) {
+    const { rows: wa } = await q(weightedAgeSql('pl.fund_id = $1'), [r.id]);
+    r.avg_insured_age_db = wa[0]?.avg_age_db ?? null;
+  }
   res.json(rows);
 }));
 
@@ -3163,6 +3205,9 @@ router.get('/analytics/summary', wrap(async (req, res) => {
     byCarrier: byCarrier.rows,
     capitalDeployed: cumulative,
     avgInsuredAge: Number(ages.rows[0].avg_age) || 0,
+    avgInsuredAgeByBenefit: Number((await q(weightedAgeSql(
+      `${vis} AND ($3 = '' OR pl.fund_code = ANY(string_to_array($3, ',')))`, w),
+      [scope, funds, fund])).rows[0]?.avg_age_db) || 0,
     lives: Number(ages.rows[0].lives) || 0,
     livesWithDob: Number(ages.rows[0].with_dob) || 0,
     rate: returnOnBook,
@@ -10261,6 +10306,8 @@ router.get('/reports/portfolio', wrap(async (req, res) => {
           AND ($1 = '' OR pl.fund_code = ANY(string_to_array($1, ','))) AND ${vis3}
         GROUP BY 1 ORDER BY face DESC`, [fund, scope, funds]),
     q(`SELECT COALESCE(AVG(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS avg_age,
+              COALESCE(SUM(EXTRACT(YEAR FROM age(pl.insured_dob)) * COALESCE(pl.death_benefit, pl.face_amount, 0))
+                / NULLIF(SUM(COALESCE(pl.death_benefit, pl.face_amount, 0)), 0), 0) AS avg_age_db,
               COALESCE(MIN(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS min_age,
               COALESCE(MAX(EXTRACT(YEAR FROM age(pl.insured_dob))),0) AS max_age
          FROM policy_latest pl

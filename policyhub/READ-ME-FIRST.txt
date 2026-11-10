@@ -1,4 +1,4 @@
-PolicyHub build 2026-11-10a
+PolicyHub build 2026-11-10b
 (Includes everything since 2026-11-01a. Upload this one zip; skip the earlier ones.)
 
 Upload into the policyhub folder of the repo:
@@ -7,9 +7,10 @@ Upload into the policyhub folder of the repo:
   public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
   scripts/  -> policyhub/scripts  (tests, optional)
 
-New in this build
-- Reports -> "Valuation report": every policy in force with insured name, age,
-  current death benefit and total invested, with totals. Staff only.
-- CFO login: full insured names (not initials); the compounding choice
-  (annually / monthly / daily) on Portfolio and Realized; each policy shows
-  the Overview only; no Premiums menu item; no email-notification settings.
+New since 2026-11-10a
+- Average insured age can be weighted by death benefit. Dashboard tile:
+  click "weight by death benefit" (click again for per life). The choice is
+  saved per user and the Owner entities table, the Valuation report and the
+  Portfolio summary report follow it.
+- CFO login: each policy page no longer shows the "Policy" and
+  "Acquisition & premium" cards.

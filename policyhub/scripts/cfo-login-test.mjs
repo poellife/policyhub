@@ -216,6 +216,8 @@ check('the policy page names its owner entity', /owner entity/i.test(polText) &&
 check('and has no Ownership card or investor', !/ownership|your position/i.test(polText)
   && !polText.includes('Zebulon'));
 check('and shows the whole death benefit', polText.includes('2,000,000'));
+check('without the Policy or Acquisition & premium cards',
+  !/acquisition & premium|unique case id|grace period/i.test(polText));
 check('the policy page has the overview only, no other tabs',
   await p.locator('.tabs button:visible').count() === 0
   && !/transactions|premiums/i.test(await p.locator('.tabs').innerText().catch(() => '')));

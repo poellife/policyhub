@@ -175,6 +175,12 @@ export function buildValuation(rows, o) {
   const totalInv = live.reduce((t, p) => t + invested(p), 0);
   const ages = live.map((p) => ageFrom(p.insured_dob)).filter((a) => a !== null);
   const avgAge = ages.length ? ages.reduce((t, a) => t + a, 0) / ages.length : null;
+  /* And weighted by death benefit: each policy's insured counted by the
+     benefit on that policy. */
+  const dated = live.filter((p) => ageFrom(p.insured_dob) !== null);
+  const dbW = dated.reduce((t, p) => t + benefit(p), 0);
+  const avgAgeDb = dbW ? dated.reduce((t, p) => t + ageFrom(p.insured_dob) * benefit(p), 0) / dbW : null;
+  const byDb = host.ageBasis?.() === 'db';
 
   return `
     ${letterhead('Valuation Report', `${live.length} ${live.length === 1 ? 'policy' : 'policies'} in force${
@@ -198,12 +204,15 @@ export function buildValuation(rows, o) {
           </tr>`).join('')}</tbody>
         ${live.length ? `<tfoot><tr>
           <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
-          <td class="num">${avgAge === null ? '' : `avg ${avgAge.toFixed(1)}`}</td>
+          <td class="num">${byDb
+            ? (avgAgeDb === null ? '' : `avg ${avgAgeDb.toFixed(1)}<br><span class="muted">by death benefit</span>`)
+            : (avgAge === null ? '' : `avg ${avgAge.toFixed(1)}`)}</td>
           <td class="num">${money(totalDb, 0)}</td>
           <td class="num">${money(totalInv, 0)}</td>
         </tr></tfoot>` : ''}
       </table>
-      <p class="rpt-note">Age is the insured's age today, from the date of birth on file.
+      <p class="rpt-note">Age is the insured's age today, from the date of birth on file${
+        byDb ? '; the average is weighted by each policy\'s death benefit' : ''}.
         Death benefit is the most recent carrier-reported figure, or the face amount where no
         statement has been recorded. Total invested is every acquisition cost, premium, fee and
         servicing charge in the ledger for the policy.</p>
@@ -550,7 +559,9 @@ function buildSummary(d, o) {
     ${confidential(o.showBasis, o)}
 
     <div class="rpt-tiles" data-count="${o.showBasis ? 6 : 4}">
-      ${tile('Policies in force', t.policy_count, `Average insured age ${Math.round(Number(d.ages.avg_age)) || '—'}`)}
+      ${tile('Policies in force', t.policy_count, (host.ageBasis?.() === 'db'
+        ? `Average insured age ${Math.round(Number(d.ages.avg_age_db)) || '—'}, weighted by death benefit`
+        : `Average insured age ${Math.round(Number(d.ages.avg_age)) || '—'}`))}
       ${tile('Total death benefit', fmtExact(dbTotal), `Face at issue ${fmtExact(t.total_face)}`)}
       ${o.investorShare
         ? tile('Unrealized gain', fmtExact(dbTotal - invested),

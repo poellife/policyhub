@@ -74,6 +74,9 @@ const state = {
      'daily'. A way of stating the same number, saved against the
      account like interestShown. See compoundingToggle below. */
   compounding: 'annual',
+  /* How the average insured age is taken: 'lives' (each person once) or
+     'db' (each person weighted by the death benefit on them). */
+  ageBasis: 'lives',
   insuredSearch: '',
   investorSearch: '',
   investors: [],
@@ -126,6 +129,7 @@ async function loadPrefs() {
     state.interestShown = ['simple', 'compound', 'both']
       .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : null;
     state.compounding = cleanCompounding(prefs?.compounding?.how);
+    state.ageBasis = prefs?.age_basis?.basis === 'db' ? 'db' : 'lives';
     setReportCompounding(state.compounding);
   } catch {
     state.policyCols = null;
@@ -193,9 +197,32 @@ async function refreshApplicationCount() {
  * missing the cell says so, because "87.9" over four of nine lives is a
  * different claim from "87.9" over all nine.
  */
+/* ------------------------- average insured age ----------------------
+ * Two ways to take it, and the reader chooses: per life (every person
+ * counts once) or weighted by death benefit (a $10m life counts ten times
+ * a $1m one -- the age the money is actually riding on). Saved against the
+ * account; the dashboard, the entities table and the reports follow it.
+ * ------------------------------------------------------------------- */
+const ageBasis = () => (state.ageBasis === 'db' ? 'db' : 'lives');
+const AGE_BASIS_WORDS = { lives: 'per life', db: 'weighted by death benefit' };
+const ageBasisButton = () => `<button type="button" class="btn-link" data-age-basis
+  title="Switch how the average age is taken">${ageBasis() === 'db'
+    ? 'average per life instead' : 'weight by death benefit'}</button>`;
+document.addEventListener('click', async (e) => {
+  if (!e.target.closest?.('[data-age-basis]')) return;
+  e.preventDefault();
+  state.ageBasis = ageBasis() === 'db' ? 'lives' : 'db';
+  render();
+  try {
+    await api('/me/prefs/age_basis', { method: 'PUT', body: { basis: state.ageBasis } });
+  } catch (err) { toast(`That was not saved: ${err.message}`); }
+});
+
 function avgAgeCell(f) {
   const lives = Number(f.lives_count) || 0;
   const dated = Number(f.lives_with_dob) || 0;
+  if (ageBasis() === 'db' && f.avg_insured_age_db != null)
+    f = { ...f, avg_insured_age: f.avg_insured_age_db };
   if (!f.avg_insured_age)
     return `<td class="num muted">${lives ? 'no dates of birth' : '—'}</td>`;
   const partial = dated < lives;
@@ -1981,13 +2008,19 @@ async function dashboardView() {
       </div>
       <div class="stat">
         <div class="label">Average insured age</div>
-        <div class="value">${sum.avgInsuredAge
-          ? Number(sum.avgInsuredAge).toFixed(1)
-          : '<span class="muted">—</span>'}</div>
+        <div class="value">${(() => {
+          const v = ageBasis() === 'db' ? sum.avgInsuredAgeByBenefit : sum.avgInsuredAge;
+          return v ? Number(v).toFixed(1) : '<span class="muted">—</span>';
+        })()}</div>
         <div class="note">${sum.lives
-          ? `across ${sum.lives} ${sum.lives === 1 ? 'life' : 'lives'}${
+          ? `${AGE_BASIS_WORDS[ageBasis()]}${(() => {
+              const other = ageBasis() === 'db' ? sum.avgInsuredAge : sum.avgInsuredAgeByBenefit;
+              return other ? ` · ${ageBasis() === 'db' ? 'per life' : 'by death benefit'} ${
+                Number(other).toFixed(1)}` : '';
+            })()} · across ${sum.lives} ${sum.lives === 1 ? 'life' : 'lives'}${
               sum.livesWithDob < sum.lives
-                ? ` · ${sum.lives - sum.livesWithDob} with no date of birth` : ''}`
+                ? ` · ${sum.lives - sum.livesWithDob} with no date of birth` : ''}
+            <br>${ageBasisButton()}`
           : 'no lives on the book'}</div>
       </div>
       ${isInvestorUser() ? `
@@ -2192,6 +2225,7 @@ const asColumn = (f) => ({
    needs from here — the column catalogue as this person has arranged it,
    and the picker to change it — is handed over once at load instead. */
 wireReports({
+  ageBasis: () => ageBasis(),
   columns: () => reportFieldList(),
   pick: (opts) => openColumnsDialog(opts),
   save: (fields) => saveReportColumns(fields),
@@ -2935,7 +2969,9 @@ function overviewTab(p) {
       add the second one here.</span></div>`}
   </div>
 
-  <div class="grid-2">
+  ${''/* A CFO gets the figures at the top of the page and the lives
+         insured, not the policy's particulars or its acquisition terms. */}
+  ${isCfoUser() ? '' : `<div class="grid-2">
     <div class="card">
       <div class="card-head"><h2>Policy</h2></div>
       <div class="card-body"><dl class="kv">
@@ -2984,7 +3020,7 @@ function overviewTab(p) {
       ${p.notes ? `<div style="margin-top:16px"><label>Notes</label><div class="secondary">${esc(p.notes)}</div></div>` : ''}
       </div>
     </div>
-  </div>
+  </div>`}
   ${''/* Absent entirely for an investor: the server does not send them, and
          what the desk's model thinks this policy is worth is not a figure
          they are shown. */}
@@ -10023,11 +10059,12 @@ async function settingsView() {
     ${investorUser ? '' : `
     <div class="card">
       <div class="card-head"><h2>Owner entities</h2><div class="spacer"></div>
+        <span style="font-size:12px;margin-right:12px">Average age ${ageBasisButton()}</span>
         ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>Code</th><th>Full legal name</th>${isAdminUser() ? '<th>Carried interest</th>' : ''}
           <th class="num">Policies</th>
-          <th class="num">Lives</th><th class="num">Avg age</th>
+          <th class="num">Lives</th><th class="num">Avg age${ageBasis() === 'db' ? ' (by death benefit)' : ''}</th>
           <th class="num">Death benefit</th><th class="num">Invested</th><th>Notes</th><th></th></tr></thead>
         <tbody>${funds.length === 0
           ? '<tr><td colspan="10"><div class="empty">No entities yet.</div></td></tr>'
