@@ -1,6 +1,6 @@
-PolicyHub build 2026-11-08b: CFO login
-(This zip also contains the compounding and multi-entity investor builds,
-2026-11-04a and 2026-11-08a, so you can skip those zips and upload this one.)
+PolicyHub build 2026-11-08c: carried interest is for administrators only
+(Includes everything since 2026-11-01a: compounding, multi-entity investors,
+the CFO login. Upload this one zip; skip the earlier ones.)
 
 Upload into the policyhub folder of the repo:
   src/      -> policyhub/src      (api.js, auth.js, schema.sql, opportunity-pdf.js,
@@ -8,16 +8,11 @@ Upload into the policyhub folder of the repo:
   public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
   scripts/  -> policyhub/scripts  (tests, optional)
 
-No new environment variables. The database updates itself on the next start.
-
-Setting up a CFO
-  Settings -> Users -> New user -> Role "cfo" -> tick the owner entities -> Create.
-  (An existing login: click it, change Role to cfo, pick the entities, Save.)
-
-What the CFO sees
-  Portfolio, Policies, each policy, Premiums and Realized: the investor's screens,
-  across every policy owned by the chosen entities, at full-policy figures.
-  With more than one entity they can filter by entity.
-  Insureds show as initials. No investor names, no opportunities, documents,
-  agreements or capital calls. Read-only: they cannot change anything.
-  Removing an entity from their login takes effect immediately.
+What changed in this build
+- Carried interest, commission and "net to investors" are now shown to
+  administrators only. Editors, viewers, portfolio managers, investors and
+  CFO logins no longer see the dashboard tile, the entity rate column, the
+  entity form's carried-interest section, or the maturities columns, and
+  the server no longer sends them those figures at all.
+- An editor can still edit an entity's code, name and notes, but not its rate.
+- Investors' own figures are still net of carry, as before; nothing names it.

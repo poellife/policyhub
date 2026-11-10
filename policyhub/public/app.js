@@ -2002,7 +2002,7 @@ async function dashboardView() {
         <div class="value">${fmtExact(t.monthly_coi)}<span style="font-size:15px;color:var(--text-muted)">/mo</span></div>
         <div class="note">≈ ${fmtExact(annualPremium)} per year</div>
       </div>`}
-      ${sum.carry ? `
+      ${sum.carry && isAdminUser() ? `
       <div class="stat">
         ${/* Ours. An investor is never sent this block, so the tile cannot
              appear on their dashboard by accident. */''}
@@ -4155,10 +4155,10 @@ function openEntityDialog(f, onSaved) {
     </div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(f?.notes || '')}</textarea></div>
 
-    <div class="dlg-section">Carried interest</div>
-    ${/* A term of the operating agreement, and not every entity has one —
+    ${isAdminUser() ? `<div class="dlg-section">Carried interest</div>` : ''}
+    ${!isAdminUser() ? '' : /* A term of the operating agreement, and not every entity has one —
          some books are managed for a fee. Zero is not a special case, it is
-         this field with nothing in it. */''}
+         this field with nothing in it. */`
     <div class="field-row">
       <div class="field">
         <label>Does this entity pay it?</label>
@@ -4174,17 +4174,18 @@ function openEntityDialog(f, onSaved) {
         <span class="muted" style="font-size:12px">Per cent, taken from the profit on each
           case after the investor's capital is returned.</span>
       </div>
-    </div>
+    </div>`}
     <span class="muted" style="font-size:12px">
       The code is what appears in the policy grid and reports. Renaming it updates every
       policy that points at this entity — nothing is reassigned.
-      ${f?.id ? `Changing the carried interest changes what every investor in this entity is
+      ${f?.id && isAdminUser() ? `Changing the carried interest changes what every investor in this entity is
       shown, on every screen, immediately. It is written to the activity log.` : ''}
     </span>`;
 
   const dlg = openDialog(isNew ? 'New owner entity' : 'Edit owner entity', body, async (v) => {
     if (v.charges_carry === 'false') v.carry_pct = 0;
     delete v.charges_carry;
+    if (!isAdminUser()) delete v.carry_pct;   // the rate is an administrator's to set
     if (isNew) await api('/funds', { method: 'POST', body: v });
     else await api(`/funds/${f.id}`, { method: 'PUT', body: v });
     state.funds = await api('/funds');
@@ -10017,7 +10018,7 @@ async function settingsView() {
       <div class="card-head"><h2>Owner entities</h2><div class="spacer"></div>
         ${canEdit ? '<button class="btn-sm primary" id="addEntityBtn">New entity</button>' : ''}</div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Code</th><th>Full legal name</th><th>Carried interest</th>
+        <thead><tr><th>Code</th><th>Full legal name</th>${isAdminUser() ? '<th>Carried interest</th>' : ''}
           <th class="num">Policies</th>
           <th class="num">Lives</th><th class="num">Avg age</th>
           <th class="num">Death benefit</th><th class="num">Invested</th><th>Notes</th><th></th></tr></thead>
@@ -10026,9 +10027,9 @@ async function settingsView() {
           : funds.map((f) => `<tr>
               <td class="strong">${esc(f.code)}</td>
               <td>${esc(f.name && f.name !== f.code ? f.name : '')}</td>
-              <td>${Number(f.carry_pct) > 0
+              ${!isAdminUser() ? '' : `<td>${Number(f.carry_pct) > 0
                 ? `${fmtPct(f.carry_pct)} of profit`
-                : '<span class="muted">none — fee only</span>'}</td>
+                : '<span class="muted">none — fee only</span>'}</td>`}
               <td class="num">${f.policy_count}</td>
               <td class="num">${f.lives_count || 0}</td>
               ${avgAgeCell(f)}

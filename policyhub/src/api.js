@@ -1745,6 +1745,36 @@ router.use((req, res, next) => {
   next();
 });
 
+/* ------------------------------------------------------------------ *
+ * Carried interest is the administrators' and nobody else's
+ *
+ * What the managing partner takes -- the rate an entity charges, the
+ * amount on each policy, the commission, the return "net to investors"
+ * after it -- is shown to administrators only. Every other account
+ * (editor, viewer, portfolio manager, investor, CFO) gets responses with
+ * those fields taken out, here at the edge, so no screen, export or
+ * report built from a response can show what the API never sent.
+ *
+ * An investor's own figures are still net of it where they always were;
+ * that is their money, computed in the SQL, and it does not name it.
+ * ------------------------------------------------------------------ */
+const CARRY_KEYS = new Set(['carry', 'carry_pct', 'charges_carry', 'commission',
+  'commission_pct', 'net_rate', 'net_compound_rate', 'net_profit', 'net_return',
+  'policies_without_carry']);
+function withoutCarry(value) {
+  if (Array.isArray(value)) return value.map(withoutCarry);
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) if (!CARRY_KEYS.has(k)) out[k] = withoutCarry(v);
+  return out;
+}
+router.use((req, res, next) => {
+  if (!req.user || req.user.role === 'admin') return next();
+  const send = res.json.bind(res);
+  res.json = (body) => send(withoutCarry(body));
+  next();
+});
+
 function withoutShare(value) {
   if (Array.isArray(value)) return value.map(withoutShare);
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
@@ -1840,7 +1870,8 @@ function carryPctFrom(body) {
 router.post('/funds', blockScoped, requireRole('admin','editor'), wrap(async (req, res) => {
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
-  const carry = carryPctFrom(req.body);
+  // The rate is an administrator's to set; anyone else's request leaves it alone.
+  const carry = req.user.role === 'admin' ? carryPctFrom(req.body) : null;
   if (carry && carry.error) return res.status(400).json({ error: carry.error });
   const { rows } = await q(
     `INSERT INTO funds (code, name, notes, carry_pct) VALUES ($1,$2,$3,COALESCE($4, 10))
@@ -1852,7 +1883,7 @@ router.post('/funds', blockScoped, requireRole('admin','editor'), wrap(async (re
     [code, str(req.body.name), str(req.body.notes), carry]
   );
   await audit(req.user.uid, 'fund', rows[0].id, 'create',
-    `${code} · carried interest ${rows[0].carry_pct}%`);
+    req.user.role === 'admin' ? `${code} · carried interest ${rows[0].carry_pct}%` : code);
   res.status(201).json(rows[0]);
 }));
 
@@ -1860,7 +1891,7 @@ router.put('/funds/:id', blockScoped, requireRole('admin','editor'), wrap(async 
   const code = str(req.body.code);
   if (!code) return res.status(400).json({ error: 'A code is required' });
   try {
-    const carry = carryPctFrom(req.body);
+    const carry = req.user.role === 'admin' ? carryPctFrom(req.body) : null;
     if (carry && carry.error) return res.status(400).json({ error: carry.error });
     const { rows: was } = await q('SELECT carry_pct FROM funds WHERE id = $1', [req.params.id]);
     const { rows } = await q(
