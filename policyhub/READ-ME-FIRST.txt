@@ -1,6 +1,5 @@
-PolicyHub build 2026-11-08c: carried interest is for administrators only
-(Includes everything since 2026-11-01a: compounding, multi-entity investors,
-the CFO login. Upload this one zip; skip the earlier ones.)
+PolicyHub build 2026-11-10a
+(Includes everything since 2026-11-01a. Upload this one zip; skip the earlier ones.)
 
 Upload into the policyhub folder of the repo:
   src/      -> policyhub/src      (api.js, auth.js, schema.sql, opportunity-pdf.js,
@@ -8,11 +7,9 @@ Upload into the policyhub folder of the repo:
   public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
   scripts/  -> policyhub/scripts  (tests, optional)
 
-What changed in this build
-- Carried interest, commission and "net to investors" are now shown to
-  administrators only. Editors, viewers, portfolio managers, investors and
-  CFO logins no longer see the dashboard tile, the entity rate column, the
-  entity form's carried-interest section, or the maturities columns, and
-  the server no longer sends them those figures at all.
-- An editor can still edit an entity's code, name and notes, but not its rate.
-- Investors' own figures are still net of carry, as before; nothing names it.
+New in this build
+- Reports -> "Valuation report": every policy in force with insured name, age,
+  current death benefit and total invested, with totals. Staff only.
+- CFO login: full insured names (not initials); the compounding choice
+  (annually / monthly / daily) on Portfolio and Realized; each policy shows
+  the Overview only; no Premiums menu item; no email-notification settings.

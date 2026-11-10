@@ -151,6 +151,66 @@ const pct = (part, whole) => (!whole ? '—' : `${((part / whole) * 100).toFixed
 const insuredOf = (p) =>
   p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
 
+/**
+ * The valuation report: one line per policy in force -- the insured, their
+ * age today, the death benefit as the carrier last reported it (the face
+ * amount where there is no statement yet), and every dollar in the ledger
+ * against it. Sorted by insured surname, totalled at the foot.
+ *
+ * Staff only: it names the insured. The capital-invested column is the
+ * point of the report, so it is shown whatever the cost-basis box says.
+ */
+export function buildValuation(rows, o) {
+  const live = rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status))
+    .sort((a, b) => String(a.insured_last || '').localeCompare(String(b.insured_last || ''))
+      || String(a.insured_first || '').localeCompare(String(b.insured_first || '')));
+  const benefit = (p) => Number(p.death_benefit ?? p.face_amount) || 0;
+  const invested = (p) => Number(p.total_invested) || 0;
+  const name = (p) => {
+    const last = String(p.insured_last || '').trim();
+    const first = String(p.insured_first || '').trim();
+    return last && first ? `${last}, ${first}` : (last || first || insuredOf(p));
+  };
+  const totalDb = live.reduce((t, p) => t + benefit(p), 0);
+  const totalInv = live.reduce((t, p) => t + invested(p), 0);
+  const ages = live.map((p) => ageFrom(p.insured_dob)).filter((a) => a !== null);
+  const avgAge = ages.length ? ages.reduce((t, a) => t + a, 0) / ages.length : null;
+
+  return `
+    ${letterhead('Valuation Report', `${live.length} ${live.length === 1 ? 'policy' : 'policies'} in force${
+      o.fund ? ` · ${fundNote(o.fund)}` : ''}`, o.asOf)}
+    ${confidential(true, o)}
+    <div class="rpt-block">
+      <table class="rpt-table">
+        <thead><tr>
+          <th>#</th><th>Insured</th><th>Policy</th><th class="num">Age</th>
+          <th class="num">Current death benefit</th><th class="num">Total invested</th>
+        </tr></thead>
+        <tbody>${live.length === 0
+          ? '<tr><td colspan="6" class="muted">No policies in force.</td></tr>'
+          : live.map((p, i) => `<tr>
+            <td class="muted">${i + 1}</td>
+            <td class="strong">${esc(name(p))}</td>
+            <td class="rpt-nowrap">${esc(p.policy_number || '')}</td>
+            <td class="num">${ageFrom(p.insured_dob) ?? '—'}</td>
+            <td class="num">${money(benefit(p), 0)}</td>
+            <td class="num">${money(invested(p), 0)}</td>
+          </tr>`).join('')}</tbody>
+        ${live.length ? `<tfoot><tr>
+          <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
+          <td class="num">${avgAge === null ? '' : `avg ${avgAge.toFixed(1)}`}</td>
+          <td class="num">${money(totalDb, 0)}</td>
+          <td class="num">${money(totalInv, 0)}</td>
+        </tr></tfoot>` : ''}
+      </table>
+      <p class="rpt-note">Age is the insured's age today, from the date of birth on file.
+        Death benefit is the most recent carrier-reported figure, or the face amount where no
+        statement has been recorded. Total invested is every acquisition cost, premium, fee and
+        servicing charge in the ledger for the policy.</p>
+    </div>
+    ${footer('Valuation Report')}`;
+}
+
 /* --------------------- an investor's share of it --------------------- *
  *
  * The portfolio-level reports are weighted on the server, because the
@@ -440,6 +500,12 @@ const REPORTS = {
     name: 'Return — realized',
     blurb: 'Return on every matured policy from the cheque that actually arrived. What the book has actually returned.',
     landscape: true,
+  },
+  valuation: {
+    name: 'Valuation report',
+    blurb: 'Every policy in force with the insured, their age, the current death benefit and the total invested, with totals. Staff only.',
+    landscape: false,
+    staffOnly: true,
   },
   investor: {
     name: 'Investor statements',
@@ -2327,6 +2393,10 @@ export async function reportsView(api, state) {
                 valueFmt: (v) => `${v >= 0 ? '' : '−'}${Math.abs(v).toFixed(1)}%`,
               });
             };
+
+          } else if (r.type === 'valuation') {
+            const rows = await api(`/policies?fund=${encodeURIComponent(o.fund)}`);
+            out.innerHTML = `<div class="rpt-sheet">${buildValuation(rows, o)}</div>`;
 
           } else if (r.type === 'investor') {
             const picked = [...$('#rptInvestors').selectedOptions].map((op) => op.value);

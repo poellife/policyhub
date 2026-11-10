@@ -37,7 +37,7 @@ await p.click('button[type=submit]'); await p.waitForSelector('.kpi-row',{timeou
 await p.click('a[href="#/reports"]');
 await p.waitForFunction(()=>document.querySelector('h1')?.textContent==='Reports');
 await p.waitForSelector('#rptGenerate');
-check('reports page renders', (await p.locator('.rpt-choice').count())===7,
+check('reports page renders', (await p.locator('.rpt-choice').count())===8,
   `${await p.locator('.rpt-choice').count()} report types`);
 await p.screenshot({path:`${SHOTS}/r0-reports-picker.png`,fullPage:true});
 

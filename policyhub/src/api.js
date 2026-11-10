@@ -1740,8 +1740,13 @@ router.use((req, res, next) => {
   /* A CFO holds no share of anything, so the per-row "my_pct" (always 100
      for a reader with no investor scope) is taken off rather than left to
      read as "you own all of this". */
-  const shape = (body) => (isCfo(req) ? withoutShare(body) : body);
-  res.json = (body) => send(shape(res.locals.identified ? body : deidentify(body)));
+  /* A CFO is the entity's own officer and sees the insured's full name;
+     only an investor gets initials. */
+  if (isCfo(req)) {
+    res.json = (body) => send(withoutShare(body));
+    return next();
+  }
+  res.json = (body) => send(res.locals.identified ? body : deidentify(body));
   next();
 });
 

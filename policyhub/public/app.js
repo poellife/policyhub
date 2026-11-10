@@ -1217,7 +1217,6 @@ const MANAGER_NAV = STAFF_NAV
 const CFO_NAV = [
   ['dashboard', 'Portfolio'],
   ['policies', 'Policies'],
-  ['servicing', 'Premiums'],
   ['maturities', 'Realized'],
   ['settings', 'Account'],
 ];
@@ -1246,6 +1245,8 @@ const CFO_VOICE = [
   ['your share', 'full policy'],
   ['on your policies', 'on these policies'],
   ["your policies'", "these policies'"],
+  // No Premiums screen on a CFO login, so nothing points at one.
+  ['<a href="#/servicing" style="font-size:13px;margin-left:12px">See all →</a>', ''],
 ];
 const cfoVoice = (html) => CFO_VOICE.reduce((h, [a, b]) => h.split(a).join(b), html);
 const isInvestorUser = () => state.user?.role === 'investor' || isCfoUser();
@@ -1277,7 +1278,10 @@ const isMedicalUser  = () => state.user?.role === 'medical';
  * statements and agreements are written in, and two rates on a page with
  * no explanation is worse than one that is labelled.
  */
-const showsBothRates = () => !isInvestorUser();
+/* A CFO gets the desk's rate display -- compounded leading, simple one tick
+   away, and the annually / monthly / daily compounding choice -- because
+   they report on the entity's book and need to state it the way they choose. */
+const showsBothRates = () => !isInvestorUser() || isCfoUser();
 /**
  * The other convention, said beside the figure on the tile.
  *
@@ -2674,10 +2678,12 @@ async function policyView() {
   // Value history is entirely account value, cash surrender value and cost of
   // insurance — carrier administration, not investment performance. There is
   // nothing left of the tab once those are taken out, so it goes.
-  const tabs = [['overview', 'Overview'],
+  /* A CFO gets the overview of each policy and nothing more. */
+  const tabs = isCfoUser() ? [['overview', 'Overview']] : [['overview', 'Overview'],
                 ...(isInvestorUser() ? [] : [['values', 'Value history']]),
                 ['transactions', 'Transactions'], ['return', 'Return'],
                 ['servicing', isInvestorUser() ? 'Premiums' : 'Servicing']];
+  if (isCfoUser()) detailTab = 'overview';
 
   const html = `
     <div class="page-head">
@@ -2782,7 +2788,7 @@ async function policyView() {
         <div class="note">Account value ÷ monthly COI</div></div>`}
     </div>
 
-    <div class="tabs">
+    <div class="tabs" ${isCfoUser() ? 'style="display:none"' : ''}>
       ${tabs.map(([k, label]) =>
         `<button data-tab="${k}" class="${detailTab === k ? 'active' : ''}">${label}</button>`).join('')}
     </div>
@@ -9767,7 +9773,8 @@ async function settingsView() {
     // administrator sees the firm's.
     api('/security/locations').catch(() => []),
     isAdmin ? api('/security/notices').catch(() => []) : Promise.resolve([]),
-    api('/me/notifications').catch(() => null),
+    // A CFO login reads and is told nothing: no email settings to show.
+    isCfoUser() ? Promise.resolve(null) : api('/me/notifications').catch(() => null),
     isAdmin ? api('/mail/health').catch(() => null) : Promise.resolve(null),
   ]);
   state.funds = funds;
@@ -10229,7 +10236,7 @@ async function settingsView() {
               <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
               entities chosen above — the portfolio, each policy, premiums due and realized
               maturities — on the same screens an investor has, at full-policy figures.
-              Insureds appear as initials. No investor names, no opportunities, no
+              Insureds are shown by full name. No investor names, no opportunities, no
               documents, and nothing it can change.
             </div>
           </div>
@@ -10392,7 +10399,7 @@ async function openUserDialog(u, funds, onSaved) {
         <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
         entities chosen above — the portfolio, each policy, premiums due and realized
         maturities — on the same screens an investor has, at full-policy figures.
-        Insureds appear as initials. No investor names, no opportunities, no
+        Insureds are shown by full name. No investor names, no opportunities, no
         documents, and nothing it can change.
       </div>
     </div>

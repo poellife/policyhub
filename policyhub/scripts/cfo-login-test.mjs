@@ -12,7 +12,7 @@
      - It sees every policy in its entities, and none outside them, on
        every screen it has; a policy in another entity is "not found".
      - Figures are the whole policy, not a share.
-     - Investor names never reach it; the insured is initials only.
+     - Investor names never reach it; the insured is shown by full name.
      - It can change nothing, and every staff or investor-dealing route
        (investors, opportunities, documents, exports, users...) is refused.
      - On screen: the CFO menu, CFO wording, no Ownership card.
@@ -126,8 +126,7 @@ check('the death benefit is the whole policy, not 25%',
 check('invested is the whole $400,000', Number(a.total_invested) === 400000, String(a.total_invested));
 check('there is no "my share" on it', !('my_pct' in a));
 const dash = (await cfo('/analytics/summary')).body;
-check('the dashboard counts its three policies',
-  JSON.stringify(dash).includes('Castellano') === false, 'names masked');
+check('the dashboard reads', !!dash && typeof dash === 'object');
 const svc = (await cfo('/servicing')).body;
 const svcText = JSON.stringify(svc);
 check('the premium calendar has its premium, at full amount', svcText.includes('48000'));
@@ -139,14 +138,13 @@ const fl = (await cfo('/funds')).body || [];
 check('it can list its own entities for the picker, and only those',
   fl.length === 2 && fl.every((f) => ['LCG1', 'LCG2'].includes(f.code)), fl.map((f) => f.code).join(','));
 
-console.log('\nNO INVESTOR NAMES, INSUREDS AS INITIALS');
+console.log('\nNO INVESTOR NAMES; INSUREDS BY FULL NAME');
 const everything = JSON.stringify([mineAll, a, (await cfo(`/policies/${C.id}`)).body,
   dash, svc, mats, (await cfo(`/policies/${A.id}/irr`)).body]);
 check('the investor’s name appears nowhere', !everything.includes('Zebulon'));
 check('the policy carries no ownership lines', Array.isArray(a.owners) && a.owners.length === 0);
-check('no insured surname appears anywhere',
-  !['Abernathy', 'Bellweather', 'Castellano'].some((n) => everything.includes(n)));
-check('but the initials do', /Q\. A\./.test(everything));
+check('the insured’s full name is shown to a CFO',
+  ['Abernathy', 'Bellweather', 'Castellano'].every((n) => everything.includes(n)));
 check('no valuations ride along', a.valuations === undefined);
 
 console.log('\nIT CAN CHANGE NOTHING, AND REACHES NOTHING ELSE');
@@ -194,7 +192,7 @@ await p.click('button[type=submit]');
 await p.waitForSelector('.kpi-row', { timeout: 20000 });
 const nav = (await p.locator('.nav a').allTextContents()).map((t) => t.trim()).filter(Boolean);
 check('the CFO menu', JSON.stringify(nav) === JSON.stringify(
-  ['Portfolio', 'Policies', 'Premiums', 'Realized', 'Account']), nav.join(' · '));
+  ['Portfolio', 'Policies', 'Realized', 'Account']), nav.join(' · '));
 const dashText = await p.locator('#main').innerText();
 check('the dashboard does not speak of a share',
   !/your share|ownership percentage|your portfolio/i.test(dashText), dashText.slice(0, 120));
@@ -218,7 +216,29 @@ check('the policy page names its owner entity', /owner entity/i.test(polText) &&
 check('and has no Ownership card or investor', !/ownership|your position/i.test(polText)
   && !polText.includes('Zebulon'));
 check('and shows the whole death benefit', polText.includes('2,000,000'));
-for (const r of ['servicing', 'maturities', 'settings']) {
+check('the policy page has the overview only, no other tabs',
+  await p.locator('.tabs button:visible').count() === 0
+  && !/transactions|premiums/i.test(await p.locator('.tabs').innerText().catch(() => '')));
+await p.goto(`${BASE}/#/settings`);
+await p.waitForTimeout(1500);
+check('the Account page has no email-notification settings',
+  await p.locator('#saveMailPrefs').count() === 0);
+await p.goto(`${BASE}/#/dashboard`);
+await p.waitForSelector('#compounding', { timeout: 20000 });
+check('the dashboard has the compounding choice', await p.locator('#compounding').count() === 1);
+await p.selectOption('#compounding', 'monthly');
+await p.waitForTimeout(1500);
+check('choosing monthly relabels the return',
+  /compounded monthly/i.test(await p.locator('#main').innerText()));
+check('and is saved against the CFO’s account',
+  (await cfo('/me/prefs')).body?.compounding?.how === 'monthly');
+await p.selectOption('#compounding', 'annual');
+await p.waitForTimeout(1200);
+check('back to annually', /compounded annually/i.test(await p.locator('#main').innerText()));
+await p.goto(`${BASE}/#/maturities`);
+await p.waitForSelector('#compounding', { timeout: 20000 });
+check('Realized has it too', await p.locator('#compounding').count() === 1);
+for (const r of ['maturities', 'settings']) {
   await p.goto(`${BASE}/#/${r}`);
   await p.waitForTimeout(1800);
 }
