@@ -1,16 +1,13 @@
-PolicyHub build 2026-11-10b
-(Includes everything since 2026-11-01a. Upload this one zip; skip the earlier ones.)
+PolicyHub build 2026-11-11a
+(Includes everything since 2026-11-01a. If you already uploaded 2026-11-10b,
+only public/reports.js and public/build.js changed.)
 
 Upload into the policyhub folder of the repo:
-  src/      -> policyhub/src      (api.js, auth.js, schema.sql, opportunity-pdf.js,
-                                   opportunity-email.js, maturity-pdf.js)
-  public/   -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
+  src/      -> policyhub/src
+  public/   -> policyhub/public
   scripts/  -> policyhub/scripts  (tests, optional)
 
-New since 2026-11-10a
-- Average insured age can be weighted by death benefit. Dashboard tile:
-  click "weight by death benefit" (click again for per life). The choice is
-  saved per user and the Owner entities table, the Valuation report and the
-  Portfolio summary report follow it.
-- CFO login: each policy page no longer shows the "Policy" and
-  "Acquisition & premium" cards.
+New: Reports -> "Average age". Choose "Weighted by death benefit" or
+"Not weighted" and Generate. Shows both figures at the top, the calculation,
+a by-entity table, and every policy with its age and death benefit (plus share
+of benefit and age x death benefit when weighted). Staff only.

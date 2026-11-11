@@ -220,6 +220,129 @@ export function buildValuation(rows, o) {
     ${footer('Valuation Report')}`;
 }
 
+/**
+ * The average-age report.
+ *
+ * The book in force, one line per policy, with the insured's age today and
+ * the death benefit. Weighted, each age counts in proportion to its death
+ * benefit:  sum(age x benefit) / sum(benefit).  Not weighted, every policy
+ * counts once:  sum(age) / number of policies. Both figures are always
+ * stated at the top -- the chosen one leads -- so the reader can see how far
+ * apart they are. Working shown in full, by entity and by policy.
+ *
+ * One age per policy: the primary insured's, as on the valuation report.
+ * Policies with no date of birth are listed but left out of both averages.
+ */
+export function buildAgeReport(rows, o, basis = 'lives') {
+  const live = rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status))
+    .sort((a, b) => String(a.insured_last || '').localeCompare(String(b.insured_last || ''))
+      || String(a.insured_first || '').localeCompare(String(b.insured_first || '')));
+  const byDb = basis === 'db';
+  const benefit = (p) => Number(p.death_benefit ?? p.face_amount) || 0;
+  const name = (p) => {
+    const last = String(p.insured_last || '').trim();
+    const first = String(p.insured_first || '').trim();
+    return last && first ? `${last}, ${first}` : (last || first || insuredOf(p));
+  };
+  const stats = (list) => {
+    const dated = list.filter((p) => ageFrom(p.insured_dob) !== null);
+    const sumAge = dated.reduce((t, p) => t + ageFrom(p.insured_dob), 0);
+    const sumDb = dated.reduce((t, p) => t + benefit(p), 0);
+    const sumAgeDb = dated.reduce((t, p) => t + ageFrom(p.insured_dob) * benefit(p), 0);
+    return { n: list.length, dated: dated.length, sumAge, sumDb, sumAgeDb,
+      plain: dated.length ? sumAge / dated.length : null,
+      weighted: sumDb ? sumAgeDb / sumDb : null };
+  };
+  const all = stats(live);
+  const one = (v) => (v === null ? '—' : v.toFixed(2));
+  const big = (n) => Math.round(n).toLocaleString('en-US');
+  const lead = byDb ? all.weighted : all.plain;
+  const other = byDb ? all.plain : all.weighted;
+
+  const entities = [...new Set(live.map((p) => p.fund_code || 'Unassigned'))].sort();
+  const tile = (label, value, note) => `
+    <div class="rpt-tile"><div class="rpt-tile-label">${label}</div>
+      <div class="rpt-tile-value">${value}</div>
+      ${note ? `<div class="rpt-tile-note">${note}</div>` : ''}</div>`;
+
+  return `
+    ${letterhead('Average Age', `${live.length} ${live.length === 1 ? 'policy' : 'policies'} in force${
+      o.fund ? ` · ${fundNote(o.fund)}` : ''} · ${byDb ? 'weighted by death benefit' : 'not weighted'}`, o.asOf)}
+    ${confidential(false, o)}
+
+    <div class="rpt-tiles" data-count="3">
+      ${tile(byDb ? 'Average age, weighted by death benefit' : 'Average age, not weighted',
+        one(lead), byDb ? 'each age counts in proportion to its death benefit' : 'every policy counts once')}
+      ${tile(byDb ? 'Not weighted, for comparison' : 'Weighted by death benefit, for comparison',
+        one(other), lead !== null && other !== null
+          ? `${Math.abs(lead - other).toFixed(2)} years ${lead > other ? 'lower' : 'higher'}` : '')}
+      ${tile('Total death benefit', money(all.sumDb, 0),
+        `${all.dated} of ${all.n} policies with a date of birth`)}
+    </div>
+
+    <div class="rpt-block">
+      <h3 class="rpt-h3">The calculation</h3>
+      <p class="rpt-note" style="font-size:12px">${byDb
+        ? `Sum of (age × death benefit) ÷ sum of death benefit = ${big(all.sumAgeDb)} ÷ ${
+            big(all.sumDb)} = <strong>${one(all.weighted)}</strong>`
+        : `Sum of ages ÷ number of policies = ${big(all.sumAge)} ÷ ${all.dated} = <strong>${
+            one(all.plain)}</strong>`}</p>
+    </div>
+
+    ${entities.length > 1 ? `
+    <div class="rpt-block">
+      <h3 class="rpt-h3">By owner entity</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Entity</th><th class="num">Policies</th><th class="num">Death benefit</th>
+          <th class="num">Not weighted</th><th class="num">Weighted by death benefit</th></tr></thead>
+        <tbody>${entities.map((code) => {
+          const st = stats(live.filter((p) => (p.fund_code || 'Unassigned') === code));
+          return `<tr><td class="strong">${esc(code)}</td><td class="num">${st.n}</td>
+            <td class="num">${money(st.sumDb, 0)}</td>
+            <td class="num${byDb ? '' : ' strong'}">${one(st.plain)}</td>
+            <td class="num${byDb ? ' strong' : ''}">${one(st.weighted)}</td></tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>` : ''}
+
+    <div class="rpt-block">
+      <h3 class="rpt-h3">Policy by policy</h3>
+      <table class="rpt-table">
+        <thead><tr><th>#</th><th>Insured</th><th>Policy</th><th class="num">Age</th>
+          <th class="num">Death benefit</th>
+          ${byDb ? '<th class="num">Share of benefit</th><th class="num">Age × death benefit</th>' : ''}
+        </tr></thead>
+        <tbody>${live.length === 0
+          ? `<tr><td colspan="${byDb ? 7 : 5}" class="muted">No policies in force.</td></tr>`
+          : live.map((p, i) => {
+            const age = ageFrom(p.insured_dob);
+            return `<tr>
+              <td class="muted">${i + 1}</td>
+              <td class="strong">${esc(name(p))}</td>
+              <td class="rpt-nowrap">${esc(p.policy_number || '')}</td>
+              <td class="num">${age ?? '<span class="muted">no DOB</span>'}</td>
+              <td class="num">${money(benefit(p), 0)}</td>
+              ${byDb ? `<td class="num">${age === null || !all.sumDb ? '—'
+                : `${((benefit(p) / all.sumDb) * 100).toFixed(1)}%`}</td>
+              <td class="num">${age === null ? '—' : big(age * benefit(p))}</td>` : ''}
+            </tr>`;
+          }).join('')}</tbody>
+        ${live.length ? `<tfoot><tr>
+          <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
+          <td class="num">${byDb ? '' : `${big(all.sumAge)}<br><span class="muted">avg ${one(all.plain)}</span>`}</td>
+          <td class="num">${money(all.sumDb, 0)}</td>
+          ${byDb ? `<td class="num">100%</td>
+          <td class="num">${big(all.sumAgeDb)}<br><span class="muted">avg ${one(all.weighted)}</span></td>` : ''}
+        </tr></tfoot>` : ''}
+      </table>
+      <p class="rpt-note">Age is the primary insured's age today, from the date of birth on file;
+        on a joint or survivorship policy the second life is not averaged in. Death benefit is the
+        most recent carrier-reported figure, or the face amount where no statement has been
+        recorded. A policy with no date of birth is listed but left out of both averages.</p>
+    </div>
+    ${footer('Average Age')}`;
+}
+
 /* --------------------- an investor's share of it --------------------- *
  *
  * The portfolio-level reports are weighted on the server, because the
@@ -513,6 +636,12 @@ const REPORTS = {
   valuation: {
     name: 'Valuation report',
     blurb: 'Every policy in force with the insured, their age, the current death benefit and the total invested, with totals. Staff only.',
+    landscape: false,
+    staffOnly: true,
+  },
+  age: {
+    name: 'Average age',
+    blurb: 'The average insured age of the book in force — straight, or weighted by death benefit — with the working shown, by entity and policy by policy. Staff only.',
     landscape: false,
     staffOnly: true,
   },
@@ -2197,6 +2326,16 @@ export async function reportsView(api, state) {
           <span class="muted" style="font-size:12px">Nothing selected prints all ${policies.length}. Hold ⌘ or Ctrl to pick several.</span>
         </div>
 
+        <div class="field" id="rptAgeField" style="${r.type === 'age' ? '' : 'display:none'}">
+          <label>Average age</label>
+          <select id="rptAgeBasis">
+            <option value="db" ${(r.ageBasis || host.ageBasis?.()) === 'db' ? 'selected' : ''}
+              >Weighted by death benefit</option>
+            <option value="lives" ${(r.ageBasis || host.ageBasis?.()) === 'db' ? '' : 'selected'}
+              >Not weighted — every policy counts once</option>
+          </select>
+        </div>
+
         <div class="field" id="rptInvestorField" style="${r.type === 'investor' ? '' : 'display:none'}">
           <label>Investors to include</label>
           <select id="rptInvestors" multiple size="7">
@@ -2274,6 +2413,7 @@ export async function reportsView(api, state) {
         $('#rptColumns').style.display = r.type === 'schedule' ? '' : 'none';
         $('#rptPolicyField').style.display = r.type === 'factsheet' ? '' : 'none';
         $('#rptInvestorField').style.display = r.type === 'investor' ? '' : 'none';
+        $('#rptAgeField').style.display = r.type === 'age' ? '' : 'none';
         document.querySelectorAll('.rpt-choice').forEach((el) =>
           el.classList.toggle('selected', el.querySelector('input').checked));
       };
@@ -2408,6 +2548,11 @@ export async function reportsView(api, state) {
           } else if (r.type === 'valuation') {
             const rows = await api(`/policies?fund=${encodeURIComponent(o.fund)}`);
             out.innerHTML = `<div class="rpt-sheet">${buildValuation(rows, o)}</div>`;
+
+          } else if (r.type === 'age') {
+            r.ageBasis = $('#rptAgeBasis').value === 'db' ? 'db' : 'lives';
+            const rows = await api(`/policies?fund=${encodeURIComponent(o.fund)}`);
+            out.innerHTML = `<div class="rpt-sheet">${buildAgeReport(rows, o, r.ageBasis)}</div>`;
 
           } else if (r.type === 'investor') {
             const picked = [...$('#rptInvestors').selectedOptions].map((op) => op.value);
