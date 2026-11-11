@@ -184,8 +184,17 @@ const br = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' }
 const p = await (await br.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
 p.on('pageerror', (e) => errs.push(e.message));
 const refused = [];
-p.on('response', (r) => { if (r.url().includes('/api/') && r.status() === 403) refused.push(new URL(r.url()).pathname); });
+/* An administrator uses the same browser tab first and signs out -- the
+   CFO must not inherit the administrator's list of entities. */
 await p.goto(BASE);
+await p.fill('#email', ADMIN.email);
+await p.fill('#password', ADMIN.password);
+await p.click('button[type=submit]');
+await p.waitForSelector('.kpi-row', { timeout: 20000 });
+await p.waitForTimeout(800);
+await p.click('#logoutBtn');
+await p.waitForSelector('#email', { timeout: 20000 });
+p.on('response', (r) => { if (r.url().includes('/api/') && r.status() === 403) refused.push(new URL(r.url()).pathname); });
 await p.fill('#email', EMAIL);
 await p.fill('#password', pw);
 await p.click('button[type=submit]');
@@ -201,7 +210,20 @@ await p.click('#entityBtn');
 const opts = (await p.locator('#entityMenu').innerText());
 check('listing only its own entities', /LCG1/.test(opts) && /LCG2/.test(opts)
   && !opts.includes(OTHER.code), opts.replace(/\s+/g, ' '));
+await p.locator('#entityMenu label:has-text("LCG2") input').check();
 await p.keyboard.press('Escape');
+await p.mouse.click(5, 300);          // close the menu, which applies the choice
+await p.waitForTimeout(1500);
+await p.goto(`${BASE}/#/policies`);
+await p.waitForSelector('table.data tbody tr', { timeout: 20000 });
+await p.waitForTimeout(800);
+const only2 = await p.locator('#main').innerText();
+check('choosing LCG2 narrows the policies to LCG2', only2.includes(`${PREFIX}-C`) === false
+  ? !only2.includes(`${PREFIX}-A`) : !only2.includes(`${PREFIX}-A`), only2.includes(`${PREFIX}-A`) ? 'LCG1 policy still listed' : '');
+await p.click('#entityBtn');
+await p.locator('#entityMenu label:has-text("LCG2") input').uncheck();
+await p.keyboard.press('Escape');
+await p.waitForTimeout(800);
 await p.goto(`${BASE}/#/policies`);
 await p.waitForSelector('table.data tbody tr', { timeout: 20000 });
 await p.waitForTimeout(800);
@@ -226,19 +248,18 @@ await p.waitForTimeout(1500);
 check('the Account page has no email-notification settings',
   await p.locator('#saveMailPrefs').count() === 0);
 await p.goto(`${BASE}/#/dashboard`);
+await p.waitForTimeout(1500);
+check('the dashboard has no Portfolio return tile', !/portfolio return/i.test(await p.locator('#main').innerText()));
+await p.goto(`${BASE}/#/maturities`);
 await p.waitForSelector('#compounding', { timeout: 20000 });
-check('the dashboard has the compounding choice', await p.locator('#compounding').count() === 1);
 await p.selectOption('#compounding', 'monthly');
 await p.waitForTimeout(1500);
-check('choosing monthly relabels the return',
+check('on Realized, choosing monthly relabels the return',
   /compounded monthly/i.test(await p.locator('#main').innerText()));
 check('and is saved against the CFO’s account',
   (await cfo('/me/prefs')).body?.compounding?.how === 'monthly');
 await p.selectOption('#compounding', 'annual');
 await p.waitForTimeout(1200);
-check('back to annually', /compounded annually/i.test(await p.locator('#main').innerText()));
-await p.goto(`${BASE}/#/maturities`);
-await p.waitForSelector('#compounding', { timeout: 20000 });
 check('Realized has it too', await p.locator('#compounding').count() === 1);
 for (const r of ['maturities', 'settings']) {
   await p.goto(`${BASE}/#/${r}`);

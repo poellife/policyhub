@@ -427,6 +427,108 @@ const confidential = (showBasis, o) =>
     ? ' — contains cost basis and capital invested' : ''}. For the intended recipient only.</div>
    ${shareBasis(o)}`;
 
+/* --------------------------- the PDF download ------------------------
+ * What is on the screen, as a PDF.
+ *
+ * Every sheet in the report is drawn by html2canvas at the width of the
+ * page it is going onto (portrait or landscape Letter), then cut into pages
+ * at the bottom of a row, a block or a tile -- never through the middle of
+ * a line -- and laid into jsPDF. Each sheet starts a new page, so a fact
+ * sheet or an investor statement is one document per person as on screen.
+ *
+ * The two libraries are vendored under /vendor and loaded on the first
+ * download only, so nobody who never downloads a PDF pays for them.
+ * ------------------------------------------------------------------- */
+const loadScript = (src) => new Promise((ok, bad) => {
+  if (document.querySelector(`script[data-vendor="${src}"]`)) return ok();
+  const el = document.createElement('script');
+  el.src = src; el.dataset.vendor = src;
+  el.onload = () => ok(); el.onerror = () => bad(new Error('The PDF tools could not be loaded.'));
+  document.head.appendChild(el);
+});
+
+async function screenPdf(root, { landscape = false, title = '' } = {}) {
+  await loadScript('/vendor/html2canvas.min.js');
+  await loadScript('/vendor/jspdf.umd.min.js');
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: landscape ? 'landscape' : 'portrait', unit: 'pt', format: 'letter' });
+  doc.setProperties({ title: title || 'Report', author: 'Poel Capital', creator: 'Poel Capital' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 24;
+  const contentW = pageW - margin * 2;
+  const contentH = pageH - margin * 2;
+  /* The width the sheet is laid out at for paper: about what the printed
+     page holds at the type size the screen uses. */
+  const layoutW = landscape ? 1062 : 800;
+  const sheets = [...root.querySelectorAll('.rpt-sheet')];
+  if (!sheets.length) sheets.push(root);
+
+  let first = true;
+  for (const sheet of sheets) {
+    let breaks = [];
+    let height = 0;
+    const canvas = await window.html2canvas(sheet, {
+      scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false,
+      windowWidth: Math.max(layoutW + 80, document.documentElement.clientWidth),
+      onclone: (cdoc, csheet) => {
+        Object.assign(csheet.style, { width: `${layoutW}px`, maxWidth: `${layoutW}px`,
+          border: '0', borderRadius: '0', margin: '0', boxShadow: 'none' });
+        csheet.querySelectorAll('.rpt-hscroll').forEach((x) => { x.style.overflow = 'visible'; });
+        /* A chart was drawn to the screen's width; at the page's width it
+           has to be told its new size in pixels, kept in proportion, or it
+           is pictured at the old width and runs off the side. */
+        csheet.querySelectorAll('svg[viewBox]').forEach((svg) => {
+          const [, , vw, vh] = svg.getAttribute('viewBox').split(/[\s,]+/).map(Number);
+          const w = svg.parentElement?.clientWidth || vw;
+          if (!vw || !vh || !w) return;
+          const ratio = Math.min(1, w / vw);
+          svg.setAttribute('width', String(Math.floor(vw * ratio)));
+          svg.setAttribute('height', String(Math.floor(vh * ratio)));
+          svg.style.width = `${Math.floor(vw * ratio)}px`;
+          svg.style.height = `${Math.floor(vh * ratio)}px`;
+        });
+        const top = csheet.getBoundingClientRect().top;
+        height = csheet.getBoundingClientRect().height;
+        breaks = [...csheet.querySelectorAll(
+          'tr, .rpt-block, .rpt-tiles, .rpt-head, p, .rpt-footer, .rpt-confidential, header, section > div')]
+          /* Never straight after a heading: a heading at the foot of a page
+             with its table on the next is the one break a reader notices. */
+          .filter((el) => !/^H[1-6]$/.test(el.tagName) && !el.matches('.rpt-h2, .rpt-h3'))
+          .map((el) => el.getBoundingClientRect().bottom - top)
+          .filter((y) => y > 0 && y <= height)
+          .sort((a, b) => a - b);
+      },
+    });
+    const pxPerCss = canvas.width / layoutW;   // the canvas is drawn at scale 2
+    const cssToPt = contentW / layoutW;
+    const pageCss = contentH / cssToPt;
+    const total = canvas.height / pxPerCss;
+    let start = 0;
+    while (start < total - 1) {
+      let end = Math.min(total, start + pageCss);
+      if (end < total) {
+        const fit = breaks.filter((y) => y > start + pageCss * 0.35 && y <= start + pageCss);
+        if (fit.length) end = fit[fit.length - 1];
+      }
+      const slice = document.createElement('canvas');
+      slice.width = canvas.width;
+      slice.height = Math.ceil((end - start) * pxPerCss);
+      const ctx = slice.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, slice.width, slice.height);
+      ctx.drawImage(canvas, 0, Math.floor(start * pxPerCss), canvas.width, slice.height,
+        0, 0, canvas.width, slice.height);
+      if (!first) doc.addPage();
+      first = false;
+      doc.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', margin, margin,
+        contentW, (end - start) * cssToPt);
+      start = end;
+    }
+  }
+  return doc.output('blob');
+}
+
 /** Swap the @page rule so a wide schedule can print landscape. */
 function setPageOrientation(landscape) {
   let tag = document.getElementById('printPageStyle');
@@ -2667,24 +2769,14 @@ export async function reportsView(api, state) {
       onDownload('#rptXlsx', (sheets) => saveBlob(
         buildWorkbook(sheets), `${stem()}.xlsx`));
 
-      onDownload('#rptPdf', async (sheets) => {
-        const res = await fetch('/api/reports/pdf', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: REPORTS[r.type].name,
-            subtitle: [fundNote(r.fund), sizeNote(sheets)].filter(Boolean).join(' · '),
-            as_of: $('#rptAsOf').value || '',
-            confidential: r.showBasis,
-            sheets,
-          }),
-        });
-        if (!res.ok) {
-          let msg = 'The PDF could not be built.';
-          try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-          throw new Error(msg);
-        }
-        saveBlob(await res.blob(), `${stem()}.pdf`);
+      /* The PDF is the report on the screen, drawn as it is drawn there --
+         same type, same tiles, same tables -- rather than a second layout
+         rebuilt from the tables on the server, which is how the two came
+         to look different. Built in the browser, one picture per page. */
+      onDownload('#rptPdf', async () => {
+        const blob = await screenPdf($('#rptOutput'), {
+          landscape: REPORTS[r.type].landscape, title: REPORTS[r.type].name });
+        saveBlob(blob, `${stem()}.pdf`);
       });
     },
   };

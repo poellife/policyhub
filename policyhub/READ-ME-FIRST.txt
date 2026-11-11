@@ -1,13 +1,20 @@
-PolicyHub build 2026-11-11a
-(Includes everything since 2026-11-01a. If you already uploaded 2026-11-10b,
-only public/reports.js and public/build.js changed.)
+PolicyHub build 2026-11-11c
+(Includes everything since 2026-11-01a.)
 
 Upload into the policyhub folder of the repo:
-  src/      -> policyhub/src
-  public/   -> policyhub/public
-  scripts/  -> policyhub/scripts  (tests, optional)
+  src/            -> policyhub/src
+  public/         -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
+  public/vendor/  -> policyhub/public/vendor   <-- NEW FOLDER. Create "vendor" inside
+                     public and upload html2canvas.min.js, jspdf.umd.min.js and the two
+                     LICENSE files. Without it, Download PDF will not work.
+  scripts/        -> policyhub/scripts  (tests, optional)
 
-New: Reports -> "Average age". Choose "Weighted by death benefit" or
-"Not weighted" and Generate. Shows both figures at the top, the calculation,
-a by-entity table, and every policy with its age and death benefit (plus share
-of benefit and age x death benefit when weighted). Staff only.
+New since 2026-11-11a
+- Reports -> Download PDF now saves the report exactly as it looks on screen
+  (same tiles, tables, charts and type), on Letter pages, portrait or landscape
+  as the report prints, broken between rows rather than through them. Every
+  report on the Reports page works this way.
+- CFO login: the entity menu lists only the CFO's own entities, even when
+  someone else used the same browser tab before them, and choosing an entity
+  now actually filters. The "Portfolio return" tile is gone from the CFO's
+  dashboard (the compounding choice is on Realized).

@@ -130,17 +130,14 @@ check('one press and it is on disk — no print dialog',
   bytes.length > 1000, `${pdf.name}, ${bytes.length} bytes`);
 check('and it is a PDF', bytes.subarray(0, 5).toString() === '%PDF-');
 const pdfText = bytes.toString('latin1');
-check('landscape, which is the shape of a schedule', /MediaBox \[0 0 792 612\]/.test(pdfText));
-check('on the letterhead', pdfText.includes('Poel Capital'));
+/* The PDF is the screen's sheet, drawn: pictures of the page rather than
+   text set by the server, so its words are not in the file to search.
+   What can be checked is its shape, its labelling and that it is pictures. */
+check('landscape, which is the shape of a schedule',
+  /MediaBox \[0 0 792(\.0*)? 612(\.0*)?\]/.test(pdfText));
+check('labelled as from Poel Capital', pdfText.includes('Poel Capital'));
 check('naming the report', /Policy schedule/i.test(pdfText));
-check('and carrying the rows, not just a header',
-  pdfText.includes(PREFIX), PREFIX);
-/* A heading too long for its column wraps, so it is two text operators
-   and never appears whole in the file. One that fits does. */
-check('with the column headings on it',
-  /CARRIER/.test(pdfText) && /OWNER/.test(pdfText) && /STATUS/.test(pdfText));
-check('and figures grouped the way the screen groups them',
-  /18,220,665/.test(pdfText));
+check('and it is the sheet on the screen, drawn', /\/Subtype \/Image/.test(pdfText));
 await p.screenshot({ path: `${S}/rd1-reports.png`, fullPage: true });
 
 /* ------------------------------------------------------------------ *
@@ -165,9 +162,10 @@ const manyBytes = fs.readFileSync(manyPdf.path);
 const manyText = manyBytes.toString('latin1');
 check('the PDF is drawn', manyBytes.subarray(0, 5).toString() === '%PDF-',
   `${manyPdf.name}, ${manyBytes.length} bytes`);
-check('its subtitle counts the whole document, not the first table',
-  new RegExp(`${onScreen} tables`).test(manyText),
-  (manyText.match(/\d+ tables[^)]*/) || ['no count on it'])[0]);
+const sheetsOnScreen = await p.locator('.rpt-output .rpt-sheet').count();
+const pdfPages = (manyText.match(/\/Type \/Page\b/g) || []).length;
+check('every sheet on the screen starts its own page', pdfPages >= sheetsOnScreen,
+  `${pdfPages} pages for ${sheetsOnScreen} sheets`);
 
 const manyXlsx = await grab('#rptXlsx');
 const wbNames = [...fs.readFileSync(manyXlsx.path).toString('latin1')

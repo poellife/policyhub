@@ -116,6 +116,26 @@ const state = {
  * A failure here is not a failure to sign in — they get the default grid,
  * which is what they had before there was such a thing as an arrangement.
  */
+/**
+ * Drop everything the last account fetched before a new one signs in.
+ *
+ * The page is not reloaded between one sign-out and the next sign-in, so
+ * lists kept for speed -- the owner entities above all -- would otherwise
+ * carry over: an administrator signs out, a CFO signs in at the same desk,
+ * and the entity menu still lists every entity the administrator could see.
+ * The server never sends them more than they may see; this makes sure the
+ * screen does not show them what it kept from somebody else.
+ */
+function forgetAccount() {
+  state.funds = [];
+  state.investors = [];
+  state.report = null;
+  state.oppCount = 0;
+  state.selected = new Set();
+  state.oppSelected = new Set();
+  state.filters = { ...state.filters, funds: [] };
+}
+
 async function loadPrefs() {
   try {
     const prefs = await api('/me/prefs');
@@ -250,7 +270,7 @@ function avgAgeCell(f) {
  * ------------------------------------------------------------------- */
 
 /** The codes chosen, in the order the entities are listed. */
-const entityCodes = () => (isInvestorUser() ? [] : (state.filters.funds || []));
+const entityCodes = () => (isInvestorUser() && !isCfoUser() ? [] : (state.filters.funds || []));
 
 /* What goes on the wire: comma separated, blank for the whole book. Every
    filtered endpoint reads it the same way, so one code and five are the
@@ -1711,6 +1731,7 @@ function wireReset() {
       /* Signed in already — the server handed back a cookie, because they
          have just proved they hold the mailbox and chosen the password.
          Making them type it again protects nobody. */
+      forgetAccount();
       state.user = await api('/auth/me');
       state.signedOutReason = null;
       noteActivity();
@@ -1776,6 +1797,7 @@ function wireLogin() {
       await api('/auth/login', { method: 'POST', body: formValues(e.target) });
       // The login response is minimal; /auth/me carries the scope details the
       // interface needs (investor name, manager entities).
+      forgetAccount();
       state.user = await api('/auth/me');
       state.signedOutReason = null;
       noteActivity();
@@ -1988,8 +2010,8 @@ async function dashboardView() {
           isInvestorUser() ? ' · figures reflect your ownership percentage' : ''}</div>
       </div>
       <div class="spacer"></div>
-      ${rateToggle()}
-      ${showsBothRates() ? simpleBox() : ''}
+      ${isCfoUser() ? '' : rateToggle()}
+      ${showsBothRates() && !isCfoUser() ? simpleBox() : ''}
       ${entityPicker(funds)}
       ${isInvestorUser() ? '' : '<a class="btn" href="#/import">Import data</a>'}
       <a class="btn btn-primary" href="#/policies">${isInvestorUser() ? 'My policies' : 'View policies'}</a>
@@ -2050,7 +2072,8 @@ async function dashboardView() {
           sum.carry.policies_without_carry
             ? ` · ${sum.carry.policies_without_carry} charge none` : ''}</div>
       </div>` : ''}
-      <div class="stat">
+      ${''/* Not on a CFO's dashboard: the returns are on Realized. */}
+      ${isCfoUser() ? '' : `<div class="stat">
         <div class="label">Portfolio return${showsBothRates() ? ` · ${cmpWord()}` : ''}</div>
         <div class="value">${showsBothRates()
           ? fmtCmp(bookCompound(sum.rate)) : fmtRate(bookRate(sum.rate))}</div>
@@ -2063,7 +2086,7 @@ async function dashboardView() {
           ? `if every policy matured today · ${(sum.rate.days / 365).toFixed(1)} yr span`
           : 'no dated cash flows yet'}${basisNote(sum.rate)
           ? ` · ${basisNote(sum.rate)}` : ''}</div>
-      </div>
+      </div>`}
       ${isInvestorUser() ? `
       <div class="stat">
         <div class="label">Next premium due</div>
@@ -2446,7 +2469,7 @@ function sortPolicies(rows) {
 async function policiesView() {
   const [policies, funds] = await Promise.all([
     api(`/policies?search=${encodeURIComponent(state.filters.search)}&status=${encodeURIComponent(state.filters.status)}&fund=${encodeURIComponent(entityParam())}`),
-    isInvestorUser() ? Promise.resolve([])
+    isInvestorUser() && !isCfoUser() ? Promise.resolve([])
       : state.funds.length ? Promise.resolve(state.funds) : api('/funds'),
   ]);
   state.policies = policies;
