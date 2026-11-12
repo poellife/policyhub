@@ -1,21 +1,12 @@
-PolicyHub build 2026-11-12a
+PolicyHub build 2026-11-12b
 (Includes everything since 2026-11-01a.)
 
-If you already uploaded 2026-11-11c, only these changed:
-  src/api.js, src/schema.sql, public/app.js, public/irr.js, public/build.js
-Otherwise upload everything:
-  src/            -> policyhub/src
-  public/         -> policyhub/public
-  public/vendor/  -> policyhub/public/vendor  (create the folder if it is not there)
-  scripts/        -> policyhub/scripts  (tests, optional)
+If you already uploaded 2026-11-12a, only these changed:
+  src/api.js, public/app.js, public/build.js
+Otherwise upload everything (src/, public/, public/vendor/).
 
-The database updates itself on the next start (two new columns).
-
-New: cost of capital (administrators only)
-- Policy -> Return tab -> "Cost of capital" card: enter our rate (% a year) and
-  click Work it out. Shows the IRR, the financing cost in dollars, profit
-  before and after, and the IRR after cost of capital.
-- Opportunity page: the same card under the scenario table, for each maturity
-  scenario, plus an "After cost of capital" row in that table.
-- Maturities: an "After cost of capital" column for policies with a rate.
-- Clear it by blanking the box. Nobody but an administrator sees any of it.
+Cost of capital is now for administrators, portfolio managers and CFO logins:
+- Admin and managers: Return tab of a policy, the opportunity page, Maturities.
+- CFO: the card is on each policy's page (their only tab), and the column on
+  Realized. A CFO can set it only on policies in its own entities.
+- Editors, viewers and investors do not see it and cannot set it.

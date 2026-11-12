@@ -1626,7 +1626,9 @@ const CFO_READS = [
   /^\/me\/notifications$/,
   /^\/security\/locations$/,
 ];
-const CFO_ANY = [/^\/auth\//, /^\/me\/prefs(\/[a-z_]+)?$/, /^\/me\/notices\/seen$/];
+const CFO_ANY = [/^\/auth\//, /^\/me\/prefs(\/[a-z_]+)?$/, /^\/me\/notices\/seen$/,
+  // The one thing a CFO may write: the cost of capital on one of its policies.
+  /^\/policies\/\d+\/cost-of-capital$/];
 router.use((req, res, next) => {
   if (!isCfo(req)) return next();
   if (CFO_ANY.some((re) => re.test(req.path))) return next();
@@ -1802,20 +1804,24 @@ router.use((req, res, next) => {
  * ------------------------------------------------------------------ */
 const CARRY_KEYS = new Set(['carry', 'carry_pct', 'charges_carry', 'commission',
   'commission_pct', 'net_rate', 'net_compound_rate', 'net_profit', 'net_return',
-  'policies_without_carry',
-  /* The firm's cost of capital and the return after it: administrators only. */
-  'cost_of_capital_pct', 'cost_of_capital']);
-function withoutCarry(value) {
-  if (Array.isArray(value)) return value.map(withoutCarry);
+  'policies_without_carry']);
+/* The firm's cost of capital and the return after it: administrators,
+   portfolio managers and CFO logins. Taken off for everybody else. */
+const COC_ROLES = ['admin', 'manager', 'cfo'];
+const mayCoc = (req) => COC_ROLES.includes(req.user?.role);
+const COC_KEYS = new Set(['cost_of_capital_pct', 'cost_of_capital']);
+function withoutKeys(value, keys) {
+  if (Array.isArray(value)) return value.map((v) => withoutKeys(v, keys));
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
   const out = {};
-  for (const [k, v] of Object.entries(value)) if (!CARRY_KEYS.has(k)) out[k] = withoutCarry(v);
+  for (const [k, v] of Object.entries(value)) if (!keys.has(k)) out[k] = withoutKeys(v, keys);
   return out;
 }
 router.use((req, res, next) => {
   if (!req.user || req.user.role === 'admin') return next();
+  const keys = mayCoc(req) ? CARRY_KEYS : new Set([...CARRY_KEYS, ...COC_KEYS]);
   const send = res.json.bind(res);
-  res.json = (body) => send(withoutCarry(body));
+  res.json = (body) => send(withoutKeys(body, keys));
   next();
 });
 
@@ -3640,7 +3646,7 @@ async function loadOpportunity(req, id) {
      financing cost and the return after it, on the base case and on each
      maturity scenario, and on each modelled pricing scenario. Nobody else
      gets the block (it is also stripped at the edge). */
-  if (req.user?.role === 'admin' && o.cost_of_capital_pct != null) {
+  if (mayCoc(req) && o.cost_of_capital_pct != null) {
     const pct = Number(o.cost_of_capital_pct);
     const attach = (an) => {
       if (!an) return;
@@ -3667,8 +3673,10 @@ const cocValue = (body) => {
     return { error: 'Cost of capital is a percentage a year between 0 and 100.' };
   return { value: n };
 };
-router.put('/opportunities/:id/cost-of-capital', blockScoped, requireRole('admin'),
+router.put('/opportunities/:id/cost-of-capital', requireRole(...COC_ROLES),
   wrap(async (req, res) => {
+    if (!(await oppVisible(req, req.params.id)))
+      return res.status(404).json({ error: 'Opportunity not found' });
     const v = cocValue(req.body);
     if (v.error) return res.status(400).json({ error: v.error });
     const { rows } = await q('UPDATE opportunities SET cost_of_capital_pct = $2 WHERE id = $1 RETURNING id',
@@ -3678,7 +3686,7 @@ router.put('/opportunities/:id/cost-of-capital', blockScoped, requireRole('admin
       v.value === null ? 'cost of capital cleared' : `cost of capital ${v.value}%`);
     res.json({ cost_of_capital_pct: v.value });
   }));
-router.put('/policies/:id/cost-of-capital', blockScoped, requireRole('admin'),
+router.put('/policies/:id/cost-of-capital', requireRole(...COC_ROLES), inPolicyScope('id'),
   wrap(async (req, res) => {
     const v = cocValue(req.body);
     if (v.error) return res.status(400).json({ error: v.error });
@@ -8434,7 +8442,7 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
     result: analyzeFlows(withTerminal),
     /* The firm's cost of capital on this policy, and the return after it.
        Administrators only (and stripped for anyone else at the edge). */
-    ...(req.user?.role === 'admin' ? {
+    ...(mayCoc(req) ? {
       cost_of_capital_pct: p.cost_of_capital_pct == null ? null : Number(p.cost_of_capital_pct),
       cost_of_capital: p.cost_of_capital_pct == null ? null
         : afterCostOfCapital(withTerminal, p.cost_of_capital_pct),
@@ -8810,6 +8818,8 @@ router.get('/maturities', wrap(async (req, res) => {
                net_profit: a.profit - (pct ? carryOn(a.returned, a.invested, pct) : 0),
                net_rate: net.rate,
                net_compound_rate: net.compound_rate,
+             } : {}),
+             ...(mayCoc(req) ? {
                cost_of_capital: row.cost_of_capital_pct == null ? null
                  : afterCostOfCapital(flows, row.cost_of_capital_pct),
              } : {}),

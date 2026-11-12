@@ -11,11 +11,12 @@
      - It is saved per policy and per deal, cleared by a blank, and refused
        outside 0-100.
      - It shows on a policy's Return tab, on the deal page, and on Maturities.
-     - Nobody but an administrator can set it or see it.
+     - Administrators, portfolio managers and CFO logins can set it and see
+       it; editors, viewers and investors cannot.
    Idempotent: fixtures use a fixed prefix, removed first and last.
    ===================================================================== */
 import { chromium } from 'playwright';
-import { BASE, ADMIN, MANAGER1, login } from './test-config.mjs';
+import { BASE, ADMIN, MANAGER1, INVESTOR1, login, scratchPassword } from './test-config.mjs';
 import { afterCostOfCapital } from '../public/irr.js';
 
 const PREFIX = 'COCT';
@@ -105,12 +106,30 @@ check('a blank clears it', (await api(`/opportunities/${opp.id}/cost-of-capital`
   && (await api(`/opportunities/${opp.id}`)).body.cost_of_capital_pct === null);
 await api(`/opportunities/${opp.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 9 } });
 
-console.log('\nADMINISTRATORS ONLY');
-check('a manager cannot set it', (await mgr(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 1 } })).status === 403);
-const mo = (await mgr(`/opportunities/${opp.id}`)).body;
-const mi = (await mgr(`/policies/${pol.id}/irr`)).body;
-const mm = (await mgr('/maturities')).body;
-check('nor see it anywhere', !JSON.stringify([mo, mi, mm]).includes('cost_of_capital'));
+console.log('\nADMIN, MANAGER AND CFO -- NOT INVESTORS');
+const pw = scratchPassword('coc');
+for (const [email, role, extra] of [[`${PREFIX.toLowerCase()}-ed@test.local`, 'editor', {}],
+  [`${PREFIX.toLowerCase()}-cfo@test.local`, 'cfo', { fund_ids: [LCG1.id] }]]) {
+  for (const u of ((await api('/users')).body || []).filter((x) => x.email === email)) await api(`/users/${u.id}`, { method: 'DELETE' });
+  await api('/users', { method: 'POST', body: { email, full_name: role, role, password: pw, ...extra } });
+}
+const ed = call(await login(`${PREFIX.toLowerCase()}-ed@test.local`, pw));
+const cfo = call(await login(`${PREFIX.toLowerCase()}-cfo@test.local`, pw));
+const inv = call(await login(INVESTOR1.email, INVESTOR1.password));
+check('a manager can set it on a policy in their entity',
+  (await mgr(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 8 } })).status === 200);
+check('and sees the result', !!(await mgr(`/policies/${pol.id}/irr`)).body.cost_of_capital
+  && !!(await mgr(`/opportunities/${opp.id}`)).body.analysis?.scenarios?.[0]?.cost_of_capital);
+check('a CFO can set it on one of its policies',
+  (await cfo(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 8 } })).status === 200);
+check('and sees it on the policy and on Realized', !!(await cfo(`/policies/${pol.id}/irr`)).body.cost_of_capital
+  && ((await cfo('/maturities')).body.rows || []).some((r) => r.id === pol.id && r.cost_of_capital));
+check('an editor cannot set it', (await ed(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 1 } })).status === 403);
+check('nor see it', !JSON.stringify([(await ed(`/policies/${pol.id}/irr`)).body, (await ed('/maturities')).body,
+  (await ed(`/opportunities/${opp.id}`)).body]).includes('cost_of_capital'));
+check('an investor cannot set it', [403, 404].includes((await inv(`/policies/${pol.id}/cost-of-capital`,
+  { method: 'PUT', body: { cost_of_capital_pct: 1 } })).status));
+check('nor see it', !JSON.stringify([(await inv('/maturities')).body, (await inv('/opportunities')).body]).includes('cost_of_capital'));
 
 console.log('\nON SCREEN');
 const br = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
@@ -143,14 +162,20 @@ check('the Maturities register shows it', row.includes(pct(ten.rate_after)), row
 check('no script errors', errs.length === 0, errs.slice(0, 2).join(' | '));
 const mp = await (await br.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
 await mp.goto(BASE);
-await mp.fill('#email', MANAGER1.email);
-await mp.fill('#password', MANAGER1.password);
+await mp.fill('#email', `${PREFIX.toLowerCase()}-cfo@test.local`);
+await mp.fill('#password', pw);
 await mp.click('button[type=submit]');
 await mp.waitForSelector('.kpi-row', { timeout: 20000 });
-await mp.goto(`${BASE}/#/opportunity/${opp.id}`);
-await mp.waitForTimeout(2000);
-check('a manager’s deal page has no cost of capital', !/cost of capital/i.test(await mp.locator('#main').innerText()));
+await mp.goto(`${BASE}/#/policy/${pol.id}`);
+await mp.waitForSelector('#cocCard', { timeout: 20000 });
+check('a CFO has the card on the policy page', /after cost of capital/i.test(await mp.locator('#cocCard').innerText()));
+await mp.fill('#cocForm [name=cost_of_capital_pct]', '12');
+await mp.click('#cocForm button[type=submit]');
+await mp.waitForTimeout(1800);
+check('and can change it there', (await api(`/policies/${pol.id}/irr`)).body.cost_of_capital_pct === 12);
 await br.close();
+for (const u of ((await api('/users')).body || []).filter((x) => x.email.startsWith(PREFIX.toLowerCase())))
+  await api(`/users/${u.id}`, { method: 'DELETE' });
 await wipe();
 console.log(`\n${fails.length ? `FAILED: ${fails.join(', ')}` : 'All cost of capital checks passed.'}`);
 process.exit(fails.length ? 1 : 0);

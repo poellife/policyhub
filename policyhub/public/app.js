@@ -2704,7 +2704,10 @@ async function policyView() {
   const p = await api(`/policies/${state.params.id}`);
   const values = [...p.values].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
   // Only fetched when the tab is open — it replays the whole ledger.
-  const irrData = detailTab === 'return' ? await api(`/policies/${p.id}/irr`) : null;
+  /* A CFO has only the overview, so the cost-of-capital card lives there
+     and needs the return figures too. */
+  const irrData = detailTab === 'return' || isCfoUser()
+    ? await api(`/policies/${p.id}/irr`) : null;
   /* Same rule: only when the tab is open, and only for the people the
      Premium optimization screen exists for at all. */
   const streams = detailTab === 'servicing' && mayOptimize()
@@ -2891,10 +2894,10 @@ function renderDetailTab(p, values, monthsCovered, irrData, streams) {
   if (detailTab === 'transactions') return transactionsTab(p);
   if (detailTab === 'return') return returnTab(p, irrData);
   if (detailTab === 'servicing') return servicingTab(p, monthsCovered, streams);
-  return overviewTab(p, values);
+  return overviewTab(p, values, irrData);
 }
 
-function overviewTab(p) {
+function overviewTab(p, values, irr) {
   const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
   const dash = '<span class="muted">—</span>';
   const extras = p.additionalInsureds || [];
@@ -2966,6 +2969,9 @@ function overviewTab(p) {
 
   return `
   ${isCfoUser() ? '' : ownershipCard}
+  ${isCfoUser() && irr ? costOfCapitalCard(irr.cost_of_capital_pct, irr.cost_of_capital
+    ? [{ label: irr.settled ? 'This policy, as paid' : 'This policy, if the claim is paid today',
+      coc: irr.cost_of_capital }] : [], 'policy', p.id) : ''}
   <div class="card">
     <div class="card-head"><h2>Lives insured</h2><div class="spacer"></div>
       ${canEditData() ? '<button class="btn-sm primary" id="addLifeBtn">Add insured</button>' : ''}</div>
@@ -3551,12 +3557,15 @@ const daysBetween = (a, b) => Math.round(
  * afterCostOfCapital in irr.js. Administrators only, on screen and in the
  * API alike.
  * ------------------------------------------------------------------- */
+/* Who works with it: administrators, portfolio managers and CFO logins. */
+const mayCocUser = () => ['admin', 'manager', 'cfo'].includes(state.user?.role);
+
 function costOfCapitalCard(pct, lines, kind, id) {
   const set = pct != null;
   return `
     <div class="card" id="cocCard">
       <div class="card-head"><h2>Cost of capital</h2><div class="spacer"></div>
-        <span class="muted" style="font-size:12px">administrators only</span></div>
+        <span class="muted" style="font-size:12px">not shown to investors</span></div>
       <div class="card-body">
         <form id="cocForm" data-kind="${kind}" data-id="${id}" class="field-row" style="align-items:flex-end;gap:10px">
           <div class="field" style="max-width:220px;margin:0">
@@ -3693,7 +3702,7 @@ function returnTab(p, d) {
         <div class="note">${r.multiple ? `${r.multiple.toFixed(2)}× capital` : '—'}</div>
       </div>
     </div>
-    ${isAdminUser() ? costOfCapitalCard(d.cost_of_capital_pct, d.cost_of_capital ? [{ label: settled ? 'This policy, as paid' : 'This policy, if the claim is paid today', coc: d.cost_of_capital }] : [], 'policy', p.id) : ''}
+    ${mayCocUser() ? costOfCapitalCard(d.cost_of_capital_pct, d.cost_of_capital ? [{ label: settled ? 'This policy, as paid' : 'This policy, if the claim is paid today', coc: d.cost_of_capital }] : [], 'policy', p.id) : ''}
 
     ${caveats.length ? `<div class="card"><div class="card-body">
       ${caveats.map((c) => `<div class="muted" style="font-size:12.5px;margin-bottom:6px">${c}</div>`).join('')}
@@ -6006,7 +6015,7 @@ async function opportunityView() {
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}"
               style="font-size:16px">${
   rateText(s.rate, s.compound_rate, { size: '13px' })}</td>`).join('')}</tr>
-          ${isAdminUser() && a.scenarios.some((s) => s.cost_of_capital) ? `
+          ${mayCocUser() && a.scenarios.some((s) => s.cost_of_capital) ? `
           <tr><td class="strong">After cost of capital
               <span class="muted" style="font-weight:400">· ${esc(String(o.cost_of_capital_pct))}% · ${cmpWord()}</span></td>
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}">${
@@ -6210,7 +6219,7 @@ async function opportunityView() {
              the reader of this screen is staff or an investor who has the
              one-pager's disclosure. */}
     </div>
-    ${isAdminUser() && o.analysis ? costOfCapitalCard(o.cost_of_capital_pct,
+    ${mayCocUser() && o.analysis ? costOfCapitalCard(o.cost_of_capital_pct,
       (o.analysis.scenarios || []).map((sc) => ({
         label: sc.offset_months === 0 ? 'At life expectancy'
           : sc.offset_months < 0 ? `${-sc.offset_months} months early` : `${sc.offset_months} months late`,
@@ -8195,8 +8204,10 @@ function maturityColumns(m, investorView) {
         cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
           fmtCmp(r.net_compound_rate)}</span>${showSimpleToo()
           ? `<div class="secondary">${fmtRate(r.net_rate)} simple</div>` : ''}` },
+    ] : []),
+    ...(mayCocUser() ? [
       /* The return after the firm's cost of capital, where one has been
-         entered on the policy (its Return tab). */
+         entered on the policy (its Return tab, or its page for a CFO). */
       { key: 'coc_rate', header: `After cost of capital · ${cmpWord()}`, cls: 'num',
         value: (r) => r.cost_of_capital?.rate_after ?? null,
         cell: (r) => (r.cost_of_capital
