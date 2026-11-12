@@ -316,6 +316,10 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS documents_url TEXT;
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS investor_url TEXT;
 
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
+/* The firm's cost of capital on this policy, a percentage a year, set by an
+   administrator when they want the return after it. NULL = not used. Here,
+   before policy_latest is rebuilt, so the view carries it. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS cost_of_capital_pct NUMERIC;
 
 /* Whether the one-pager itemises every transaction.
  *
@@ -2168,3 +2172,7 @@ DROP TRIGGER IF EXISTS trg_investor_primary_fund ON investors;
 CREATE TRIGGER trg_investor_primary_fund
   AFTER INSERT OR UPDATE OF fund_id ON investors
   FOR EACH ROW EXECUTE FUNCTION sync_investor_primary_fund();
+
+/* The firm's cost of capital on a deal, a percentage a year. Administrators
+   only; NULL means not used. See afterCostOfCapital in public/irr.js. */
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS cost_of_capital_pct NUMERIC;

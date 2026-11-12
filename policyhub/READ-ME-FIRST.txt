@@ -1,20 +1,21 @@
-PolicyHub build 2026-11-11c
+PolicyHub build 2026-11-12a
 (Includes everything since 2026-11-01a.)
 
-Upload into the policyhub folder of the repo:
+If you already uploaded 2026-11-11c, only these changed:
+  src/api.js, src/schema.sql, public/app.js, public/irr.js, public/build.js
+Otherwise upload everything:
   src/            -> policyhub/src
-  public/         -> policyhub/public   (app.js, reports.js, irr.js, build.js, styles.css)
-  public/vendor/  -> policyhub/public/vendor   <-- NEW FOLDER. Create "vendor" inside
-                     public and upload html2canvas.min.js, jspdf.umd.min.js and the two
-                     LICENSE files. Without it, Download PDF will not work.
+  public/         -> policyhub/public
+  public/vendor/  -> policyhub/public/vendor  (create the folder if it is not there)
   scripts/        -> policyhub/scripts  (tests, optional)
 
-New since 2026-11-11a
-- Reports -> Download PDF now saves the report exactly as it looks on screen
-  (same tiles, tables, charts and type), on Letter pages, portrait or landscape
-  as the report prints, broken between rows rather than through them. Every
-  report on the Reports page works this way.
-- CFO login: the entity menu lists only the CFO's own entities, even when
-  someone else used the same browser tab before them, and choosing an entity
-  now actually filters. The "Portfolio return" tile is gone from the CFO's
-  dashboard (the compounding choice is on Realized).
+The database updates itself on the next start (two new columns).
+
+New: cost of capital (administrators only)
+- Policy -> Return tab -> "Cost of capital" card: enter our rate (% a year) and
+  click Work it out. Shows the IRR, the financing cost in dollars, profit
+  before and after, and the IRR after cost of capital.
+- Opportunity page: the same card under the scenario table, for each maturity
+  scenario, plus an "After cost of capital" row in that table.
+- Maturities: an "After cost of capital" column for policies with a rate.
+- Clear it by blanking the box. Nobody but an administrator sees any of it.

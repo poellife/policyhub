@@ -3543,6 +3543,78 @@ const daysBetween = (a, b) => Math.round(
  * question the office's own calculation workbook asks, and can be checked
  * against one line for line.
  */
+/* ------------------------- cost of capital ---------------------------
+ * The firm's own cost of money on a deal or a policy, entered by an
+ * administrator, and the return after it: every dollar is charged the
+ * rate, compounding, from the day it goes out until the payout; the cost
+ * comes off the payout and the IRR is solved again. See
+ * afterCostOfCapital in irr.js. Administrators only, on screen and in the
+ * API alike.
+ * ------------------------------------------------------------------- */
+function costOfCapitalCard(pct, lines, kind, id) {
+  const set = pct != null;
+  return `
+    <div class="card" id="cocCard">
+      <div class="card-head"><h2>Cost of capital</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">administrators only</span></div>
+      <div class="card-body">
+        <form id="cocForm" data-kind="${kind}" data-id="${id}" class="field-row" style="align-items:flex-end;gap:10px">
+          <div class="field" style="max-width:220px;margin:0">
+            <label>Our cost of capital, % a year</label>
+            <input name="cost_of_capital_pct" type="number" step="0.01" min="0" max="100"
+              value="${set ? esc(String(pct)) : ''}" placeholder="e.g. 8">
+          </div>
+          <button type="submit" class="btn-sm primary">${set ? 'Update' : 'Work it out'}</button>
+          ${set ? '<button type="button" class="btn-sm" id="cocClear">Clear</button>' : ''}
+        </form>
+        ${set && lines.length ? `
+        <div class="table-wrap" style="margin-top:14px"><table class="data">
+          <thead><tr><th></th><th class="num">IRR</th><th class="num">Financing cost</th>
+            <th class="num">Profit before</th><th class="num">Profit after</th>
+            <th class="num">IRR after cost of capital</th></tr></thead>
+          <tbody>${lines.map((l) => !l.coc ? '' : `<tr>
+            <td class="strong">${esc(l.label)}</td>
+            <td class="num">${fmtCmp(l.coc.rate_before)}</td>
+            <td class="num">${fmtExact(l.coc.cost)}</td>
+            <td class="num">${fmtExact(l.coc.profit_before)}</td>
+            <td class="num" style="color:${l.coc.profit_after >= 0 ? 'var(--success-text)' : 'var(--critical)'}">${
+              fmtExact(l.coc.profit_after)}</td>
+            <td class="num strong">${fmtCmp(l.coc.rate_after)}</td></tr>`).join('')}</tbody>
+        </table></div>
+        <div class="muted" style="font-size:12px;margin-top:8px">Financing cost: every dollar
+          charged ${esc(String(pct))}% a year, compounding, from the day it went out until the
+          payout; profit after is the profit less that cost. IRR after cost of capital is the
+          return over and above what the money cost: (1 + IRR) ÷ (1 + ${esc(String(pct))}%) − 1,
+          so 15% earned on money costing 8% is 6.48%. IRRs are ${cmpWord()}.</div>` : `<div class="muted" style="font-size:12px;margin-top:8px">
+          Enter what our money costs us and the return is worked out after it.</div>`}
+      </div>
+    </div>`;
+}
+
+/* One listener for the card wherever it is drawn. */
+document.addEventListener('submit', async (e) => {
+  const form = e.target.closest?.('#cocForm');
+  if (!form) return;
+  e.preventDefault();
+  const v = form.querySelector('[name=cost_of_capital_pct]').value;
+  try {
+    await api(`/${form.dataset.kind === 'policy' ? 'policies' : 'opportunities'}/${form.dataset.id}/cost-of-capital`,
+      { method: 'PUT', body: { cost_of_capital_pct: v === '' ? null : v } });
+    toast(v === '' ? 'Cost of capital cleared' : 'Cost of capital saved');
+    render();
+  } catch (err) { toast(err.message); }
+});
+document.addEventListener('click', async (e) => {
+  if (!e.target.closest?.('#cocClear')) return;
+  const form = $('#cocForm');
+  try {
+    await api(`/${form.dataset.kind === 'policy' ? 'policies' : 'opportunities'}/${form.dataset.id}/cost-of-capital`,
+      { method: 'PUT', body: { cost_of_capital_pct: null } });
+    toast('Cost of capital cleared');
+    render();
+  } catch (err) { toast(err.message); }
+});
+
 function returnTab(p, d) {
   if (!d) return '<div class="empty"><span class="spin"></span></div>';
   const r = d.result;
@@ -3621,6 +3693,7 @@ function returnTab(p, d) {
         <div class="note">${r.multiple ? `${r.multiple.toFixed(2)}× capital` : '—'}</div>
       </div>
     </div>
+    ${isAdminUser() ? costOfCapitalCard(d.cost_of_capital_pct, d.cost_of_capital ? [{ label: settled ? 'This policy, as paid' : 'This policy, if the claim is paid today', coc: d.cost_of_capital }] : [], 'policy', p.id) : ''}
 
     ${caveats.length ? `<div class="card"><div class="card-body">
       ${caveats.map((c) => `<div class="muted" style="font-size:12.5px;margin-bottom:6px">${c}</div>`).join('')}
@@ -5933,6 +6006,11 @@ async function opportunityView() {
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}"
               style="font-size:16px">${
   rateText(s.rate, s.compound_rate, { size: '13px' })}</td>`).join('')}</tr>
+          ${isAdminUser() && a.scenarios.some((s) => s.cost_of_capital) ? `
+          <tr><td class="strong">After cost of capital
+              <span class="muted" style="font-weight:400">· ${esc(String(o.cost_of_capital_pct))}% · ${cmpWord()}</span></td>
+            ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}">${
+              s.cost_of_capital ? fmtCmp(s.cost_of_capital.rate_after) : '—'}</td>`).join('')}</tr>` : ''}
         </tbody>
       </table></div>
       ${a.benefit_changes && a.scenarios.some((s) => s.benefit_held_level)
@@ -6132,6 +6210,11 @@ async function opportunityView() {
              the reader of this screen is staff or an investor who has the
              one-pager's disclosure. */}
     </div>
+    ${isAdminUser() && o.analysis ? costOfCapitalCard(o.cost_of_capital_pct,
+      (o.analysis.scenarios || []).map((sc) => ({
+        label: sc.offset_months === 0 ? 'At life expectancy'
+          : sc.offset_months < 0 ? `${-sc.offset_months} months early` : `${sc.offset_months} months late`,
+        coc: sc.cost_of_capital })), 'opportunity', o.id) : ''}
 
     ${''/* The two numbers nobody is sure of, varied on purpose.
            Staff only: a list of the prices the office considered is the
@@ -8112,6 +8195,15 @@ function maturityColumns(m, investorView) {
         cell: (r) => `<span title="What the investors on this policy see, after the commission comes off the final payment">${
           fmtCmp(r.net_compound_rate)}</span>${showSimpleToo()
           ? `<div class="secondary">${fmtRate(r.net_rate)} simple</div>` : ''}` },
+      /* The return after the firm's cost of capital, where one has been
+         entered on the policy (its Return tab). */
+      { key: 'coc_rate', header: `After cost of capital · ${cmpWord()}`, cls: 'num',
+        value: (r) => r.cost_of_capital?.rate_after ?? null,
+        cell: (r) => (r.cost_of_capital
+          ? `<span title="Every dollar charged ${esc(String(r.cost_of_capital.pct))}% a year until the payout; financing cost ${
+            fmtExact(r.cost_of_capital.cost)}">${fmtCmp(r.cost_of_capital.rate_after)}</span>
+            <div class="secondary">at ${esc(String(r.cost_of_capital.pct))}% · ${fmtExact(r.cost_of_capital.cost)}</div>`
+          : '<span class="muted">—</span>') },
     ] : []),
   ];
 }
@@ -8441,7 +8533,7 @@ async function maturitiesView() {
                per-policy rates — so it stays blank rather than lying. */
             if (c.key === 'commission')
               return `<td class="num">${fmtExact(totals.commission)}</td>`;
-            if (c.key === 'net_rate') return '<td></td>';
+            if (c.key === 'net_rate' || c.key === 'coc_rate') return '<td></td>';
             const v = totals[c.total || c.key];
             return v === null || v === undefined
               ? '<td></td>' : `<td class="num">${fmtExact(v)}</td>`;

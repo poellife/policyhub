@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 // what-if calculator recomputes as you type, and a second implementation
 // would eventually disagree with this one.
 import { analyzeFlows, poolFlows, ledgerFlows, flowsAfterCarry, netOfCarry, carryOn, CARRY_PCT,
-         today, OUTFLOW_TYPES } from '../public/irr.js';
+         today, OUTFLOW_TYPES, afterCostOfCapital } from '../public/irr.js';
 import { analyseOpportunity, addMonths } from './opportunity-analysis.js';
 import { cleanArrangement } from '../public/policy-fields.js';
 /* The same initials rule the one-pager and the covering email use. One
@@ -1802,7 +1802,9 @@ router.use((req, res, next) => {
  * ------------------------------------------------------------------ */
 const CARRY_KEYS = new Set(['carry', 'carry_pct', 'charges_carry', 'commission',
   'commission_pct', 'net_rate', 'net_compound_rate', 'net_profit', 'net_return',
-  'policies_without_carry']);
+  'policies_without_carry',
+  /* The firm's cost of capital and the return after it: administrators only. */
+  'cost_of_capital_pct', 'cost_of_capital']);
 function withoutCarry(value) {
   if (Array.isArray(value)) return value.map(withoutCarry);
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
@@ -3634,12 +3636,59 @@ async function loadOpportunity(req, id) {
       } catch { s.analysis = null; }
     }
   }
+  /* The firm's cost of capital, if an administrator has entered one: the
+     financing cost and the return after it, on the base case and on each
+     maturity scenario, and on each modelled pricing scenario. Nobody else
+     gets the block (it is also stripped at the edge). */
+  if (req.user?.role === 'admin' && o.cost_of_capital_pct != null) {
+    const pct = Number(o.cost_of_capital_pct);
+    const attach = (an) => {
+      if (!an) return;
+      if (an.base) an.base.cost_of_capital = afterCostOfCapital(an.base.flows, pct);
+      for (const sc of an.scenarios || []) sc.cost_of_capital = afterCostOfCapital(sc.flows, pct);
+    };
+    attach(o.analysis);
+    for (const s of o.scenarios || []) attach(s.analysis);
+  }
   /* Last, so that nothing added to this function above can smuggle the
      desk's private notes out with it. Everything that reads a whole
      opportunity -- the detail screen, the sheet, funding, sharing --
      comes through here. */
   return hideDealNotes(req, o);
 }
+
+/* Setting the cost of capital: administrators only, on a deal or a policy.
+   A blank or null clears it. */
+const cocValue = (body) => {
+  const raw = body?.cost_of_capital_pct;
+  if (raw === null || raw === undefined || String(raw).trim() === '') return { value: null };
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 100)
+    return { error: 'Cost of capital is a percentage a year between 0 and 100.' };
+  return { value: n };
+};
+router.put('/opportunities/:id/cost-of-capital', blockScoped, requireRole('admin'),
+  wrap(async (req, res) => {
+    const v = cocValue(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const { rows } = await q('UPDATE opportunities SET cost_of_capital_pct = $2 WHERE id = $1 RETURNING id',
+      [req.params.id, v.value]);
+    if (!rows[0]) return res.status(404).json({ error: 'Opportunity not found' });
+    await audit(req.user.uid, 'opportunity', Number(req.params.id), 'update',
+      v.value === null ? 'cost of capital cleared' : `cost of capital ${v.value}%`);
+    res.json({ cost_of_capital_pct: v.value });
+  }));
+router.put('/policies/:id/cost-of-capital', blockScoped, requireRole('admin'),
+  wrap(async (req, res) => {
+    const v = cocValue(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const { rows } = await q('UPDATE policies SET cost_of_capital_pct = $2 WHERE id = $1 RETURNING id',
+      [req.params.id, v.value]);
+    if (!rows[0]) return res.status(404).json({ error: 'Policy not found' });
+    await audit(req.user.uid, 'policy', Number(req.params.id), 'update',
+      v.value === null ? 'cost of capital cleared' : `cost of capital ${v.value}%`);
+    res.json({ cost_of_capital_pct: v.value });
+  }));
 
 router.get('/opportunities', wrap(async (req, res) => {
   const me = scopeId(req);
@@ -8320,7 +8369,7 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
             pl.proceeds_amount, pl.proceeds_received_on,
             COALESCE(pl.death_benefit, pl.face_amount) AS benefit,
             pl.face_amount, pl.cash_surrender_value, pl.fund_id, pl.fund_code,
-            ${carryRate()} AS carry_pct,
+            ${carryRate()} AS carry_pct, pl.cost_of_capital_pct,
             (${shareOf('pl.id', 2)}) AS my_pct
        FROM policy_latest pl
       WHERE pl.id = $1 AND ${visibleTo('pl.id', 'pl.fund_id', 2, 3)}`,
@@ -8383,6 +8432,13 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
     settled: p.proceeds_amount != null,
     ledger: base,                                    // outflows only, dated
     result: analyzeFlows(withTerminal),
+    /* The firm's cost of capital on this policy, and the return after it.
+       Administrators only (and stripped for anyone else at the edge). */
+    ...(req.user?.role === 'admin' ? {
+      cost_of_capital_pct: p.cost_of_capital_pct == null ? null : Number(p.cost_of_capital_pct),
+      cost_of_capital: p.cost_of_capital_pct == null ? null
+        : afterCostOfCapital(withTerminal, p.cost_of_capital_pct),
+    } : {}),
   });
 }));
 
@@ -8696,6 +8752,8 @@ router.get('/maturities', wrap(async (req, res) => {
               CASE WHEN $1::int IS NULL THEN ${carryRate()} END    AS effective_pct,
               CASE WHEN $1::int IS NULL THEN pl.sheet_show_ledger END
                                                                   AS sheet_show_ledger,
+              CASE WHEN $1::int IS NULL THEN pl.cost_of_capital_pct END
+                                                                  AS cost_of_capital_pct,
               ${shareOf('pl.id', 1)}              AS my_pct,
               (SELECT COUNT(*)::int FROM policy_insureds pi WHERE pi.policy_id = pl.id) + 1
                                                    AS lives_count
@@ -8752,6 +8810,8 @@ router.get('/maturities', wrap(async (req, res) => {
                net_profit: a.profit - (pct ? carryOn(a.returned, a.invested, pct) : 0),
                net_rate: net.rate,
                net_compound_rate: net.compound_rate,
+               cost_of_capital: row.cost_of_capital_pct == null ? null
+                 : afterCostOfCapital(flows, row.cost_of_capital_pct),
              } : {}),
              /* Both, always. Simple interest is the headline because it is
                 what the office quotes; the compounded rate is what an

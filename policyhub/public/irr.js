@@ -449,3 +449,47 @@ export function compoundedAs(rate, how = 'annual') {
 
 /** "compounded monthly", for a label. */
 export const compoundedWord = (how) => `compounded ${COMPOUNDING_WORDS[cleanCompounding(how)]}`;
+
+/* ------------------------- cost of capital --------------------------
+ * What the firm's own money costs, c a year, compounding annually on a
+ * 365-day year. Two figures come out of it:
+ *
+ *   Financing cost, in dollars: every dollar charged c from the day it went
+ *   out until the payout,  sum of  A x ((1 + c)^(days to payout / 365) - 1).
+ *   Profit after = profit - financing cost. A dollar out for ten years
+ *   costs far more than one out for one.
+ *
+ *   IRR after cost of capital: the return over and above what the money
+ *   cost, compounding -- each flow discounted at c back to the first
+ *   outlay, and the IRR solved again on that. It comes to
+ *   (1 + IRR) / (1 + c) - 1 exactly, whatever the timing, which is why it
+ *   is not simply "IRR minus c": 15% earned on money costing 8% is 6.48%.
+ *
+ * Example: $100 out, $115 back a year later, c = 8%: financing cost $8,
+ * profit after $7, IRR after cost of capital 6.48%.
+ * ------------------------------------------------------------------- */
+export function afterCostOfCapital(rawFlows, pct) {
+  const c = Number(pct) / 100;
+  const flows = (rawFlows || [])
+    .filter((f) => f && f.date && Number(f.amount))
+    .map((f) => ({ ...f, date: String(f.date).slice(0, 10), amount: Number(f.amount) }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (!Number.isFinite(c) || c < 0 || !flows.length) return null;
+  const start = flows[0].date;
+  const end = flows[flows.length - 1].date;
+  const cost = flows.filter((f) => f.amount < 0)
+    .reduce((t, f) => t + -f.amount * ((1 + c) ** (daysBetween(f.date, end) / 365) - 1), 0);
+  const discounted = flows.map((f) => ({ date: f.date,
+    amount: f.amount / (1 + c) ** (daysBetween(start, f.date) / 365) }));
+  const out = flows.filter((f) => f.amount < 0).reduce((t, f) => t - f.amount, 0);
+  const inn = flows.filter((f) => f.amount > 0).reduce((t, f) => t + f.amount, 0);
+  return {
+    pct: Number(pct),
+    cost,
+    profit_before: inn - out,
+    profit_after: inn - out - cost,
+    rate_before: xirr(flows),
+    rate_after: xirr(discounted),
+    payout_on: end,
+  };
+}
