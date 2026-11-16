@@ -73,6 +73,12 @@ await api(`/policies/${pol.id}/transactions`, { method: 'POST', body: { txn_date
 await api(`/insureds/${pol.insured_id}`, { method: 'PUT', body: { date_of_death: iso(-40) } });
 await api(`/policies/${pol.id}/proceeds`, { method: 'PUT', body: { proceeds_amount: 1000000, proceeds_received_on: iso(-10) } });
 
+/* And one still running, for the CFO, who does not see matured policies. */
+const act = (await api('/policies', { method: 'POST', body: { policy_number: `${PREFIX}-A`, carrier_name: 'Capital Life',
+  product_type: 'UL', fund_code: 'LCG1', face_amount: 2000000, insured_last_name: `${PREFIX}Ava`,
+  insured_first_name: 'Ava', dob: '1938-02-02' } })).body;
+await api(`/policies/${act.id}/transactions`, { method: 'POST', body: { txn_date: iso(-700), txn_type: 'Acquisition Cost', amount: 400000 } });
+
 console.log('\nON A POLICY');
 check('a rate outside 0-100 is refused',
   (await api(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 140 } })).status === 400);
@@ -121,15 +127,33 @@ check('a manager can set it on a policy in their entity',
 check('and sees the result', !!(await mgr(`/policies/${pol.id}/irr`)).body.cost_of_capital
   && !!(await mgr(`/opportunities/${opp.id}`)).body.analysis?.scenarios?.[0]?.cost_of_capital);
 check('a CFO can set it on one of its policies',
-  (await cfo(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 8 } })).status === 200);
-check('and sees it on the policy and on Realized', !!(await cfo(`/policies/${pol.id}/irr`)).body.cost_of_capital
-  && ((await cfo('/maturities')).body.rows || []).some((r) => r.id === pol.id && r.cost_of_capital));
+  (await cfo(`/policies/${act.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 8 } })).status === 200);
+check('and sees it on the policy', !!(await cfo(`/policies/${act.id}/irr`)).body.cost_of_capital);
 check('an editor cannot set it', (await ed(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 1 } })).status === 403);
 check('nor see it', !JSON.stringify([(await ed(`/policies/${pol.id}/irr`)).body, (await ed('/maturities')).body,
   (await ed(`/opportunities/${opp.id}`)).body]).includes('cost_of_capital'));
 check('an investor cannot set it', [403, 404].includes((await inv(`/policies/${pol.id}/cost-of-capital`,
   { method: 'PUT', body: { cost_of_capital_pct: 1 } })).status));
 check('nor see it', !JSON.stringify([(await inv('/maturities')).body, (await inv('/opportunities')).body]).includes('cost_of_capital'));
+
+console.log('\nAN OVERALL RATE, OR POLICY BY POLICY');
+await api(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: null } });
+await api(`/opportunities/${opp.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: null } });
+const prefsBefore = (await api('/me/prefs')).body || {};
+check('an overall rate is saved for the person', (await api('/me/prefs/cost_of_capital', { method: 'PUT', body: { pct: 7 } })).status === 200);
+const viaOverall = (await api(`/policies/${pol.id}/irr`)).body;
+check('a policy with no rate of its own uses it', viaOverall.cost_of_capital?.pct === 7
+  && viaOverall.cost_of_capital_pct === null && viaOverall.cost_of_capital_overall === 7);
+check('so does a deal', (await api(`/opportunities/${opp.id}`)).body.analysis?.scenarios?.[0]?.cost_of_capital?.pct === 7);
+check('and Maturities', ((await api('/maturities')).body.rows || []).find((r) => r.id === pol.id)?.cost_of_capital?.pct === 7);
+await api(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 11 } });
+check('a policy’s own rate wins over the overall one', (await api(`/policies/${pol.id}/irr`)).body.cost_of_capital?.pct === 11);
+check('the overall rate is each person’s own: a manager’s is untouched',
+  (await mgr(`/policies/${pol.id}/irr`)).body.cost_of_capital_overall == null);
+await api(`/policies/${pol.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 8 } });
+await api(`/opportunities/${opp.id}/cost-of-capital`, { method: 'PUT', body: { cost_of_capital_pct: 9 } });
+if (prefsBefore.cost_of_capital) await api('/me/prefs/cost_of_capital', { method: 'PUT', body: prefsBefore.cost_of_capital });
+else await api('/me/prefs/cost_of_capital', { method: 'DELETE' });
 
 console.log('\nON SCREEN');
 const br = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
@@ -166,13 +190,13 @@ await mp.fill('#email', `${PREFIX.toLowerCase()}-cfo@test.local`);
 await mp.fill('#password', pw);
 await mp.click('button[type=submit]');
 await mp.waitForSelector('.kpi-row', { timeout: 20000 });
-await mp.goto(`${BASE}/#/policy/${pol.id}`);
+await mp.goto(`${BASE}/#/policy/${act.id}`);
 await mp.waitForSelector('#cocCard', { timeout: 20000 });
 check('a CFO has the card on the policy page', /after cost of capital/i.test(await mp.locator('#cocCard').innerText()));
 await mp.fill('#cocForm [name=cost_of_capital_pct]', '12');
 await mp.click('#cocForm button[type=submit]');
 await mp.waitForTimeout(1800);
-check('and can change it there', (await api(`/policies/${pol.id}/irr`)).body.cost_of_capital_pct === 12);
+check('and can change it there', (await api(`/policies/${act.id}/irr`)).body.cost_of_capital_pct === 12);
 await br.close();
 for (const u of ((await api('/users')).body || []).filter((x) => x.email.startsWith(PREFIX.toLowerCase())))
   await api(`/users/${u.id}`, { method: 'DELETE' });

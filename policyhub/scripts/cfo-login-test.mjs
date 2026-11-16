@@ -84,7 +84,9 @@ const make = async (tag, fund, last, { premium = 0, died = null } = {}) => {
 };
 const A = await make('A', LCG1, 'Abernathy', { premium: 48000 });
 const B = await make('B', LCG1, 'Bellweather');
-const C = await make('C', LCG2, 'Castellano', { died: 60 });
+const C = await make('C', LCG2, 'Castellano');
+/* Matured, in one of its entities: a CFO does not see the realized book. */
+const D = await make('D', LCG1, 'Dunmore', { died: 60 });
 const X = await make('X', OTHER, 'Xenakis', { premium: 9999 });
 
 console.log('AN ADMINISTRATOR SETS IT UP');
@@ -131,16 +133,18 @@ const svc = (await cfo('/servicing')).body;
 const svcText = JSON.stringify(svc);
 check('the premium calendar has its premium, at full amount', svcText.includes('48000'));
 check('and not the other entity’s', !svcText.includes('9999'));
-const mats = (await cfo('/maturities')).body;
-check('the realized maturity is there',
-  (mats?.rows || []).some((r) => r.policy_number === `${PREFIX}-C`));
+check('Realized is refused', (await cfo('/maturities')).status === 403);
+check('a matured policy is not in its list, even when asked for by status',
+  !mineAll.some((r) => r.policy_number === `${PREFIX}-D`));
+check('and its page and return are not found', (await cfo(`/policies/${D.id}`)).status === 404
+  && (await cfo(`/policies/${D.id}/irr`)).status === 404);
 const fl = (await cfo('/funds')).body || [];
 check('it can list its own entities for the picker, and only those',
   fl.length === 2 && fl.every((f) => ['LCG1', 'LCG2'].includes(f.code)), fl.map((f) => f.code).join(','));
 
 console.log('\nNO INVESTOR NAMES; INSUREDS BY FULL NAME');
 const everything = JSON.stringify([mineAll, a, (await cfo(`/policies/${C.id}`)).body,
-  dash, svc, mats, (await cfo(`/policies/${A.id}/irr`)).body]);
+  dash, svc, (await cfo(`/policies/${A.id}/irr`)).body]);
 check('the investor’s name appears nowhere', !everything.includes('Zebulon'));
 check('the policy carries no ownership lines', Array.isArray(a.owners) && a.owners.length === 0);
 check('the insured’s full name is shown to a CFO',
@@ -201,7 +205,7 @@ await p.click('button[type=submit]');
 await p.waitForSelector('.kpi-row', { timeout: 20000 });
 const nav = (await p.locator('.nav a').allTextContents()).map((t) => t.trim()).filter(Boolean);
 check('the CFO menu', JSON.stringify(nav) === JSON.stringify(
-  ['Portfolio', 'Policies', 'Realized', 'Account']), nav.join(' · '));
+  ['Portfolio', 'Policies', 'Account']), nav.join(' · '));
 const dashText = await p.locator('#main').innerText();
 check('the dashboard does not speak of a share',
   !/your share|ownership percentage|your portfolio/i.test(dashText), dashText.slice(0, 120));
@@ -250,18 +254,23 @@ check('the Account page has no email-notification settings',
 await p.goto(`${BASE}/#/dashboard`);
 await p.waitForTimeout(1500);
 check('the dashboard has no Portfolio return tile', !/portfolio return/i.test(await p.locator('#main').innerText()));
-await p.goto(`${BASE}/#/maturities`);
-await p.waitForSelector('#compounding', { timeout: 20000 });
-await p.selectOption('#compounding', 'monthly');
+await p.goto(`${BASE}/#/policy/${A.id}`);
+await p.waitForSelector('#cocCompounding', { timeout: 20000 });
+await p.selectOption('#cocCompounding', 'monthly');
 await p.waitForTimeout(1500);
-check('on Realized, choosing monthly relabels the return',
-  /compounded monthly/i.test(await p.locator('#main').innerText()));
-check('and is saved against the CFO’s account',
+check('the compounding choice is on the policy page’s cost-of-capital card',
   (await cfo('/me/prefs')).body?.compounding?.how === 'monthly');
-await p.selectOption('#compounding', 'annual');
+await p.selectOption('#cocCompounding', 'annual');
 await p.waitForTimeout(1200);
-check('Realized has it too', await p.locator('#compounding').count() === 1);
-for (const r of ['maturities', 'settings']) {
+await p.goto(`${BASE}/#/maturities`);
+await p.waitForTimeout(1500);
+check('typing the Realized address lands on the portfolio', /portfolio/i.test(await p.locator('h1').first().innerText())
+  && !/realized|maturities/i.test(await p.locator('h1').first().innerText()));
+await p.goto(`${BASE}/#/policies`);
+await p.waitForTimeout(1200);
+check('and there is no Matured status to filter by',
+  !(await p.locator('#main select option').allTextContents()).some((t) => /^matured$/i.test(t.trim())));
+for (const r of ['settings']) {
   await p.goto(`${BASE}/#/${r}`);
   await p.waitForTimeout(1800);
 }

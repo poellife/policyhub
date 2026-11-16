@@ -1,12 +1,12 @@
-PolicyHub build 2026-11-12b
-(Includes everything since 2026-11-01a.)
+PolicyHub build 2026-11-16a  (includes everything since 2026-11-01a)
 
-If you already uploaded 2026-11-12a, only these changed:
-  src/api.js, public/app.js, public/build.js
-Otherwise upload everything (src/, public/, public/vendor/).
+If you already uploaded 2026-11-13a, only these changed:
+  public/app.js, public/build.js
+If you have NOT uploaded 2026-11-13a, upload everything in this zip:
+  src/ -> policyhub/src, public/ -> policyhub/public, public/vendor/ -> policyhub/public/vendor
 
-Cost of capital is now for administrators, portfolio managers and CFO logins:
-- Admin and managers: Return tab of a policy, the opportunity page, Maturities.
-- CFO: the card is on each policy's page (their only tab), and the column on
-  Realized. A CFO can set it only on policies in its own entities.
-- Editors, viewers and investors do not see it and cannot set it.
+CFO login: no Realized tab (removed in 13a), no matured policies anywhere,
+no "Matured" option in the Policies status filter, and a bookmarked or typed
+Realized address opens the Portfolio instead.
+
+After uploading, check the version shown in the app reads 2026-11-16a.

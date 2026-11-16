@@ -1396,6 +1396,15 @@ const cleanInterestShown = (value) => {
 
 /* Average insured age, weighted by life (each person once) or by death
    benefit (each person by the death benefit riding on them). */
+/* This person's overall cost of capital, % a year: used on every policy
+   and deal that has no rate of its own. null clears it. */
+const cleanCocPref = (value) => {
+  const raw = value && typeof value === 'object' ? value.pct : value;
+  if (raw === null || raw === undefined || String(raw).trim() === '') return { pct: null };
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? { pct: n } : null;
+};
+
 const cleanAgeBasis = (value) => {
   const want = typeof value === 'string' ? value
     : (value && typeof value === 'object' ? str(value.basis) : '');
@@ -1417,6 +1426,7 @@ const PREF_CLEANERS = {
   interest_shown: cleanInterestShown,
   compounding: cleanCompoundingPref,
   age_basis: cleanAgeBasis,
+  cost_of_capital: cleanCocPref,
 };
 
 router.get('/me/prefs', authenticate, wrap(async (req, res) => {
@@ -1619,7 +1629,6 @@ const CFO_READS = [
   /^\/policies\/\d+$/,
   /^\/policies\/\d+\/irr$/,
   /^\/analytics\/summary$/,
-  /^\/maturities$/,
   /^\/servicing$/,
   /^\/funds$/,
   /^\/me\/notices$/,
@@ -1782,7 +1791,20 @@ router.use((req, res, next) => {
   /* A CFO is the entity's own officer and sees the insured's full name;
      only an investor gets initials. */
   if (isCfo(req)) {
-    res.json = (body) => send(withoutShare(body));
+    /* No matured policies on a CFO login: the realized book is not theirs.
+       Taken out of the policy list, and a matured policy's own page and
+       return are "not found", the same as one outside their entities. */
+    res.json = (body) => {
+      if (res.statusCode < 400) {
+        if (req.path === '/policies' && Array.isArray(body))
+          body = body.filter((r) => r?.status !== 'Matured');
+        else if (/^\/policies\/\d+(\/irr)?$/.test(req.path) && body?.status === 'Matured') {
+          res.status(404);
+          return send({ error: 'Policy not found' });
+        }
+      }
+      return send(withoutShare(body));
+    };
     return next();
   }
   res.json = (body) => send(res.locals.identified ? body : deidentify(body));
@@ -1809,7 +1831,19 @@ const CARRY_KEYS = new Set(['carry', 'carry_pct', 'charges_carry', 'commission',
    portfolio managers and CFO logins. Taken off for everybody else. */
 const COC_ROLES = ['admin', 'manager', 'cfo'];
 const mayCoc = (req) => COC_ROLES.includes(req.user?.role);
-const COC_KEYS = new Set(['cost_of_capital_pct', 'cost_of_capital']);
+const COC_KEYS = new Set(['cost_of_capital_pct', 'cost_of_capital', 'cost_of_capital_overall']);
+
+/* The rate that applies: the record's own, else this person's overall rate.
+   The overall rate is read once per request. */
+async function overallCoc(req) {
+  if (req._coc !== undefined) return req._coc;
+  const { rows } = await q(`SELECT value FROM user_prefs WHERE user_id = $1 AND name = 'cost_of_capital'`,
+    [req.user.uid]);
+  const v = rows[0]?.value?.pct;
+  req._coc = v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v);
+  return req._coc;
+}
+const effectiveCoc = (own, overall) => (own != null ? Number(own) : overall);
 function withoutKeys(value, keys) {
   if (Array.isArray(value)) return value.map((v) => withoutKeys(v, keys));
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
@@ -3646,8 +3680,9 @@ async function loadOpportunity(req, id) {
      financing cost and the return after it, on the base case and on each
      maturity scenario, and on each modelled pricing scenario. Nobody else
      gets the block (it is also stripped at the edge). */
-  if (mayCoc(req) && o.cost_of_capital_pct != null) {
-    const pct = Number(o.cost_of_capital_pct);
+  if (mayCoc(req)) o.cost_of_capital_overall = await overallCoc(req);
+  if (mayCoc(req) && effectiveCoc(o.cost_of_capital_pct, o.cost_of_capital_overall) != null) {
+    const pct = effectiveCoc(o.cost_of_capital_pct, o.cost_of_capital_overall);
     const attach = (an) => {
       if (!an) return;
       if (an.base) an.base.cost_of_capital = afterCostOfCapital(an.base.flows, pct);
@@ -8442,11 +8477,15 @@ router.get('/policies/:id/irr', wrap(async (req, res) => {
     result: analyzeFlows(withTerminal),
     /* The firm's cost of capital on this policy, and the return after it.
        Administrators only (and stripped for anyone else at the edge). */
-    ...(mayCoc(req) ? {
-      cost_of_capital_pct: p.cost_of_capital_pct == null ? null : Number(p.cost_of_capital_pct),
-      cost_of_capital: p.cost_of_capital_pct == null ? null
-        : afterCostOfCapital(withTerminal, p.cost_of_capital_pct),
-    } : {}),
+    ...(mayCoc(req) ? await (async () => {
+      const overall = await overallCoc(req);
+      const pct = effectiveCoc(p.cost_of_capital_pct, overall);
+      return {
+        cost_of_capital_pct: p.cost_of_capital_pct == null ? null : Number(p.cost_of_capital_pct),
+        cost_of_capital_overall: overall,
+        cost_of_capital: pct == null ? null : afterCostOfCapital(withTerminal, pct),
+      };
+    })() : {}),
   });
 }));
 
@@ -8785,6 +8824,7 @@ router.get('/maturities', wrap(async (req, res) => {
   // Return on each matured policy, and one rate across all of them together.
   const admin = req.user?.role === 'admin';
   const { policies, byPolicy } = await portfolioFlows(req, { onlyMatured: true, fund });
+  const cocOverall = mayCoc(req) ? await overallCoc(req) : null;
   const withReturn = rows.rows.map((row) => {
     /* WHAT THE HOUSE TAKES IS THE ADMINISTRATORS'.
        Absent rather than null, and absent for a manager as much as for
@@ -8819,9 +8859,9 @@ router.get('/maturities', wrap(async (req, res) => {
                net_rate: net.rate,
                net_compound_rate: net.compound_rate,
              } : {}),
-             ...(mayCoc(req) ? {
-               cost_of_capital: row.cost_of_capital_pct == null ? null
-                 : afterCostOfCapital(flows, row.cost_of_capital_pct),
+             ...(mayCoc(req) && effectiveCoc(row.cost_of_capital_pct, cocOverall) != null ? {
+               cost_of_capital: afterCostOfCapital(flows,
+                 effectiveCoc(row.cost_of_capital_pct, cocOverall)),
              } : {}),
              /* Both, always. Simple interest is the headline because it is
                 what the office quotes; the compounded rate is what an

@@ -150,6 +150,7 @@ async function loadPrefs() {
       .includes(prefs?.interest_shown?.shown) ? prefs.interest_shown.shown : null;
     state.compounding = cleanCompounding(prefs?.compounding?.how);
     state.ageBasis = prefs?.age_basis?.basis === 'db' ? 'db' : 'lives';
+    state.cocOverall = prefs?.cost_of_capital?.pct ?? null;
     setReportCompounding(state.compounding);
   } catch {
     state.policyCols = null;
@@ -612,8 +613,8 @@ const fmtCmp = (r, opts) => fmtRate(asCmp(r), opts);
 /** "compounded monthly" -- always says which, so a figure is never ambiguous. */
 const cmpWord = () => compoundedWord(compounding());
 
-const compoundingToggle = () => `
-  <select id="compounding" class="head-select" aria-label="How often the compounded rate compounds"
+const compoundingToggle = (id = 'compounding') => `
+  <select id="${id}" class="head-select" aria-label="How often the compounded rate compounds"
     title="The same return, stated compounding annually, monthly or daily">
     <option value="annual" ${compounding() === 'annual' ? 'selected' : ''}>Compound annually</option>
     <option value="monthly" ${compounding() === 'monthly' ? 'selected' : ''}>Compound monthly</option>
@@ -1264,7 +1265,6 @@ const MANAGER_NAV = STAFF_NAV
 const CFO_NAV = [
   ['dashboard', 'Portfolio'],
   ['policies', 'Policies'],
-  ['maturities', 'Realized'],
   ['settings', 'Account'],
 ];
 
@@ -2512,7 +2512,7 @@ async function policiesView() {
       <input class="grow" id="searchInput" placeholder="Search policy #, insured, carrier…" value="${esc(state.filters.search)}">
       <select id="statusFilter">
         <option value="">All statuses</option>
-        ${['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending']
+        ${['Inforce', 'Grace', 'Lapsed', 'Matured', 'Sold', 'Pending'].filter((x) => !(isCfoUser() && x === 'Matured'))
           .map((s) => `<option ${state.filters.status === s ? 'selected' : ''}>${s}</option>`).join('')}
       </select>
       ${entityPicker(funds)}
@@ -2969,7 +2969,7 @@ function overviewTab(p, values, irr) {
 
   return `
   ${isCfoUser() ? '' : ownershipCard}
-  ${isCfoUser() && irr ? costOfCapitalCard(irr.cost_of_capital_pct, irr.cost_of_capital
+  ${isCfoUser() && irr ? costOfCapitalCard(irr.cost_of_capital_pct, irr.cost_of_capital_overall, irr.cost_of_capital
     ? [{ label: irr.settled ? 'This policy, as paid' : 'This policy, if the claim is paid today',
       coc: irr.cost_of_capital }] : [], 'policy', p.id) : ''}
   <div class="card">
@@ -3560,23 +3560,40 @@ const daysBetween = (a, b) => Math.round(
 /* Who works with it: administrators, portfolio managers and CFO logins. */
 const mayCocUser = () => ['admin', 'manager', 'cfo'].includes(state.user?.role);
 
-function costOfCapitalCard(pct, lines, kind, id) {
-  const set = pct != null;
+/**
+ * The card. Two rates: this record's own, and this person's overall rate,
+ * which applies to every policy and deal that has none of its own. The one
+ * in use is said plainly.
+ */
+function costOfCapitalCard(own, overall, lines, kind, id) {
+  const using = own != null ? own : overall;
+  const what = kind === 'policy' ? 'policy' : 'deal';
   return `
     <div class="card" id="cocCard">
       <div class="card-head"><h2>Cost of capital</h2><div class="spacer"></div>
-        <span class="muted" style="font-size:12px">not shown to investors</span></div>
+        ${compoundingToggle('cocCompounding')}
+        <span class="muted" style="font-size:12px;margin-left:10px">not shown to investors</span></div>
       <div class="card-body">
-        <form id="cocForm" data-kind="${kind}" data-id="${id}" class="field-row" style="align-items:flex-end;gap:10px">
-          <div class="field" style="max-width:220px;margin:0">
-            <label>Our cost of capital, % a year</label>
-            <input name="cost_of_capital_pct" type="number" step="0.01" min="0" max="100"
-              value="${set ? esc(String(pct)) : ''}" placeholder="e.g. 8">
+        <form id="cocForm" data-kind="${kind}" data-id="${id}" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+          <div class="field" style="width:230px;margin:0">
+            <label>Overall — every policy and deal, % a year</label>
+            <input name="overall_pct" type="number" step="0.01" min="0" max="100"
+              value="${overall != null ? esc(String(overall)) : ''}" placeholder="e.g. 8">
           </div>
-          <button type="submit" class="btn-sm primary">${set ? 'Update' : 'Work it out'}</button>
-          ${set ? '<button type="button" class="btn-sm" id="cocClear">Clear</button>' : ''}
+          <div class="field" style="width:230px;margin:0">
+            <label>This ${what} only, % a year</label>
+            <input name="cost_of_capital_pct" type="number" step="0.01" min="0" max="100"
+              value="${own != null ? esc(String(own)) : ''}" placeholder="${overall != null ? `uses ${esc(String(overall))}` : 'e.g. 8'}">
+          </div>
+          <button type="submit" class="btn-sm primary">Work it out</button>
         </form>
-        ${set && lines.length ? `
+        <div class="muted" style="font-size:12px;margin-top:8px">${using == null
+          ? 'Enter an overall rate to apply it to every policy and deal, or a rate for this ' + what + ' alone.'
+          : own != null
+            ? `Using <strong>${esc(String(own))}%</strong>, set on this ${what}. Blank it to use the overall rate${
+              overall != null ? ` (${esc(String(overall))}%)` : ''}.`
+            : `Using your overall rate, <strong>${esc(String(overall))}%</strong>. Enter a rate under "This ${what} only" to override it here.`}</div>
+        ${using != null && lines.length ? `
         <div class="table-wrap" style="margin-top:14px"><table class="data">
           <thead><tr><th></th><th class="num">IRR</th><th class="num">Financing cost</th>
             <th class="num">Profit before</th><th class="num">Profit after</th>
@@ -3591,37 +3608,42 @@ function costOfCapitalCard(pct, lines, kind, id) {
             <td class="num strong">${fmtCmp(l.coc.rate_after)}</td></tr>`).join('')}</tbody>
         </table></div>
         <div class="muted" style="font-size:12px;margin-top:8px">Financing cost: every dollar
-          charged ${esc(String(pct))}% a year, compounding, from the day it went out until the
-          payout; profit after is the profit less that cost. IRR after cost of capital is the
-          return over and above what the money cost: (1 + IRR) ÷ (1 + ${esc(String(pct))}%) − 1,
-          so 15% earned on money costing 8% is 6.48%. IRRs are ${cmpWord()}.</div>` : `<div class="muted" style="font-size:12px;margin-top:8px">
-          Enter what our money costs us and the return is worked out after it.</div>`}
+          charged ${esc(String(using))}% a year, compounding annually, from the day it went out until
+          the payout; profit after is the profit less that cost. IRR after cost of capital is the
+          return over and above what the money cost: (1 + IRR) ÷ (1 + ${esc(String(using))}%) − 1.
+          IRRs are ${cmpWord()}.</div>` : ''}
       </div>
     </div>`;
 }
 
-/* One listener for the card wherever it is drawn. */
+/* One listener for the card wherever it is drawn: saves whichever of the
+   two rates changed, then redraws. */
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest?.('#cocForm');
   if (!form) return;
   e.preventDefault();
-  const v = form.querySelector('[name=cost_of_capital_pct]').value;
+  const own = form.querySelector('[name=cost_of_capital_pct]').value;
+  const overall = form.querySelector('[name=overall_pct]').value;
   try {
+    const nextOverall = overall === '' ? null : Number(overall);
+    if (nextOverall !== (state.cocOverall ?? null)) {
+      await api('/me/prefs/cost_of_capital', { method: 'PUT', body: { pct: nextOverall } });
+      state.cocOverall = nextOverall;
+    }
     await api(`/${form.dataset.kind === 'policy' ? 'policies' : 'opportunities'}/${form.dataset.id}/cost-of-capital`,
-      { method: 'PUT', body: { cost_of_capital_pct: v === '' ? null : v } });
-    toast(v === '' ? 'Cost of capital cleared' : 'Cost of capital saved');
+      { method: 'PUT', body: { cost_of_capital_pct: own === '' ? null : own } });
+    toast('Cost of capital saved');
     render();
   } catch (err) { toast(err.message); }
 });
-document.addEventListener('click', async (e) => {
-  if (!e.target.closest?.('#cocClear')) return;
-  const form = $('#cocForm');
+document.addEventListener('change', async (e) => {
+  if (e.target.id !== 'cocCompounding') return;
+  state.compounding = cleanCompounding(e.target.value);
+  setReportCompounding(state.compounding);
+  render();
   try {
-    await api(`/${form.dataset.kind === 'policy' ? 'policies' : 'opportunities'}/${form.dataset.id}/cost-of-capital`,
-      { method: 'PUT', body: { cost_of_capital_pct: null } });
-    toast('Cost of capital cleared');
-    render();
-  } catch (err) { toast(err.message); }
+    await api('/me/prefs/compounding', { method: 'PUT', body: { how: state.compounding } });
+  } catch (err) { toast(`That was not saved: ${err.message}`); }
 });
 
 function returnTab(p, d) {
@@ -3702,7 +3724,7 @@ function returnTab(p, d) {
         <div class="note">${r.multiple ? `${r.multiple.toFixed(2)}× capital` : '—'}</div>
       </div>
     </div>
-    ${mayCocUser() ? costOfCapitalCard(d.cost_of_capital_pct, d.cost_of_capital ? [{ label: settled ? 'This policy, as paid' : 'This policy, if the claim is paid today', coc: d.cost_of_capital }] : [], 'policy', p.id) : ''}
+    ${mayCocUser() ? costOfCapitalCard(d.cost_of_capital_pct, d.cost_of_capital_overall, d.cost_of_capital ? [{ label: settled ? 'This policy, as paid' : 'This policy, if the claim is paid today', coc: d.cost_of_capital }] : [], 'policy', p.id) : ''}
 
     ${caveats.length ? `<div class="card"><div class="card-body">
       ${caveats.map((c) => `<div class="muted" style="font-size:12.5px;margin-bottom:6px">${c}</div>`).join('')}
@@ -6017,7 +6039,7 @@ async function opportunityView() {
   rateText(s.rate, s.compound_rate, { size: '13px' })}</td>`).join('')}</tr>
           ${mayCocUser() && a.scenarios.some((s) => s.cost_of_capital) ? `
           <tr><td class="strong">After cost of capital
-              <span class="muted" style="font-weight:400">· ${esc(String(o.cost_of_capital_pct))}% · ${cmpWord()}</span></td>
+              <span class="muted" style="font-weight:400">· ${esc(String(o.cost_of_capital_pct ?? o.cost_of_capital_overall))}% · ${cmpWord()}</span></td>
             ${a.scenarios.map((s) => `<td class="num strong ${s.offset_months === 0 ? 'at-le' : ''}">${
               s.cost_of_capital ? fmtCmp(s.cost_of_capital.rate_after) : '—'}</td>`).join('')}</tr>` : ''}
         </tbody>
@@ -6219,7 +6241,7 @@ async function opportunityView() {
              the reader of this screen is staff or an investor who has the
              one-pager's disclosure. */}
     </div>
-    ${mayCocUser() && o.analysis ? costOfCapitalCard(o.cost_of_capital_pct,
+    ${mayCocUser() && o.analysis ? costOfCapitalCard(o.cost_of_capital_pct, o.cost_of_capital_overall,
       (o.analysis.scenarios || []).map((sc) => ({
         label: sc.offset_months === 0 ? 'At life expectancy'
           : sc.offset_months < 0 ? `${-sc.offset_months} months early` : `${sc.offset_months} months late`,
@@ -10397,8 +10419,8 @@ async function settingsView() {
           <div class="field" id="cfoNote" style="display:none">
             <div class="dlg-note">
               <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
-              entities chosen above — the portfolio, each policy, premiums due and realized
-              maturities — on the same screens an investor has, at full-policy figures.
+              entities chosen above — the portfolio and each policy in force (matured policies are
+              left out) — on the same screens an investor has, at full-policy figures.
               Insureds are shown by full name. No investor names, no opportunities, no
               documents, and nothing it can change.
             </div>
@@ -10560,8 +10582,8 @@ async function openUserDialog(u, funds, onSaved) {
           <div class="field" id="cfoNote" style="display:none">
       <div class="dlg-note">
         <strong>A CFO login.</strong> Read-only. It sees every policy owned by the
-        entities chosen above — the portfolio, each policy, premiums due and realized
-        maturities — on the same screens an investor has, at full-policy figures.
+        entities chosen above — the portfolio and each policy in force (matured policies are
+        left out) — on the same screens an investor has, at full-policy figures.
         Insureds are shown by full name. No investor names, no opportunities, no
         documents, and nothing it can change.
       </div>
@@ -14910,6 +14932,9 @@ async function render({ soft = false } = {}) {
      home, not to the dashboard — for a reviewing doctor the dashboard
      reads the whole book, so the fallback for a mistyped hash would be
      an error message on a screen he may not open. */
+  /* A CFO has no realized book: an address typed or bookmarked for it
+     lands on their portfolio instead of on a refusal. */
+  if (isCfoUser() && state.route === 'maturities') state.route = 'dashboard';
   const view = VIEWS[state.route] || VIEWS[homeRoute()] || dashboardView;
   const token = ++renderToken;
   const focus = rememberFocus();
