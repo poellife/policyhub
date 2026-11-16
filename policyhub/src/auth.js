@@ -271,6 +271,19 @@ export async function updateUser(req, res) {
     ? !!req.body.can_le && grantable
     : !!target.can_le && grantable;
 
+  /* A new sign-in address. Checked before anything is written, so a taken
+     or malformed address changes nothing at all. */
+  const newEmail = 'email' in req.body ? String(req.body.email || '').trim().toLowerCase() : null;
+  const emailChanges = newEmail !== null && newEmail !== String(target.email).toLowerCase();
+  if (emailChanges) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail) || newEmail.length > 254)
+      return res.status(400).json({ error: 'That is not an email address.' });
+    const { rows: taken } = await q(
+      'SELECT id FROM users WHERE lower(email) = $1 AND id <> $2', [newEmail, id]);
+    if (taken.length)
+      return res.status(409).json({ error: `${newEmail} already has a login.` });
+  }
+
   await q(
     `UPDATE users SET full_name = $1, role = $2, is_active = $3, investor_id = $4,
             can_value = $6, can_le = $7 WHERE id = $5`,
@@ -328,8 +341,31 @@ export async function updateUser(req, res) {
     await q('DELETE FROM user_investors WHERE user_id = $1', [id]);
   }
 
+  if (emailChanges) {
+    /* The address is what they sign in with, so every session on the old
+       one ends now; and both mailboxes are told, so a change somebody did
+       not ask for is noticed by whoever still reads the old one. */
+    try {
+      await q('UPDATE users SET email = $1, token_version = token_version + 1 WHERE id = $2',
+        [newEmail, id]);
+    } catch (e) {
+      if (e.code === '23505') return res.status(409).json({ error: `${newEmail} already has a login.` });
+      throw e;
+    }
+    await audit(req.user.uid, 'user', id, 'update', `sign-in email ${target.email} → ${newEmail}`);
+    const when = new Date().toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric',
+      hour: 'numeric', minute: '2-digit' });
+    const vars = { name: target.full_name, from: target.email, to: newEmail, when,
+      who: req.user.name || req.user.email };
+    /* No userId on the old address's copy: the account now points at the
+       new address, and the user id would be resolved to it. */
+    await sendMail('email_changed', { to: target.email, ...vars });
+    await sendMail('email_changed', { to: newEmail, userId: id, ...vars });
+    flushMail({ limit: 5 }).catch(() => {});
+  }
+
   await audit(req.user.uid, 'user', id, 'update',
-    `${target.email} → role ${role}, ${isActive ? 'active' : 'suspended'}`);
+    `${emailChanges ? newEmail : target.email} → role ${role}, ${isActive ? 'active' : 'suspended'}`);
   const { rows: out } = await q(
     'SELECT id, email, full_name, role, is_active, investor_id FROM users WHERE id = $1', [id]);
   res.json(out[0]);

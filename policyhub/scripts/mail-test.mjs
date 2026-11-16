@@ -185,7 +185,7 @@ const forced = await queueMail({ to: TO, userId: me.id, kind: 'new_location',
 check('a security alert goes anyway', !!forced.id, JSON.stringify(forced));
 check('the kinds that cannot be switched off are the security ones',
   MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind).sort().join(',')
-    === 'bulk_export,new_location,password_changed,password_reset',
+    === 'bulk_export,email_changed,new_location,password_changed,password_reset',
   MAIL_KINDS.filter((k) => k.forced).map((k) => k.kind).join(','));
 await clearPrefs();
 

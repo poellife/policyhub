@@ -142,6 +142,10 @@ export const MAIL_KINDS = [
     who: 'everyone', forced: true,
     note: 'Sent when somebody asks to reset their password. Carries a link that '
       + 'works once and lasts an hour. Never carries a password.' },
+  { kind: 'email_changed', label: 'Your sign-in email was changed',
+    who: 'everyone', forced: true,
+    note: 'Sent to both the old and the new address, so a change you did not make '
+      + 'cannot happen quietly.' },
   { kind: 'password_changed', label: 'Your password was changed',
     who: 'everyone', forced: true,
     note: 'Sent to you, about your own account, so a change you did not make cannot '
@@ -509,6 +513,16 @@ export const TEMPLATES = {
       + `Nobody here can see your password, and we will never ask you for it.`,
   }),
 
+  email_changed: ({ name, from, to, when, who }) => ({
+    subject: 'The sign-in email on your Poel Capital portal account was changed',
+    text: `${name ? `${name},\n\n` : ''}The email address you sign in to the Poel Capital `
+      + `portal with was changed on ${when}${who ? ` by ${who}` : ''}, from ${from} to ${to}.\n\n`
+      + `From now on, sign in with ${to}. Your password has not changed. Anything that was `
+      + `signed in has been signed out.\n\n`
+      + `If you were expecting this, there is nothing to do.\n\n`
+      + `If you were not, tell the office straight away. ${link()}`,
+  }),
+
   password_changed: ({ name, when, how }) => ({
     subject: 'Your Poel Capital portal password was changed',
     text: `${name ? `${name},\n\n` : ''}The password on your Poel Capital portal account `
@@ -739,6 +753,8 @@ export const MAIL_FIELDS = {
     lasts: '48 hours', who: 'Jonathan Polter', role: 'investor' },
   portal_open: { name: 'Ada Sommers', email: 'ada@example.com' },
   password_reset: { name: 'Ada Sommers', email: 'ada@example.com', token: 'xxxxx' },
+  email_changed: { name: 'Ada Sommers', from: 'ada@oldmail.com', to: 'ada@example.com',
+    when: '6 October 2026, 2:14 PM', who: 'Jonathan Polter' },
   password_changed: { name: 'Ada Sommers', when: '6 October 2026, 2:14 PM',
     how: 'from the reset link' },
   agreement_out: { name: 'Ada Sommers', title: 'LCG I Operating Agreement',

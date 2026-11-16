@@ -1,12 +1,13 @@
-PolicyHub build 2026-11-16a  (includes everything since 2026-11-01a)
+PolicyHub build 2026-11-16b  (includes everything since 2026-11-01a)
 
-If you already uploaded 2026-11-13a, only these changed:
-  public/app.js, public/build.js
-If you have NOT uploaded 2026-11-13a, upload everything in this zip:
-  src/ -> policyhub/src, public/ -> policyhub/public, public/vendor/ -> policyhub/public/vendor
+If you already uploaded 2026-11-16a, only these changed:
+  src/auth.js, src/mail.js, public/app.js, public/build.js
+Otherwise upload everything: src/ -> policyhub/src, public/ -> policyhub/public,
+public/vendor/ -> policyhub/public/vendor.
 
-CFO login: no Realized tab (removed in 13a), no matured policies anywhere,
-no "Matured" option in the Policies status filter, and a bookmarked or typed
-Realized address opens the Portfolio instead.
-
-After uploading, check the version shown in the app reads 2026-11-16a.
+New: change a user's sign-in email
+  Settings -> Users -> Edit (on their row) -> Sign-in email -> Save.
+  Administrators only. The address must be new to the system. Saving signs that
+  person out everywhere (their password stays the same) and emails a notice to
+  both the old and the new address. The change is in the activity log.
+  Its wording can be edited under Email wording ("Your sign-in email was changed").

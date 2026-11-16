@@ -10517,6 +10517,12 @@ async function openUserDialog(u, funds, onSaved) {
 
   const dlg = openDialog(`Edit ${u.email}`, `
     ${inputField('Full name', 'full_name', u.full_name)}
+    <div class="field"><label>Sign-in email</label>
+      <input name="email" type="email" required autocomplete="off" value="${esc(u.email || '')}">
+      <span class="muted" style="font-size:12px">Changing it signs ${self ? 'you' : 'them'} out
+        everywhere, and a notice goes to both the old and the new address. ${self
+          ? 'You will sign straight back in with the new one.' : 'Their password stays the same.'}</span>
+    </div>
     <div class="field-row">
       <div class="field"><label>Role</label>
         <select name="role" ${self ? 'disabled' : ''}>
@@ -10647,6 +10653,7 @@ async function openUserDialog(u, funds, onSaved) {
     // A disabled select submits nothing, so fall back to the record's own values.
     await api(`/users/${u.id}`, { method: 'PUT', body: {
       full_name: v.full_name,
+      email: String(v.email || '').trim(),
       role: self ? u.role : v.role,
       is_active: self ? u.is_active : v.is_active === 'true',
       investor_id: v.investor_id || null,
