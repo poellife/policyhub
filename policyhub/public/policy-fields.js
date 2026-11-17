@@ -96,6 +96,12 @@ export const POLICY_FIELDS = [
 
   /* Two ticks the desk keeps on every policy. Staff only; on the grid by
      default so they can be ticked down the list without opening anything. */
+  /* The desk's valuation range, typed on the policy's page. Off the grid
+     until somebody switches the columns on. */
+  { key: 'valuation_low', header: 'Low valuation', type: 'money', group: 'Money',
+    staffOnly: true, total: true },
+  { key: 'valuation_high', header: 'High valuation', type: 'money', group: 'Money',
+    staffOnly: true, total: true },
   { key: 'rop', header: 'ROP', type: 'flag', group: 'Policy', staffOnly: true, default: true },
   { key: 'age100_issue', header: 'Age 100 issue', type: 'flag', group: 'Policy',
     staffOnly: true, default: true },

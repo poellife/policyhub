@@ -509,6 +509,8 @@ const POLICY_FIELDS = {
   investor_url: url,
   /* Return of premium, and an age-100 issue: two ticks the desk keeps. */
   rop: bool, age100_issue: bool,
+  /* The desk's valuation range, in dollars. */
+  valuation_low: num, valuation_high: num,
 };
 
 const INSURED_FIELDS = {
@@ -1863,7 +1865,7 @@ router.use((req, res, next) => {
 
 /* The desk's two policy flags (ROP, age-100 issue) are staff working notes:
    not sent to an investor or a CFO login. */
-const DESK_FLAGS = new Set(['rop', 'age100_issue']);
+const DESK_FLAGS = new Set(['rop', 'age100_issue', 'valuation_low', 'valuation_high']);
 function withoutShare(value) {
   if (Array.isArray(value)) return value.map(withoutShare);
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
@@ -2337,6 +2339,19 @@ router.put('/policies/:id', blockInvestors, canEdit, inPolicyScope('id'), wrap(a
   const mgrFunds = fundScope(req);
   if (mgrFunds !== null && 'fund_id' in body && !mgrFunds.includes(body.fund_id))
     return res.status(403).json({ error: 'You can only move a policy between your own entities' });
+  /* A valuation range has to be a range: neither figure negative, and the
+     low one not above the high one -- judged against what is already on
+     the record, because the two are typed one at a time. */
+  if ('valuation_low' in body || 'valuation_high' in body) {
+    const { rows: cur } = await q('SELECT valuation_low, valuation_high FROM policies WHERE id = $1',
+      [req.params.id]);
+    const low = 'valuation_low' in body ? num(body.valuation_low) : (cur[0]?.valuation_low == null ? null : Number(cur[0].valuation_low));
+    const high = 'valuation_high' in body ? num(body.valuation_high) : (cur[0]?.valuation_high == null ? null : Number(cur[0].valuation_high));
+    if ((low !== null && low < 0) || (high !== null && high < 0))
+      return res.status(400).json({ error: 'A valuation cannot be negative.' });
+    if (low !== null && high !== null && low > high)
+      return res.status(400).json({ error: 'The low valuation is above the high one.' });
+  }
   const { sets, vals, next } = buildSet(POLICY_FIELDS, body);
   if (!sets.length) return res.status(400).json({ error: 'No fields supplied' });
   const { rows } = await q(

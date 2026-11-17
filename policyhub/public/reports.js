@@ -173,6 +173,11 @@ export function buildValuation(rows, o) {
   };
   const totalDb = live.reduce((t, p) => t + benefit(p), 0);
   const totalInv = live.reduce((t, p) => t + invested(p), 0);
+  /* The desk's valuation range, where one has been typed on the policy. */
+  const val = (p, k) => (p[k] == null || p[k] === '' ? null : Number(p[k]));
+  const sumVal = (k) => live.reduce((t, p) => t + (val(p, k) || 0), 0);
+  const valued = (k) => live.filter((p) => val(p, k) !== null).length;
+  const valCell = (p, k) => (val(p, k) === null ? '<span class="muted">—</span>' : money(val(p, k), 0));
   const ages = live.map((p) => ageFrom(p.insured_dob)).filter((a) => a !== null);
   const avgAge = ages.length ? ages.reduce((t, a) => t + a, 0) / ages.length : null;
   /* And weighted by death benefit: each policy's insured counted by the
@@ -191,9 +196,10 @@ export function buildValuation(rows, o) {
         <thead><tr>
           <th>#</th><th>Insured</th><th>Policy</th><th class="num">Age</th>
           <th class="num">Current death benefit</th><th class="num">Total invested</th>
+          <th class="num">High valuation</th><th class="num">Low valuation</th>
         </tr></thead>
         <tbody>${live.length === 0
-          ? '<tr><td colspan="6" class="muted">No policies in force.</td></tr>'
+          ? '<tr><td colspan="8" class="muted">No policies in force.</td></tr>'
           : live.map((p, i) => `<tr>
             <td class="muted">${i + 1}</td>
             <td class="strong">${esc(name(p))}</td>
@@ -201,6 +207,8 @@ export function buildValuation(rows, o) {
             <td class="num">${ageFrom(p.insured_dob) ?? '—'}</td>
             <td class="num">${money(benefit(p), 0)}</td>
             <td class="num">${money(invested(p), 0)}</td>
+            <td class="num">${valCell(p, 'valuation_high')}</td>
+            <td class="num">${valCell(p, 'valuation_low')}</td>
           </tr>`).join('')}</tbody>
         ${live.length ? `<tfoot><tr>
           <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
@@ -209,13 +217,18 @@ export function buildValuation(rows, o) {
             : (avgAge === null ? '' : `avg ${avgAge.toFixed(1)}`)}</td>
           <td class="num">${money(totalDb, 0)}</td>
           <td class="num">${money(totalInv, 0)}</td>
+          <td class="num">${valued('valuation_high') ? money(sumVal('valuation_high'), 0) : ''}</td>
+          <td class="num">${valued('valuation_low') ? money(sumVal('valuation_low'), 0) : ''}</td>
         </tr></tfoot>` : ''}
       </table>
       <p class="rpt-note">Age is the insured's age today, from the date of birth on file${
         byDb ? '; the average is weighted by each policy\'s death benefit' : ''}.
         Death benefit is the most recent carrier-reported figure, or the face amount where no
         statement has been recorded. Total invested is every acquisition cost, premium, fee and
-        servicing charge in the ledger for the policy.</p>
+        servicing charge in the ledger for the policy. High and low valuation are the
+        desk's own range, entered on each policy${
+        valued('valuation_high') < live.length || valued('valuation_low') < live.length
+          ? `; ${live.length - Math.min(valued('valuation_high'), valued('valuation_low'))} of ${live.length} policies have no range entered yet and are left out of those totals` : ''}.</p>
     </div>
     ${footer('Valuation Report')}`;
 }

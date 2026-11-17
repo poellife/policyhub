@@ -327,6 +327,10 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS cost_of_capital_pct NUMERIC;
    Before policy_latest is rebuilt, so the view carries them. */
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS rop BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS age100_issue BOOLEAN NOT NULL DEFAULT FALSE;
+/* The desk's own range for what the policy is worth: a low and a high
+   valuation in dollars, typed on the policy's page. NULL = not entered. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS valuation_low NUMERIC;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS valuation_high NUMERIC;
 
 /* Whether the one-pager itemises every transaction.
  *

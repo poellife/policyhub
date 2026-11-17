@@ -2236,6 +2236,60 @@ const CELL = {
  * policies grid, or its own page -- and saved the moment the box changes.
  * ------------------------------------------------------------------- */
 const POLICY_FLAGS = [['rop', 'ROP'], ['age100_issue', 'Age 100 issue']];
+
+/* --------------------------- valuation range -------------------------
+ * A high and a low valuation for the policy, in dollars, typed straight
+ * onto its page -- no Edit dialog -- and saved when the box is left or
+ * Enter is pressed. Blank clears it. The Valuation report prints both.
+ * Staff only.
+ * ------------------------------------------------------------------- */
+const valuationCard = (p) => {
+  if (isInvestorUser()) return '';
+  const low = p.valuation_low == null ? null : Number(p.valuation_low);
+  const high = p.valuation_high == null ? null : Number(p.valuation_high);
+  const box = (key, label, v) => `
+    <div class="field" style="width:230px;margin:0">
+      <label>${label}</label>
+      ${canEditData()
+        ? `<input type="text" inputmode="decimal" data-valuation="${key}" data-policy="${p.id}"
+             value="${v == null ? '' : esc(v.toLocaleString('en-US', { maximumFractionDigits: 2 }))}"
+             placeholder="$" autocomplete="off">`
+        : `<div class="strong" style="padding:7px 0">${v == null ? '—' : fmtExact(v)}</div>`}
+    </div>`;
+  const invested = Number(p.total_invested) || 0;
+  const notes = [];
+  if (low != null && high != null) notes.push(`midpoint ${fmtExact((low + high) / 2)}`);
+  if (invested && (low != null || high != null))
+    notes.push(`against ${fmtExact(invested)} invested`);
+  return `
+    <div class="card" id="valCard">
+      <div class="card-head"><h2>Valuation</h2><div class="spacer"></div>
+        <span class="muted" style="font-size:12px">${canEditData()
+          ? 'type a figure and press Enter — it saves by itself' : ''}</span></div>
+      <div class="card-body">
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+          ${box('valuation_high', 'High valuation', high)}
+          ${box('valuation_low', 'Low valuation', low)}
+        </div>
+        ${notes.length ? `<div class="muted" style="font-size:12px;margin-top:8px">${notes.join(' · ')}</div>` : ''}
+      </div>
+    </div>`;
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.matches?.('input[data-valuation]')) { e.preventDefault(); e.target.blur(); }
+});
+document.addEventListener('change', async (e) => {
+  const box = e.target.closest?.('input[data-valuation]');
+  if (!box) return;
+  const raw = box.value.replace(/[$,\s]/g, '');
+  if (raw !== '' && !Number.isFinite(Number(raw))) { toast('That is not a dollar amount.'); box.focus(); return; }
+  const key = box.dataset.valuation;
+  try {
+    await api(`/policies/${box.dataset.policy}`, { method: 'PUT', body: { [key]: raw === '' ? null : Number(raw) } });
+    toast(`${key === 'valuation_high' ? 'High' : 'Low'} valuation ${raw === '' ? 'cleared' : 'saved'}`);
+    render();
+  } catch (err) { toast(err.message); box.focus(); }
+});
 const flagBox = (p, key, label) => (canEditData()
   ? `<span class="flag-cell"><input type="checkbox" data-flag="${key}" data-policy="${p.id}"
       aria-label="${esc(label)} — ${esc(p.policy_number || '')}" ${p[key] ? 'checked' : ''}></span>`
@@ -2999,6 +3053,7 @@ function overviewTab(p, values, irr) {
   </div>`;
 
   return `
+  ${valuationCard(p)}
   ${isCfoUser() ? '' : ownershipCard}
   ${isCfoUser() && irr ? costOfCapitalCard(irr.cost_of_capital_pct, irr.cost_of_capital_overall, irr.cost_of_capital
     ? [{ label: irr.settled ? 'This policy, as paid' : 'This policy, if the claim is paid today',
@@ -3603,8 +3658,7 @@ function costOfCapitalCard(own, overall, lines, kind, id) {
   return `
     <div class="card" id="cocCard">
       <div class="card-head"><h2>Cost of capital</h2><div class="spacer"></div>
-        ${compoundingToggle('cocCompounding')}
-        <span class="muted" style="font-size:12px;margin-left:10px">not shown to investors</span></div>
+        ${compoundingToggle('cocCompounding')}</div>
       <div class="card-body">
         <form id="cocForm" data-kind="${kind}" data-id="${id}" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
           <div class="field" style="width:230px;margin:0">

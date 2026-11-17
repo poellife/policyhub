@@ -1,17 +1,18 @@
-PolicyHub build 2026-11-17a  (includes everything since 2026-11-01a)
+PolicyHub build 2026-11-17c  (includes everything since 2026-11-01a)
 
-If you already uploaded 2026-11-16b, only these changed:
+If you already uploaded 2026-11-17a or 17b, only these changed:
   src/api.js, src/schema.sql
-  public/app.js, public/policy-fields.js, public/reports.js, public/styles.css, public/build.js
+  public/app.js, public/policy-fields.js, public/reports.js, public/build.js
 Otherwise upload everything: src/ -> policyhub/src, public/ -> policyhub/public,
 public/vendor/ -> policyhub/public/vendor.
 
-The database adds the two new fields itself on the next start. Every existing
-policy starts with both boxes unticked.
+The database adds the two new fields itself on the next start.
 
-New: "ROP" and "Age 100 issue" tick boxes on every policy
-- Policies grid: two new columns with a tick box in every row. Tick or untick
-  right there; it saves at once, without opening the policy.
-- Policy page (Overview -> Policy card) and Edit policy: the same two boxes.
-- Policy schedule report: shows Yes where ticked, if you add the columns.
-- Staff only. Investors and CFO logins do not see them.
+New: High valuation and Low valuation per policy
+- Open a policy: the Overview tab now starts with a "Valuation" card. Type a
+  figure in High valuation or Low valuation and press Enter (or click away).
+  It saves by itself; there is no Edit dialog. Blank a box to clear it.
+- Reports -> Valuation report: two new columns, High valuation and Low
+  valuation, with totals. It prints and downloads with them.
+- Low cannot be above high. Staff only: investors and CFO logins do not see it.
+- Optional: Policies -> Columns lets you switch the two on in the grid.
