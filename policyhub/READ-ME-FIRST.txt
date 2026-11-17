@@ -1,18 +1,17 @@
-PolicyHub build 2026-11-17c  (includes everything since 2026-11-01a)
+PolicyHub build 2026-11-17d  (includes everything since 2026-11-01a)
 
-If you already uploaded 2026-11-17a or 17b, only these changed:
-  src/api.js, src/schema.sql
-  public/app.js, public/policy-fields.js, public/reports.js, public/build.js
+If you already uploaded 2026-11-17c, only these changed:
+  src/api.js
+  public/app.js, public/reports.js, public/styles.css, public/build.js
 Otherwise upload everything: src/ -> policyhub/src, public/ -> policyhub/public,
 public/vendor/ -> policyhub/public/vendor.
 
-The database adds the two new fields itself on the next start.
-
-New: High valuation and Low valuation per policy
-- Open a policy: the Overview tab now starts with a "Valuation" card. Type a
-  figure in High valuation or Low valuation and press Enter (or click away).
-  It saves by itself; there is no Edit dialog. Blank a box to clear it.
-- Reports -> Valuation report: two new columns, High valuation and Low
-  valuation, with totals. It prints and downloads with them.
-- Low cannot be above high. Staff only: investors and CFO logins do not see it.
-- Optional: Policies -> Columns lets you switch the two on in the grid.
+New: sort a report your way
+- Reports page: "Sort by" and "Order" appear for the Valuation, Average age,
+  Policy schedule and the two Return reports.
+- Sort by insured name, carrier (company), owner entity, age, death benefit,
+  total invested or policy number, either direction.
+- Sorted by carrier or by owner entity, the Valuation and Average age reports
+  group the policies under each one with a subtotal.
+- Print and the PDF / CSV / Excel downloads follow what is on screen.
+- Your last choice is remembered. "The report's own order" puts it back.

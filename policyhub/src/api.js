@@ -1409,6 +1409,14 @@ const cleanCocPref = (value) => {
   return Number.isFinite(n) && n >= 0 && n <= 100 ? { pct: n } : null;
 };
 
+/* The order this person last put a report in. */
+const cleanReportSort = (value) => {
+  const key = value && typeof value === 'object' ? str(value.key) : '';
+  if (!['', 'insured', 'carrier', 'entity', 'age', 'death_benefit', 'invested', 'policy'].includes(key))
+    return null;
+  return { key, dir: value?.dir === 'desc' ? 'desc' : 'asc' };
+};
+
 const cleanAgeBasis = (value) => {
   const want = typeof value === 'string' ? value
     : (value && typeof value === 'object' ? str(value.basis) : '');
@@ -1430,6 +1438,7 @@ const PREF_CLEANERS = {
   interest_shown: cleanInterestShown,
   compounding: cleanCompoundingPref,
   age_basis: cleanAgeBasis,
+  report_sort: cleanReportSort,
   cost_of_capital: cleanCocPref,
 };
 

@@ -130,6 +130,7 @@ function forgetAccount() {
   state.funds = [];
   state.investors = [];
   state.report = null;
+  state.reportSort = null;
   state.oppCount = 0;
   state.selected = new Set();
   state.oppSelected = new Set();
@@ -151,6 +152,7 @@ async function loadPrefs() {
     state.compounding = cleanCompounding(prefs?.compounding?.how);
     state.ageBasis = prefs?.age_basis?.basis === 'db' ? 'db' : 'lives';
     state.cocOverall = prefs?.cost_of_capital?.pct ?? null;
+    state.reportSort = prefs?.report_sort?.key !== undefined ? prefs.report_sort : null;
     setReportCompounding(state.compounding);
   } catch {
     state.policyCols = null;

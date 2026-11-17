@@ -2134,3 +2134,9 @@ td.mw-wrap { white-space: normal; }
 /* ROP / age-100 tick boxes on the grid and the policy page. */
 .flag-cell { display: inline-flex; align-items: center; padding: 2px 6px; cursor: default; }
 .flag-cell input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; margin: 0; }
+
+/* Group headings and subtotals on a report sorted by carrier or entity. */
+.rpt-table tr.rpt-group td { font-weight: 600; background: #f3f4f6; color: #0a0a0a;
+  padding-top: 9px; border-top: 1px solid #d4d4d8; }
+.rpt-table tr.rpt-subtotal td { font-weight: 600; border-top: 1px solid #0a0a0a;
+  border-bottom: 1px solid #d4d4d8; }

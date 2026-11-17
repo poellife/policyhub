@@ -151,6 +151,79 @@ const pct = (part, whole) => (!whole ? '—' : `${((part / whole) * 100).toFixed
 const insuredOf = (p) =>
   p.display_name || `${p.insured_first || ''} ${p.insured_last || ''}`.trim() || '—';
 
+/* ----------------------------- sort order ----------------------------
+ * The policy-by-policy reports can be put in the reader's order: by
+ * insured, by carrier (the company), by owner entity, by age, by death
+ * benefit, by total invested or by policy number, either way up. '' is
+ * the report's own order -- surname for most, best return first for the
+ * return reports. Set by the Reports screen before a report is built, and
+ * remembered against the account.
+ *
+ * Sorted by carrier or by entity, the valuation and average-age reports
+ * also group the policies under each one with a subtotal.
+ * ------------------------------------------------------------------- */
+export const REPORT_SORTS = [
+  ['', 'The report\'s own order'],
+  ['insured', 'Insured name'],
+  ['carrier', 'Carrier (company)'],
+  ['entity', 'Owner entity'],
+  ['age', 'Age'],
+  ['death_benefit', 'Death benefit'],
+  ['invested', 'Total invested'],
+  ['policy', 'Policy number'],
+];
+const SORTABLE = new Set(['valuation', 'age', 'schedule', 'return-active', 'return-realized']);
+let reportSort = { key: '', dir: 'asc' };
+export const setReportSort = (v) => {
+  reportSort = { key: REPORT_SORTS.some(([k]) => k === v?.key) ? v.key : '',
+    dir: v?.dir === 'desc' ? 'desc' : 'asc' };
+};
+const surname = (p) => (`${p.insured_last || ''} ${p.insured_first || ''}`.trim()
+  || insuredOf(p)).toLowerCase();
+const SORT_VALUE = {
+  insured: surname,
+  carrier: (p) => String(p.carrier_name || '').toLowerCase(),
+  entity: (p) => String(p.fund_code || '').toLowerCase(),
+  age: (p) => ageFrom(p.insured_dob),
+  death_benefit: (p) => Number(p.death_benefit ?? p.face_amount) || 0,
+  invested: (p) => Number(p.total_invested ?? p.invested) || 0,
+  policy: (p) => String(p.policy_number || '').toLowerCase(),
+};
+/** A sorted copy. Blanks last whichever way it runs; ties by surname. */
+function sortedRows(rows, fallback = null) {
+  const get = SORT_VALUE[reportSort.key];
+  if (!get) return fallback ? [...rows].sort(fallback) : [...rows];
+  const sign = reportSort.dir === 'desc' ? -1 : 1;
+  const blank = (v) => v === null || v === undefined || v === '';
+  return [...rows].sort((a, b) => {
+    const x = get(a), y = get(b);
+    if (blank(x) || blank(y)) return blank(x) === blank(y) ? 0 : blank(x) ? 1 : -1;
+    const c = typeof x === 'number' && typeof y === 'number'
+      ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
+    return c * sign || surname(a).localeCompare(surname(b));
+  });
+}
+/** The groups to subtotal: one per carrier or entity, or the whole list. */
+function sortGroups(list) {
+  const by = reportSort.key === 'carrier' ? (p) => p.carrier_name || 'No carrier on file'
+    : reportSort.key === 'entity' ? (p) => p.fund_code || 'Unassigned' : null;
+  if (!by) return [{ label: null, rows: list }];
+  const out = [];
+  for (const p of list) {
+    const label = by(p);
+    if (!out.length || out[out.length - 1].label !== label) out.push({ label, rows: [] });
+    out[out.length - 1].rows.push(p);
+  }
+  return out;
+}
+const sortNote = () => {
+  const label = (REPORT_SORTS.find(([k]) => k === reportSort.key) || [])[1];
+  return reportSort.key ? ` · sorted by ${label.toLowerCase()}${
+    reportSort.dir === 'desc' ? ', descending' : ''}` : '';
+};
+const bySurname = (a, b) => String(a.insured_last || '').localeCompare(String(b.insured_last || ''))
+  || String(a.insured_first || '').localeCompare(String(b.insured_first || ''));
+
 /**
  * The valuation report: one line per policy in force -- the insured, their
  * age today, the death benefit as the carrier last reported it (the face
@@ -161,9 +234,8 @@ const insuredOf = (p) =>
  * point of the report, so it is shown whatever the cost-basis box says.
  */
 export function buildValuation(rows, o) {
-  const live = rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status))
-    .sort((a, b) => String(a.insured_last || '').localeCompare(String(b.insured_last || ''))
-      || String(a.insured_first || '').localeCompare(String(b.insured_first || '')));
+  const live = sortedRows(rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status)),
+    bySurname);
   const benefit = (p) => Number(p.death_benefit ?? p.face_amount) || 0;
   const invested = (p) => Number(p.total_invested) || 0;
   const name = (p) => {
@@ -189,7 +261,7 @@ export function buildValuation(rows, o) {
 
   return `
     ${letterhead('Valuation Report', `${live.length} ${live.length === 1 ? 'policy' : 'policies'} in force${
-      o.fund ? ` · ${fundNote(o.fund)}` : ''}`, o.asOf)}
+      o.fund ? ` · ${fundNote(o.fund)}` : ''}${sortNote()}`, o.asOf)}
     ${confidential(true, o)}
     <div class="rpt-block">
       <table class="rpt-table">
@@ -200,8 +272,14 @@ export function buildValuation(rows, o) {
         </tr></thead>
         <tbody>${live.length === 0
           ? '<tr><td colspan="8" class="muted">No policies in force.</td></tr>'
-          : live.map((p, i) => `<tr>
-            <td class="muted">${i + 1}</td>
+          : (() => {
+            let n = 0;
+            const sub = (list, k) => (list.some((p) => val(p, k) !== null)
+              ? money(list.reduce((t, p) => t + (val(p, k) || 0), 0), 0) : '');
+            return sortGroups(live).map((g) => `${g.label === null ? '' : `
+          <tr class="rpt-group"><td colspan="8">${esc(g.label)}</td></tr>`}${
+              g.rows.map((p) => `<tr>
+            <td class="muted">${++n}</td>
             <td class="strong">${esc(name(p))}</td>
             <td class="rpt-nowrap">${esc(p.policy_number || '')}</td>
             <td class="num">${ageFrom(p.insured_dob) ?? '—'}</td>
@@ -209,7 +287,14 @@ export function buildValuation(rows, o) {
             <td class="num">${money(invested(p), 0)}</td>
             <td class="num">${valCell(p, 'valuation_high')}</td>
             <td class="num">${valCell(p, 'valuation_low')}</td>
-          </tr>`).join('')}</tbody>
+          </tr>`).join('')}${g.label === null ? '' : `
+          <tr class="rpt-subtotal"><td colspan="4">Subtotal — ${esc(g.label)} · ${g.rows.length} ${
+            g.rows.length === 1 ? 'policy' : 'policies'}</td>
+            <td class="num">${money(g.rows.reduce((t, p) => t + benefit(p), 0), 0)}</td>
+            <td class="num">${money(g.rows.reduce((t, p) => t + invested(p), 0), 0)}</td>
+            <td class="num">${sub(g.rows, 'valuation_high')}</td>
+            <td class="num">${sub(g.rows, 'valuation_low')}</td></tr>`}`).join('');
+          })()}</tbody>
         ${live.length ? `<tfoot><tr>
           <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
           <td class="num">${byDb
@@ -247,9 +332,8 @@ export function buildValuation(rows, o) {
  * Policies with no date of birth are listed but left out of both averages.
  */
 export function buildAgeReport(rows, o, basis = 'lives') {
-  const live = rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status))
-    .sort((a, b) => String(a.insured_last || '').localeCompare(String(b.insured_last || ''))
-      || String(a.insured_first || '').localeCompare(String(b.insured_first || '')));
+  const live = sortedRows(rows.filter((p) => !['Lapsed', 'Sold', 'Matured'].includes(p.status)),
+    bySurname);
   const byDb = basis === 'db';
   const benefit = (p) => Number(p.death_benefit ?? p.face_amount) || 0;
   const name = (p) => {
@@ -280,7 +364,8 @@ export function buildAgeReport(rows, o, basis = 'lives') {
 
   return `
     ${letterhead('Average Age', `${live.length} ${live.length === 1 ? 'policy' : 'policies'} in force${
-      o.fund ? ` · ${fundNote(o.fund)}` : ''} · ${byDb ? 'weighted by death benefit' : 'not weighted'}`, o.asOf)}
+      o.fund ? ` · ${fundNote(o.fund)}` : ''} · ${byDb ? 'weighted by death benefit' : 'not weighted'}${
+      sortNote()}`, o.asOf)}
     ${confidential(false, o)}
 
     <div class="rpt-tiles" data-count="3">
@@ -327,10 +412,12 @@ export function buildAgeReport(rows, o, basis = 'lives') {
         </tr></thead>
         <tbody>${live.length === 0
           ? `<tr><td colspan="${byDb ? 7 : 5}" class="muted">No policies in force.</td></tr>`
-          : live.map((p, i) => {
+          : (() => { let n = 0; return sortGroups(live).map((g) => `${g.label === null ? '' : `
+            <tr class="rpt-group"><td colspan="${byDb ? 7 : 5}">${esc(g.label)}</td></tr>`}${
+            g.rows.map((p) => {
             const age = ageFrom(p.insured_dob);
             return `<tr>
-              <td class="muted">${i + 1}</td>
+              <td class="muted">${++n}</td>
               <td class="strong">${esc(name(p))}</td>
               <td class="rpt-nowrap">${esc(p.policy_number || '')}</td>
               <td class="num">${age ?? '<span class="muted">no DOB</span>'}</td>
@@ -339,7 +426,16 @@ export function buildAgeReport(rows, o, basis = 'lives') {
                 : `${((benefit(p) / all.sumDb) * 100).toFixed(1)}%`}</td>
               <td class="num">${age === null ? '—' : big(age * benefit(p))}</td>` : ''}
             </tr>`;
-          }).join('')}</tbody>
+          }).join('')}${g.label === null ? '' : (() => {
+            const st = stats(g.rows);
+            return `
+            <tr class="rpt-subtotal"><td colspan="3">Subtotal — ${esc(g.label)} · ${g.rows.length} ${
+              g.rows.length === 1 ? 'policy' : 'policies'}</td>
+              <td class="num">avg ${one(byDb ? st.weighted : st.plain)}</td>
+              <td class="num">${money(st.sumDb, 0)}</td>
+              ${byDb ? `<td class="num">${all.sumDb ? `${((st.sumDb / all.sumDb) * 100).toFixed(1)}%` : '—'}</td>
+              <td class="num">${big(st.sumAgeDb)}</td>` : ''}</tr>`;
+          })()}`).join(''); })()}</tbody>
         ${live.length ? `<tfoot><tr>
           <td colspan="3">Totals — ${live.length} ${live.length === 1 ? 'policy' : 'policies'}</td>
           <td class="num">${byDb ? '' : `${big(all.sumAge)}<br><span class="muted">avg ${one(all.plain)}</span>`}</td>
@@ -2396,6 +2492,7 @@ export async function reportsView(api, state) {
     type: 'summary', fund: '', showBasis: true, months: 24, horizon: 'm24',
     detail: true, policyIds: [],
   });
+  if (!r.sort) r.sort = state.reportSort || { key: '', dir: 'asc' };
 
   const html = `
     <div class="page-head no-print">
@@ -2440,6 +2537,23 @@ export async function reportsView(api, state) {
             ${policies.map((p) => `<option value="${p.id}">${esc(p.insured_last || '')}${p.insured_first ? `, ${esc(p.insured_first)}` : ''} — ${esc(p.carrier_name)} ${esc(p.policy_number)}</option>`).join('')}
           </select>
           <span class="muted" style="font-size:12px">Nothing selected prints all ${policies.length}. Hold ⌘ or Ctrl to pick several.</span>
+        </div>
+
+        <div class="field-row" id="rptSortField" style="${SORTABLE.has(r.type) ? '' : 'display:none'}">
+          <div class="field">
+            <label>Sort by</label>
+            <select id="rptSort">
+              ${REPORT_SORTS.map(([k, label]) => `<option value="${k}" ${
+                (r.sort?.key || '') === k ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Order</label>
+            <select id="rptSortDir">
+              <option value="asc" ${r.sort?.dir === 'desc' ? '' : 'selected'}>A to Z · smallest first</option>
+              <option value="desc" ${r.sort?.dir === 'desc' ? 'selected' : ''}>Z to A · largest first</option>
+            </select>
+          </div>
         </div>
 
         <div class="field" id="rptAgeField" style="${r.type === 'age' ? '' : 'display:none'}">
@@ -2530,6 +2644,7 @@ export async function reportsView(api, state) {
         $('#rptPolicyField').style.display = r.type === 'factsheet' ? '' : 'none';
         $('#rptInvestorField').style.display = r.type === 'investor' ? '' : 'none';
         $('#rptAgeField').style.display = r.type === 'age' ? '' : 'none';
+        $('#rptSortField').style.display = SORTABLE.has(r.type) ? '' : 'none';
         document.querySelectorAll('.rpt-choice').forEach((el) =>
           el.classList.toggle('selected', el.querySelector('input').checked));
       };
@@ -2581,6 +2696,16 @@ export async function reportsView(api, state) {
         r.fund = o.fund; r.showBasis = o.showBasis; r.detail = o.detail;
         r.horizon = $('#rptMonths').value;
 
+        /* The order the reader asked for: applied to this report, and kept
+           against the account so the next one opens the same way. */
+        const sort = { key: $('#rptSort').value, dir: $('#rptSortDir').value === 'desc' ? 'desc' : 'asc' };
+        if (sort.key !== (r.sort?.key || '') || sort.dir !== (r.sort?.dir || 'asc')) {
+          api('/me/prefs/report_sort', { method: 'PUT', body: sort }).catch(() => {});
+          state.reportSort = sort;
+        }
+        r.sort = sort;
+        setReportSort(SORTABLE.has(r.type) ? sort : null);
+
         try {
           setPageOrientation(REPORTS[r.type].landscape);
           let charts = () => {};
@@ -2596,7 +2721,7 @@ export async function reportsView(api, state) {
 
           } else if (r.type === 'schedule') {
             const raw = await api(`/policies?fund=${encodeURIComponent(o.fund)}&status=`);
-            const rows = investorUser ? raw.map(scaleRow) : raw;
+            const rows = sortedRows(investorUser ? raw.map(scaleRow) : raw);
             /* A landscape sheet on screen too, so what is in front of the
                reader is the shape of the page it will print on. A portrait
                sheet showing a landscape report is what let this one run off
@@ -2645,7 +2770,10 @@ export async function reportsView(api, state) {
             const realized = r.type === 'return-realized';
             const d = await api(`/reports/returns?basis=${realized ? 'realized' : 'active'}`
               + `&fund=${encodeURIComponent(o.fund)}`);
-            out.innerHTML = `<div class="rpt-sheet">${buildReturn(d, o, { realized })}</div>`;
+            /* The table in the reader's order; the chart keeps the ranking
+               it was drawn for (the twelve best). */
+            out.innerHTML = `<div class="rpt-sheet">${
+              buildReturn({ ...d, rows: sortedRows(d.rows) }, o, { realized })}</div>`;
             charts = () => {
               const el = $('#rptReturnChart');
               if (!el || !d.rows.length) return;
