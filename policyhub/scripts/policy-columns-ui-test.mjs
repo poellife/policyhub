@@ -77,7 +77,7 @@ await grid();
 console.log('IT OPENS AS IT ALWAYS DID');
 const DEFAULT = ['Policy #', 'Last name', 'First name', 'DOB', 'Age', 'Sex', 'Carrier', 'Type',
   'Issued', 'Face', 'Death benefit', 'Owner', 'Premium', 'AV', 'CSV', 'COI', 'Invested',
-  'Last w/d', 'Values as of', 'Status'];
+  'Last w/d', 'Values as of', 'ROP', 'Age 100 issue', 'Status'];
 const opening = await heads();
 check('the untouched grid is the grid we have always had',
   opening.join('|') === DEFAULT.join('|'), opening.join(' | '));

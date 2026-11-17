@@ -57,7 +57,7 @@ check('the default arrangement is the grid as it has always been',
   staffDefault.join(',') === ['policy_number', 'insured_last', 'insured_first', 'insured_dob',
     'age', 'insured_gender', 'carrier_name', 'product_type', 'issue_date', 'face_amount',
     'death_benefit', 'fund_code', 'premium_required', 'account_value', 'cash_surrender_value',
-    'cost_of_insurance', 'total_invested', 'date_of_last_withdrawal', 'value_as_of',
+    'cost_of_insurance', 'total_invested', 'date_of_last_withdrawal', 'value_as_of', 'rop', 'age100_issue',
     'status'].join(','),
   staffDefault.join(' · '));
 

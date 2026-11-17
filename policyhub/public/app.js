@@ -2224,7 +2224,38 @@ const CELL = {
   status: (p) => statusBadge(p.status),
   pct: (p, f) => `<span class="strong">${Number(p[f.key] || 0).toFixed(
     Number(p[f.key]) % 1 ? 4 : 0)}%</span>`,
+  /* A tick box, live on the grid for anybody who may edit a policy; a
+     plain mark for a viewer. See the `data-flag` listener below. */
+  flag: (p, f) => flagBox(p, f.key, f.header),
 };
+
+/* ----------------------- ROP and age-100 issue -----------------------
+ * Two yes/no facts about a policy that the desk keeps: whether it carries
+ * a return-of-premium feature, and whether it has an age-100 issue.
+ * Ticked wherever the policy is in front of somebody -- a row of the
+ * policies grid, or its own page -- and saved the moment the box changes.
+ * ------------------------------------------------------------------- */
+const POLICY_FLAGS = [['rop', 'ROP'], ['age100_issue', 'Age 100 issue']];
+const flagBox = (p, key, label) => (canEditData()
+  ? `<span class="flag-cell"><input type="checkbox" data-flag="${key}" data-policy="${p.id}"
+      aria-label="${esc(label)} — ${esc(p.policy_number || '')}" ${p[key] ? 'checked' : ''}></span>`
+  : (p[key] ? '<span class="strong" title="Yes">✓</span>' : '<span class="muted">—</span>'));
+document.addEventListener('change', async (e) => {
+  const box = e.target.closest?.('input[data-flag]');
+  if (!box) return;
+  const { flag, policy } = box.dataset;
+  const label = (POLICY_FLAGS.find(([k]) => k === flag) || [flag, flag])[1];
+  box.disabled = true;
+  try {
+    await api(`/policies/${policy}`, { method: 'PUT', body: { [flag]: box.checked } });
+    const row = (state.policies || []).find((x) => Number(x.id) === Number(policy));
+    if (row) row[flag] = box.checked;
+    toast(`${label} ${box.checked ? 'ticked' : 'cleared'}`);
+  } catch (err) {
+    box.checked = !box.checked;
+    toast(`That was not saved: ${err.message}`);
+  } finally { box.disabled = false; }
+});
 /** Numbers line up right; everything else reads left. */
 const NUM_TYPES = new Set(['money', 'int', 'age', 'pct']);
 /** Sorting needs the value, not the markup — and for money, the share of it. */
@@ -2635,7 +2666,7 @@ async function policiesView() {
         tr.addEventListener('click', (e) => {
           // A tick is not a navigation. Without this, choosing a policy to
           // delete opens it instead.
-          if (e.target.closest('td.tick')) return;
+          if (e.target.closest('td.tick, .flag-cell')) return;
           go(`#/policy/${tr.dataset.id}`);
         }));
 
@@ -3018,6 +3049,7 @@ function overviewTab(p, values, irr) {
         ${row('Owner / fund', esc(p.fund_code || '—'))}
         ${row('Owner account', esc(p.owner_account) || dash)}
         ${row('Beneficiary', esc(p.beneficiary) || dash)}
+        ${isInvestorUser() ? '' : POLICY_FLAGS.map(([k, label]) => row(label, flagBox(p, k, label))).join('')}
         ${row('Status', statusBadge(p.status))}
       </dl></div>
     </div>
@@ -4290,9 +4322,17 @@ async function openPolicyDialog(p = null) {
       and whatever of the health picture you decide they should have. Put in it only what
       you would hand over, because this is the link they get. Who may actually open the
       folder is decided by the folder's own sharing settings, not here.</span></div>
+    <div class="field-row">
+      ${POLICY_FLAGS.map(([k, label]) => `<label class="dlg-check" style="margin:0">
+        <input type="checkbox" name="${k}" value="yes" ${p?.[k] ? 'checked' : ''}>
+        <span><strong>${label}</strong>${k === 'rop' ? ' — return of premium' : ''}</span></label>`).join('')}
+    </div>
     <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(p?.notes || '')}</textarea></div>`;
 
   const dlg = openDialog(p ? 'Edit policy' : 'New policy', body, async (v) => {
+    /* An unticked box sends nothing, which would leave the flag as it was;
+       say what both are, every time. */
+    for (const [k] of POLICY_FLAGS) v[k] = !!dlg.querySelector(`input[name="${k}"]`)?.checked;
     if (v.fund_code === '__new__') {
       const code = String(v.new_fund_code || '').trim();
       if (!code) throw new Error('Give the new entity a code, or pick an existing owner');

@@ -852,6 +852,7 @@ const scheduleCell = (f, p) => {
     case 'age': return ageFrom(p.insured_dob) ?? '—';
     case 'int': return v == null || v === '' ? '—' : Number(v).toLocaleString('en-US');
     case 'sex': return esc(v || '—');
+    case 'flag': return v ? 'Yes' : '—';
     case 'status': case 'product': case 'owner': case 'strong': case 'text':
     default: return softBreak(esc(v ?? '')) || '—';
   }

@@ -94,6 +94,12 @@ export const POLICY_FIELDS = [
   { key: 'value_as_of', header: 'Values as of', type: 'date', group: 'Carrier values',
     staffOnly: true, default: true },
 
+  /* Two ticks the desk keeps on every policy. Staff only; on the grid by
+     default so they can be ticked down the list without opening anything. */
+  { key: 'rop', header: 'ROP', type: 'flag', group: 'Policy', staffOnly: true, default: true },
+  { key: 'age100_issue', header: 'Age 100 issue', type: 'flag', group: 'Policy',
+    staffOnly: true, default: true },
+
   { key: 'status', header: 'Status', type: 'status', group: 'Status', default: true },
   { key: 'status_date', header: 'Status date', type: 'date', group: 'Status' },
   { key: 'matured_on', header: 'Matured', type: 'date', group: 'Status' },

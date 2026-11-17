@@ -1,13 +1,17 @@
-PolicyHub build 2026-11-16b  (includes everything since 2026-11-01a)
+PolicyHub build 2026-11-17a  (includes everything since 2026-11-01a)
 
-If you already uploaded 2026-11-16a, only these changed:
-  src/auth.js, src/mail.js, public/app.js, public/build.js
+If you already uploaded 2026-11-16b, only these changed:
+  src/api.js, src/schema.sql
+  public/app.js, public/policy-fields.js, public/reports.js, public/styles.css, public/build.js
 Otherwise upload everything: src/ -> policyhub/src, public/ -> policyhub/public,
 public/vendor/ -> policyhub/public/vendor.
 
-New: change a user's sign-in email
-  Settings -> Users -> Edit (on their row) -> Sign-in email -> Save.
-  Administrators only. The address must be new to the system. Saving signs that
-  person out everywhere (their password stays the same) and emails a notice to
-  both the old and the new address. The change is in the activity log.
-  Its wording can be edited under Email wording ("Your sign-in email was changed").
+The database adds the two new fields itself on the next start. Every existing
+policy starts with both boxes unticked.
+
+New: "ROP" and "Age 100 issue" tick boxes on every policy
+- Policies grid: two new columns with a tick box in every row. Tick or untick
+  right there; it saves at once, without opening the policy.
+- Policy page (Overview -> Policy card) and Edit policy: the same two boxes.
+- Policy schedule report: shows Yes where ticked, if you add the columns.
+- Staff only. Investors and CFO logins do not see them.

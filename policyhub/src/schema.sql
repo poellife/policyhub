@@ -320,6 +320,13 @@ ALTER TABLE policies ADD COLUMN IF NOT EXISTS commission_pct NUMERIC;
    administrator when they want the return after it. NULL = not used. Here,
    before policy_latest is rebuilt, so the view carries it. */
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS cost_of_capital_pct NUMERIC;
+/* Two flags on every policy, ticked or not by the desk:
+   rop           -- the policy carries a return-of-premium feature
+   age100_issue  -- the policy has an age-100 issue (it matures or its
+                    coverage changes at 100, which matters on an old life)
+   Before policy_latest is rebuilt, so the view carries them. */
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS rop BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS age100_issue BOOLEAN NOT NULL DEFAULT FALSE;
 
 /* Whether the one-pager itemises every transaction.
  *

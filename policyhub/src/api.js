@@ -507,6 +507,8 @@ const POLICY_FIELDS = {
   /* The folder the investors are given, which is not the case folder.
      Same guard: http and https only. */
   investor_url: url,
+  /* Return of premium, and an age-100 issue: two ticks the desk keeps. */
+  rop: bool, age100_issue: bool,
 };
 
 const INSURED_FIELDS = {
@@ -1807,7 +1809,7 @@ router.use((req, res, next) => {
     };
     return next();
   }
-  res.json = (body) => send(res.locals.identified ? body : deidentify(body));
+  res.json = (body) => send(withoutKeys(res.locals.identified ? body : deidentify(body), DESK_FLAGS));
   next();
 });
 
@@ -1859,11 +1861,15 @@ router.use((req, res, next) => {
   next();
 });
 
+/* The desk's two policy flags (ROP, age-100 issue) are staff working notes:
+   not sent to an investor or a CFO login. */
+const DESK_FLAGS = new Set(['rop', 'age100_issue']);
 function withoutShare(value) {
   if (Array.isArray(value)) return value.map(withoutShare);
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
   const out = {};
-  for (const [k, v] of Object.entries(value)) if (k !== 'my_pct') out[k] = withoutShare(v);
+  for (const [k, v] of Object.entries(value))
+    if (k !== 'my_pct' && !DESK_FLAGS.has(k)) out[k] = withoutShare(v);
   return out;
 }
 
