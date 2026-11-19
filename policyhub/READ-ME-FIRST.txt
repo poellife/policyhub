@@ -1,17 +1,12 @@
-PolicyHub build 2026-11-17d  (includes everything since 2026-11-01a)
+PolicyHub build 2026-11-19a  (requires build 2026-11-17d already uploaded)
 
-If you already uploaded 2026-11-17c, only these changed:
-  src/api.js
-  public/app.js, public/reports.js, public/styles.css, public/build.js
-Otherwise upload everything: src/ -> policyhub/src, public/ -> policyhub/public,
-public/vendor/ -> policyhub/public/vendor.
+Upload:
+  src/mortality-watch.js          -> policyhub/src
+  public/app.js, public/build.js  -> policyhub/public
 
-New: sort a report your way
-- Reports page: "Sort by" and "Order" appear for the Valuation, Average age,
-  Policy schedule and the two Return reports.
-- Sort by insured name, carrier (company), owner entity, age, death benefit,
-  total invested or policy number, either direction.
-- Sorted by carrier or by owner entity, the Valuation and Average age reports
-  group the policies under each one with a subtotal.
-- Print and the PDF / CSV / Excel downloads follow what is on screen.
-- Your last choice is remembered. "The report's own order" puts it back.
+Change: Mortality Watch no longer searches on its own. A search runs only when
+an administrator presses "Run now" on the Mortality Watch page.
+
+If Render has an environment variable MW_SCHEDULE set to "on" or "daily",
+remove it (or set it to "off"), or the daily search will keep running.
+To bring the daily search back later, set MW_SCHEDULE=on in Render.

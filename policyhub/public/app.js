@@ -13621,7 +13621,7 @@ async function mortalityView() {
         <div><h1>Mortality Watch</h1>
           <div class="sub">Watching <strong>${d.watched_count}</strong> ${d.watched_count === 1 ? 'person' : 'people'} ·
             ${sched.enabled ? `sweeps daily after ${hourWord} ${esc(sched.tz.replace('America/', '').replace('_', ' '))} time`
-    : 'daily sweep switched off on this server'}${last ? ` · last sweep ${fmtDateTime(last.started_at)}` : ''}${
+    : 'searches run only when you press Run now — nothing runs on its own'}${last ? ` · last sweep ${fmtDateTime(last.started_at)}` : ''}${
   d.overdue_count ? ` · <span class="mw-warn">${d.overdue_count} overdue for proof of life</span>` : ''}</div></div>
         <div class="spacer"></div>
         <button id="mwCheck">Check a name</button>
@@ -13686,7 +13686,7 @@ async function mortalityView() {
           <span>days</span>
           <button class="btn-sm" id="mwOverdueSave">Save</button>
           <span class="muted" style="font-size:12px">Counted from the last piece of evidence, or from
-            when they were first watched. The daily email names each person once when they go over.</span>
+            when they were first watched. The email after a search names each person once when they go over.</span>
         </div>
       </div>
 

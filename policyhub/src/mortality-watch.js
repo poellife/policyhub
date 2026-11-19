@@ -619,6 +619,22 @@ export function buildLifeQueries(p, maxQueries = 2) {
 const DEATH_WORDS = /\b(obituar(?:y|ies)|passed away|died|in loving memory|funeral|shiva|memorial service|survived by|predeceased|interment|entered into rest|levaya|aveilim)\b/i;
 export const readsAsDeathNotice = (text) => DEATH_WORDS.test(String(text || ''));
 
+/* What a page has to say before it can be filed as a DEATH notice.
+
+   The scorer answers "is this our person?" and nothing else, so a page
+   that names the insured, her husband and her state scores well whether
+   it announces a death or not -- and a people-search listing ("Ruth Katz
+   · Sy R Katz · related to… · has lived in Tarzana") does exactly that.
+   So a web page must also SAY somebody died.
+
+   Narrower than DEATH_WORDS above on purpose: "obituary" on its own is
+   not evidence, because people-search and genealogy sites carry it in
+   their navigation and their titles ("Find obituaries"). The words here
+   are the ones an actual notice uses about the person. A vendor's death
+   file is exempt: every row in it is a death record. */
+const DEATH_EVIDENCE = /\b(passed away|passed on|died|death of|entered into (?:eternal )?rest|went home to be with|funeral|shiva|memorial service|celebration of life|survived by|predeceased|interment|laid to rest|levaya|aveilim|in loving memory)\b/i;
+export const saysSomebodyDied = (text) => DEATH_EVIDENCE.test(String(text || ''));
+
 export const PROVIDERS = {
   brave: { env: 'BRAVE_API_KEY', label: 'Brave Search' },
   google_cse: { env: 'GOOGLE_API_KEY', label: 'Google Programmable Search' },
@@ -856,7 +872,7 @@ export class VendorFile {
       const name = [r.first_name, r.middle_name, r.last_name].filter(Boolean).join(' ');
       return {
         url: r.reference ? `vendor://${this.name}/${r.reference}` : r._ref,
-        source_name: this.name, title: name, name,
+        source_name: this.name, title: name, name, structured: true,
         text: `${name} died ${r.dod} in ${r.city}, ${r.state}`,
         dob: parseLooseDate(r.dob), dod: parseLooseDate(r.dod),
         city: r.city || null, state: r.state || null,
@@ -1051,6 +1067,8 @@ async function fileMatches(p, row, cands, seen, known, on) {
        of a page that must not be a death notice. One that reads as one is
        left to the death search, which will find it on its own terms. */
     if (c.life && readsAsDeathNotice(`${c.title}\n${c.text}`)) continue;
+    /* And the other way round: a death notice has to say somebody died. */
+    if (!c.life && !c.structured && !saysSomebodyDied(`${c.title}\n${c.text}`)) continue;
     const r = score(p, c, on);
     if (r.discarded_reason || r.score < POSSIBLE) continue;
     const kind = c.life ? 'life' : 'death';
@@ -1194,6 +1212,11 @@ export async function checkOnce(input, on = today()) {
         if (seen.has(c.url)) continue;
         seen.add(c.url);
         if (c.life && readsAsDeathNotice(`${c.title}\n${c.text}`)) continue;
+        if (!c.life && !c.structured && !saysSomebodyDied(`${c.title}\n${c.text}`)) {
+          out.push({ url: c.url, source_name: c.source_name, title: c.title, score: 0,
+            factors: [], discarded_reason: 'not_a_death_notice', tier: 'discarded', kind: 'death' });
+          continue;
+        }
         const s = score(p, c, on);
         out.push({ url: c.url, source_name: c.source_name, title: c.title, ...s, tier: tierOf(s),
           kind: c.life ? 'life' : 'death' });
@@ -1213,7 +1236,10 @@ export async function checkOnce(input, on = today()) {
  * means a restart at 7am does not skip the day, and two instances do
  * not both run it -- the advisory lock above settles that.
  *
- * MW_SCHEDULE=off turns it off (the test server does).
+ * OFF unless asked for. A sweep runs when an administrator presses Run
+ * now, and at no other time; the office asked for it not to search on its
+ * own. Setting MW_SCHEDULE=on (or "daily") on the server brings the daily
+ * sweep back without a code change.
  * ------------------------------------------------------------------ */
 
 export function localHour(tz, at = new Date()) {
@@ -1228,7 +1254,7 @@ export function localDay(tz, at = new Date()) {
 }
 
 export const scheduleSettings = () => ({
-  enabled: String(process.env.MW_SCHEDULE || 'on').toLowerCase() !== 'off',
+  enabled: ['on', 'daily'].includes(String(process.env.MW_SCHEDULE || 'off').toLowerCase()),
   hour: Number.isFinite(Number(process.env.MW_RUN_HOUR)) && process.env.MW_RUN_HOUR !== ''
     ? Number(process.env.MW_RUN_HOUR) : 6,
   tz: process.env.MW_TIMEZONE || 'America/Detroit',
@@ -1245,7 +1271,8 @@ export async function ranToday(tz, at = new Date()) {
 export function startMortalitySchedule({ onDone, everyMs = 15 * 60_000 } = {}) {
   const cfg = scheduleSettings();
   if (!cfg.enabled) {
-    console.log('[mortality] daily sweep is switched off (MW_SCHEDULE=off)');
+    console.log('[mortality] no automatic sweep: searches run only when started by hand '
+      + '(set MW_SCHEDULE=on to run one daily)');
     return null;
   }
   const tick = async () => {
